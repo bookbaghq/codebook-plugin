@@ -337,7 +337,7 @@ export async function drawPane($: EngineInterface, e: RenderInput): Promise<Rend
             )}
             <Box flexDirection="row" gap={1}>
               <Button key="approve" variant="primary" onPress={() => approve($)}>
-                {working === 'approve' ? 'Approving…' : 'Approve'}
+                Approve
               </Button>
               <Button key="send-back" onPress={() => update($, sendingBack, v => !v)}>
                 Send back
@@ -348,7 +348,7 @@ export async function drawPane($: EngineInterface, e: RenderInput): Promise<Rend
               <Input
                 key="reason"
                 placeholder="Say what to fix"
-                submitLabel={working === 'send_back' ? 'Sending…' : 'Send back'}
+                submitLabel="Send back"
                 onSubmit={value => sendBack($, value)}
               />
             ) : null}
@@ -357,11 +357,15 @@ export async function drawPane($: EngineInterface, e: RenderInput): Promise<Rend
         {isWorkHere ? (
           <Button
             key="work-here"
-            onPress={() =>
-              $.prompt.submit({
-                text: `CodeBook: use the codebook:factory-worker agent to claim run ${st?.waitingRun} of story ${a.reference} ("${a.title}", ${a.factoryName}) and work it in this checkout.`,
+            onPress={async () => {
+              const filled = await $.prompt.fill({
+                text: `Use the codebook:factory-worker agent to claim CodeBook run ${st?.waitingRun} of story ${a.reference} ("${a.title}", ${a.factoryName}) and work it in this checkout.`,
+                mode: 'replace',
               })
-            }
+              await update($, notice, () =>
+                filled.isFilled ? 'The request is in your prompt box: press Enter to send it.' : 'Ask Claude to work it with the codebook:factory-worker agent.',
+              )
+            }}
           >
             Work it here
           </Button>
@@ -457,14 +461,10 @@ export async function drawPane($: EngineInterface, e: RenderInput): Promise<Rend
             <Input
               key="title"
               placeholder="Add a discount to the order total"
-              submitLabel={working === 'start' ? 'Starting…' : 'Start'}
+              submitLabel="Start"
               onSubmit={async value => {
                 if (value.trim() === '') return
-                await update($, busy, () => 'start')
-                const started = await startStory($, chosen.factory, value.trim(), m)
-                await update($, busy, () => null)
-                await update($, notice, () => started.text)
-                if (started.ok) await update($, picked, () => null)
+                await startStory($, chosen.name, value.trim(), m)
               }}
             />
           ) : (

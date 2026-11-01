@@ -1,4 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
+import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 // A story in the "Payments" factory: Plan passed, Build waits for this person's runner, Review is a person (you).
@@ -80,6 +81,7 @@ type Calls = { tool: string; args: Record<string, unknown> }[]
 function engine(on: On, at: { now: At }) {
   const calls: Calls = []
   const prompts: string[] = []
+  const filled: string[] = []
   mock.store(on)
   const clock = mock.clock(on, { now: 1_000_000 })
   on('command.register', () => ({ value: { command: 'factory' } }))
@@ -89,7 +91,41 @@ function engine(on: On, at: { now: At }) {
     prompts.push(e.text)
     return { text: e.text }
   })
+  on('prompt.fill', (_, e) => {
+    filled.push(e.text)
+    return { isFilled: true, box: { text: e.text, cursor: e.text.length } }
+  })
   on('mcp.connect', () => ({ value: { isConnected: true, server: 'plugin:codebook:codebook' } }))
+  // The model's own calls of the connector (what the person sends after the pane offers it) answer the same way.
+  on('tool.call', (_, e) => {
+    const tool = String(e.tool).replace('mcp__plugin_codebook_codebook__', '')
+    const { tool: _name, tool_use_id: _id, ...args } = e as Record<string, unknown>
+    calls.push({ tool, args })
+    const data = answer(tool, args)
+    return { result: { content: [{ type: 'text', text: JSON.stringify(data) }], structuredContent: data }, text: JSON.stringify(data) }
+  })
+  function answer(tool: string, args: Record<string, unknown>) {
+    return tool === 'start_story'
+        ? {
+            story: { story: '6KjN', reference: '#57', title: String(args.title) },
+            factory: { factory: 'k3Vb9QmZ', name: 'Payments' },
+            workflow: { workflow: 'wf12', name: 'Delivery' },
+            station: { station: 'col40', name: 'Plan' },
+            run: { run: 810, state: 'queued' },
+            url: 'https://app.codebook.work/workspace/ws1/factory/k3Vb9QmZ?card=6KjN',
+          }
+        : tool === 'factory_board'
+          ? BOARD
+          : tool === 'story_status'
+            ? status(at.now)
+            : tool === 'approve_station'
+              ? { decided: 'approved', run: 812, next: 'Review approved; the story moves on.' }
+              : tool === 'list_factories'
+                ? { factories: [{ factory: 'k3Vb9QmZ', name: 'Payments', workspace: { name: 'Claims' }, may_start_stories: true }], total: 1 }
+                : tool === 'set_run_location'
+                  ? { next: "The story's agent stations now run in CodeBook." }
+                  : { error: { code: 'NOT_FOUND', message: 'no such tool here' } }
+  }
   on('mcp.call', (_, e) => {
     calls.push({ tool: e.tool, args: e.args })
     const data =
@@ -118,7 +154,17 @@ function engine(on: On, at: { now: At }) {
     const isError = 'error' in data
     return { value: { content: [{ type: 'text', text: JSON.stringify(data) }], structuredContent: data, isError } }
   })
-  return { calls, prompts, clock }
+  return { calls, prompts, filled, clock }
+}
+
+/** What the person does with the request the pane offered: sends it, and Claude starts the story. */
+async function claudeStarts($: Engine, where: 'here' | 'cloud' = 'here') {
+  await $.tool.call({
+    tool: 'mcp__plugin_codebook_codebook__start_story',
+    factory: 'Payments',
+    title: 'Let customers refund a payment',
+    run_location: where,
+  } as never)
 }
 
 const PANE = {
@@ -135,14 +181,18 @@ const PANE = {
   },
 } as const
 
-test('/factory run starts a run-here story and the pane draws its stations', async ($, on) => {
-  const { calls } = engine(on, { now: 'build' })
+test('/factory run offers the start request; once Claude starts it, the pane draws its stations', async ($, on) => {
+  const { calls, filled } = engine(on, { now: 'build' })
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
 
   const ran = await $.command.run(typed('run Payments "Let customers refund a payment"'))
-  expect(ran.text).toContain('Story #57')
-  const started = calls.find(one => one.tool === 'start_story')
-  expect(started?.args).toEqual({ factory: 'Payments', title: 'Let customers refund a payment', run_location: 'here' })
+  expect(ran.text).toContain('press Enter')
+  // The plugin writes nothing itself: the request waits in the person's prompt box.
+  expect(calls.find(one => one.tool === 'start_story')).toBeUndefined()
+  expect(filled[0]).toContain('"Payments"')
+  expect(filled[0]).toContain('run_location "here"')
+
+  await claudeStarts($)
 
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
@@ -158,7 +208,7 @@ test('/factory run starts a run-here story and the pane draws its stations', asy
 test('a station waiting here is handed to the factory-worker once', async ($, on) => {
   const { prompts, clock } = engine(on, { now: 'build' })
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
-  await $.command.run(typed('run Payments "Let customers refund a payment"'))
+  await claudeStarts($)
 
   await clock.advance(5000)
   await clock.advance(5000)
@@ -168,55 +218,50 @@ test('a station waiting here is handed to the factory-worker once', async ($, on
   expect(handed[0]).toContain('run 811')
 })
 
-test('a cloud story is started with run_location cloud', async ($, on) => {
-  const { calls } = engine(on, { now: 'build' })
+test('a cloud story is offered with run_location cloud', async ($, on) => {
+  const { filled } = engine(on, { now: 'build' })
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await $.command.run(typed('cloud'))
   await $.command.run(typed('run Payments "Let customers refund a payment"'))
-  expect(calls.find(one => one.tool === 'start_story')?.args.run_location).toBe('cloud')
+  expect(filled[0]).toContain('run_location "cloud"')
 })
 
-test('a run this person holds is kept alive with its fence', async ($, on) => {
-  const { calls, clock } = engine(on, { now: 'claimed' })
+test('a story typed in the pane is offered, not started', async ($, on) => {
+  const { calls, filled } = engine(on, { now: 'build' })
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
-  await $.command.run(typed('run Payments "Let customers refund a payment"'))
-  await clock.advance(5000)
-  const beat = calls.find(one => one.tool === 'heartbeat_work')
-  expect(beat?.args).toEqual({ run: 811, fence: 3 })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'load' })
+  await ui.press({ key: 'pick-k3Vb9QmZ' })
+  await ui.input({ key: 'title', text: 'Add a discount' })
+  expect(filled[0]).toContain('titled "Add a discount"')
+  expect(calls.find(one => one.tool === 'start_story')).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /press Enter/ })).toBeDefined()
+  await ui.unmount()
 })
 
 test('Run in CodeBook moves the followed story', async ($, on) => {
   const at: { now: At } = { now: 'build' }
-  const { calls } = engine(on, at)
+  const { filled } = engine(on, at)
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
-  await $.command.run(typed('run Payments "Let customers refund a payment"'))
+  await claudeStarts($)
 
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   await ui.press({ key: 'run-cloud' })
-  expect(calls.find(one => one.tool === 'set_run_location')?.args).toEqual({
-    story: '6KjN',
-    factory: 'k3Vb9QmZ',
-    workflow: 'wf12',
-    run_location: 'cloud',
-  })
+  expect(filled.at(-1)).toContain('story id 6KjN')
+  expect(filled.at(-1)).toContain('set_run_location "cloud"')
   await ui.unmount()
 })
 
-test('Approve in the pane approves the review with the pull request heads', async ($, on) => {
-  const { calls } = engine(on, { now: 'review' })
+test('Approve in the pane offers the approval with the pull request heads', async ($, on) => {
+  const { filled } = engine(on, { now: 'review' })
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
-  await $.command.run(typed('run Payments "Let customers refund a payment"'))
+  await claudeStarts($)
 
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   expect(await ui.find({ type: 'Text', text: /Needs you/ })).toBeDefined()
   await ui.press({ key: 'approve' })
-  const approved = calls.find(one => one.tool === 'approve_station')
-  expect(approved?.args).toEqual({
-    story: '6KjN',
-    factory: 'k3Vb9QmZ',
-    workflow: 'wf12',
-    heads: [{ pull_request_id: 5, head_sha: 'abc' }],
-  })
+  expect(filled.at(-1)).toContain('Approve the Review station')
+  expect(filled.at(-1)).toContain('[{"pull_request_id":5,"head_sha":"abc"}]')
   await ui.unmount()
 })
 

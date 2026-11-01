@@ -57,7 +57,7 @@ the station asks, and pass it as an artifact; no branch or pull request is neede
 ## 4. Keep the lease alive
 
 Call `heartbeat_work { run, fence }` between steps, and at least as often as `lease.heartbeat_every_seconds`
-says (300 s by default; the lease itself runs 900 s). The Factory pane also beats while it is open. If a heartbeat
+says (300 s by default; the lease itself runs 900 s). If a heartbeat
 answers CONFLICT (the lease ran out and the run is waiting again), stop: say so, report nothing, and leave your
 branch as it is. The person can claim it again from the pane.
 

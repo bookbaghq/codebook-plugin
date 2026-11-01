@@ -1,6 +1,6 @@
 // The CodeBook plugin's hooks: the /factory command, the Factory pane beside the chat, and the
-// timer that follows the story, hands run-here stations to the factory-worker agent and keeps
-// their leases alive.
+// timer that follows the story and hands run-here stations to the factory-worker agent. The plugin
+// itself only reads CodeBook; every write is a request the person sends and Claude makes.
 
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
@@ -8,12 +8,13 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { CodebookActive, CodebookLink, CodebookMode, CodebookStory } from '../types'
 import { call, words } from './connector'
 import {
+  adopt,
   follow,
   loadFactories,
   refresh,
   setLink,
   setMode,
-  startStory,
+  startRequest,
   STORE_ACTIVE,
   STORE_MODE,
   unfollow,
@@ -34,13 +35,9 @@ const handed = atom({ plugin: 'codebook', key: 'handed' } as const, [] as number
 
 const POLL_MS = 4000
 const QUIET_POLL_MS = 30000
-// The connector asks for one every 300 s (lease.heartbeat_every_seconds); the worker beats too.
-const HEARTBEAT_MS = 120000
 
 // Module memory: rebuilt after a reload from the next poll.
 let lastPoll = 0
-let lastBeat: Record<number, number> = {}
-let hasHeartbeat = true
 let isPolling = false
 
 function workerPrompt(a: CodebookActive, s: CodebookStory): string {
@@ -66,18 +63,6 @@ async function handOff($: EngineInterface): Promise<void> {
   await $.prompt.submit({ text: workerPrompt(a, s) })
 }
 
-/** Keeps the lease of a run this person holds alive while the worker works it, with the claim's fence (G2 §9). */
-async function heartbeat($: EngineInterface, now: number): Promise<void> {
-  if (!hasHeartbeat) return
-  const s = await read($, story)
-  if (s === null || !s.waitingClaimedByYou || s.waitingRun === null || s.waitingFence === null) return
-  const run = s.waitingRun
-  if (now - (lastBeat[run] ?? 0) < HEARTBEAT_MS) return
-  lastBeat = { ...lastBeat, [run]: now }
-  const beat = await call($, 'heartbeat_work', { run, fence: s.waitingFence })
-  if (!beat.ok && /unknown tool|-32601|-32602|method not found/i.test(beat.message)) hasHeartbeat = false
-}
-
 async function tick($: EngineInterface): Promise<void> {
   if (isPolling) return
   const a = await read($, active)
@@ -91,7 +76,6 @@ async function tick($: EngineInterface): Promise<void> {
     lastPoll = now
     await refresh($)
     await handOff($)
-    await heartbeat($, now)
   } finally {
     isPolling = false
   }
@@ -136,18 +120,41 @@ async function statusText($: EngineInterface): Promise<{ text: string; context?:
   return { text, context: [JSON.stringify({ codebook_story: a, stations: s.stations, waiting: s.waitingOn })] }
 }
 
-/** The plugin's own connector tools, as the permission check names them. */
+/** The plugin's own connector tools, as the permission check and tool.call name them. */
 const OWN_TOOLS = 'mcp__plugin_codebook_codebook__'
+/** The reads the pane makes by itself (following the story the person chose); writes go through the person. */
+const OWN_READS = new Set(['list_factories', 'factory_board', 'story_status', 'list_my_work'].map(name => OWN_TOOLS + name))
+
+/** A connector result as a tool call answers it: the structured payload, else its text as JSON. */
+function payloadOf(ran: { result?: unknown; text?: string }): unknown {
+  const structured = (ran.result as { structuredContent?: unknown } | undefined)?.structuredContent
+  if (structured !== undefined) return structured
+  try {
+    return ran.text ? JSON.parse(ran.text) : null
+  } catch {
+    return null
+  }
+}
 
 export const register: Register = on => {
-  // The pane's and /factory's own calls to the connector: the person's press or command (or the timer that follows the
-  // story they chose) is the grant. Auto mode's classifier judges the model's requests and has no verdict for these,
-  // so they are allowed here. The model's own calls of the same tools are not touched (their origin is the engine).
+  // The pane's own READS of the connector (listing factories, following the story the person chose): auto mode's
+  // classifier judges the model's requests and has no verdict for a timer's read, so these are allowed here. Nothing
+  // else is: writes are requests the person sends, and the model's calls keep the person's permission settings.
   on('tool.check', ($, e, next) =>
-    next.origin.plugin === $.plugin.name && e.tool.startsWith(OWN_TOOLS)
-      ? { decision: 'allow', reason: 'The CodeBook Factory pane or /factory, on the person’s behalf.' }
+    next.origin.plugin === $.plugin.name && OWN_READS.has(e.tool)
+      ? { decision: 'allow', reason: 'The CodeBook Factory pane following the story you chose (read only).' }
       : next(e),
   ).catch(($, e, next) => next(e))
+
+  // Claude's calls of the connector (the requests the pane offered, the factory-worker's reports): the pane takes
+  // up a started story and refreshes after the rest.
+  on('tool.call', async ($, e, next) => {
+    const ran = await next(e)
+    const tool = String(e.tool)
+    if (!tool.startsWith(OWN_TOOLS) || OWN_READS.has(tool) || ran.deny !== undefined || ran.isError) return ran
+    await adopt($, tool.slice(OWN_TOOLS.length), payloadOf(ran))
+    return ran
+  }).catch(($, e, next) => next(e))
 
   on('session.start', async ($, e, next) => {
     await $.command.register({
@@ -209,17 +216,13 @@ export const register: Register = on => {
       })
       if (args.length < 2) return { text: `Usage: /factory run <factory> "<story title>"\n\n${HELP}` }
       const [factory = '', ...title] = args
-      const started = await startStory($, factory, title.join(' '), where)
-      if (!started.ok) return { text: started.text }
+      const request = startRequest(factory, title.join(' '), where)
+      const filled = await $.prompt.fill({ text: request, mode: 'replace' })
       await openPane($)
       return {
-        text: started.text,
-        context: [
-          `The CodeBook story ${started.active.reference} (story id ${started.active.story}, factory ${started.active.factory}) is followed in the Factory pane. ` +
-            (where === 'here'
-              ? 'When one of its agent stations waits here, the pane asks you to work it with the codebook:factory-worker agent.'
-              : "Its agent stations run in CodeBook's cloud; nothing to do here unless the person asks."),
-        ],
+        text: filled.isFilled
+          ? 'The request to start the story is in your prompt box: press Enter to send it. The Factory pane follows the story once CodeBook has it.'
+          : `Send this in the chat to start the story: ${request}`,
       }
     }
 

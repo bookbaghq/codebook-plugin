@@ -282,6 +282,29 @@ export async function unfollow($: EngineInterface): Promise<void> {
 }
 
 /** Sets where the next stories run and, when a story is followed, moves that story there too (set_run_location). */
+// Writes go through the person and Claude, never straight from the pane: the desktop's auto mode judges each write
+// against the request that asked for it, and a button press is no request. So a press puts the request, in plain
+// words, into the person's prompt box; they send it with Enter, Claude makes the call, and adopt() below folds the
+// answer back into the pane. Where the box cannot take it, the words are copied for them to paste.
+
+/** Offers the person's request in their prompt box (or on the clipboard); the person sends it. */
+async function offer($: EngineInterface, text: string, what: string): Promise<void> {
+  const filled = await $.prompt.fill({ text, mode: 'replace' })
+  if (filled.isFilled) {
+    await update($, notice, () => `${what} is in your prompt box: press Enter to send it.`)
+    return
+  }
+  const copied = await $.ui.copy({ text })
+  await update($, notice, () =>
+    copied.isCopied ? `${what} is copied: paste it into the chat and send it.` : `Send this in the chat: ${text}`,
+  )
+}
+
+function storyRef(a: CodebookActive): string {
+  return `CodeBook story ${a.reference} "${a.title}" (story id ${a.story}, factory ${a.factoryName}, factory id ${a.factory}${a.workflow ? `, workflow ${a.workflow}` : ''})`
+}
+
+/** Sets where the next stories run and, when a story is followed, offers the request that moves it too. */
 export async function setMode($: EngineInterface, to: CodebookMode): Promise<string | null> {
   await update($, mode, () => to)
   await $.store.set(STORE_MODE, to)
@@ -300,76 +323,74 @@ export async function setMode($: EngineInterface, to: CodebookMode): Promise<str
     await update($, notice, () => said)
     return said
   }
-  const args: Record<string, unknown> = { story: a.story, factory: a.factory, run_location: to }
-  if (a.workflow) args.workflow = a.workflow
-  const moved = await call<{ next?: string }>($, 'set_run_location', args)
-  const said = moved.ok
-    ? (moved.data.next ?? (to === 'here' ? 'Its agent stations now run here.' : "Its agent stations now run in CodeBook's cloud."))
-    : moved.message
-  await update($, notice, () => said)
-  await refresh($)
-  return said
+  await offer(
+    $,
+    `Move the agent stations of ${storyRef(a)} to ${to === 'here' ? 'run here, on my computer (set_run_location "here")' : 'run in CodeBook\'s cloud (set_run_location "cloud")'}.`,
+    'The request to move the story',
+  )
+  return null
 }
 
-/** Starts a story; with run here, CodeBook leaves its agent stations to this Claude. */
-export async function startStory(
-  $: EngineInterface,
-  factory: string,
-  title: string,
-  where: CodebookMode,
-  description?: string,
-): Promise<{ ok: true; text: string; active: CodebookActive } | { ok: false; text: string }> {
-  const args: Record<string, unknown> = { factory, title, run_location: where }
-  if (description) args.description = description
-  const got = await call<Started>($, 'start_story', args)
-  await setLink($, got)
-  if (!got.ok) return { ok: false, text: `CodeBook did not start the story: ${got.message}` }
-  const s = got.data
-  const a: CodebookActive = {
-    story: s.story.story,
-    factory: s.factory.factory,
-    factoryName: s.factory.name,
-    workflow: s.workflow?.workflow ?? null,
-    reference: s.story.reference,
-    title: s.story.title,
-    url: s.url ?? null,
+/** The words that ask Claude to start a story; with run here, CodeBook leaves its agent stations to this Claude. */
+export function startRequest(factory: string, title: string, where: CodebookMode): string {
+  return (
+    `Start a story in the CodeBook factory "${factory}" titled "${title.replace(/"/g, "'")}", ` +
+    (where === 'here'
+      ? 'with its agent stations run here, on my computer (start_story with run_location "here").'
+      : 'with its agent stations run in CodeBook\'s cloud (start_story with run_location "cloud").')
+  )
+}
+
+/** Offers the start request from the pane. */
+export async function startStory($: EngineInterface, factory: string, title: string, where: CodebookMode): Promise<void> {
+  await offer($, startRequest(factory, title, where), 'The request to start the story')
+}
+
+/** Folds the answer of a connector call Claude made back into the pane: a started story is followed, others refresh. */
+export async function adopt($: EngineInterface, tool: string, data: unknown): Promise<void> {
+  if (tool === 'start_story') {
+    const s = data as Started | null
+    if (!s?.story?.story) return
+    await follow($, {
+      story: s.story.story,
+      factory: s.factory.factory,
+      factoryName: s.factory.name,
+      workflow: s.workflow?.workflow ?? null,
+      reference: s.story.reference,
+      title: s.story.title,
+      url: s.url ?? null,
+    })
+    await update($, notice, () => (s.next ? s.next : `Following ${s.story.reference}.`))
+    return
   }
-  await follow($, a)
-  const at = s.station ? ` It is at ${s.station.name}.` : ''
-  const runs = where === 'here' ? 'Its agent stations run here, in this checkout.' : "Its agent stations run in CodeBook's cloud."
-  return {
-    ok: true,
-    active: a,
-    text: `Story ${a.reference} "${a.title}" is in the ${a.factoryName} factory.${at} ${runs}${a.url ? `\n${a.url}` : ''}`,
-  }
+  const said = (data as { next?: unknown } | null)?.next
+  if (typeof said === 'string') await update($, notice, () => said)
+  if ((await read($, active)) !== null) await refresh($)
 }
 
 export async function approve($: EngineInterface): Promise<void> {
   const a = await read($, active)
   const s = await read($, story)
   if (a === null || s === null) return
-  await update($, busy, () => 'approve')
-  const args: Record<string, unknown> = { story: a.story, factory: a.factory }
-  if (a.workflow) args.workflow = a.workflow
-  if (s.pullRequests.length > 0) {
-    args.heads = s.pullRequests.map(pr => ({ pull_request_id: pr.pull_request_id, head_sha: pr.head_sha }))
-  }
-  const got = await call<{ next?: string }>($, 'approve_station', args)
-  await update($, busy, () => null)
-  await update($, notice, () => (got.ok ? (got.data.next ?? 'Approved.') : got.message))
-  await refresh($)
+  const station = s.stations.find(one => one.isCurrent)?.name ?? 'current'
+  const heads = s.pullRequests.map(pr => ({ pull_request_id: pr.pull_request_id, head_sha: pr.head_sha }))
+  await offer(
+    $,
+    `Approve the ${station} station of ${storyRef(a)} with approve_station` +
+      (heads.length > 0 ? `, binding the pull request heads ${JSON.stringify(heads)}.` : '.'),
+    'The approval',
+  )
 }
 
 export async function sendBack($: EngineInterface, reason: string): Promise<void> {
   const a = await read($, active)
+  const s = await read($, story)
   if (a === null || reason.trim() === '') return
-  await update($, busy, () => 'send_back')
-  const args: Record<string, unknown> = { story: a.story, factory: a.factory, reason: reason.trim() }
-  if (a.workflow) args.workflow = a.workflow
-  const got = await call<{ next?: string }>($, 'send_back', args)
-  await update($, busy, () => null)
-  await update($, sendingBack, () => !got.ok)
-  await update($, notice, () => (got.ok ? (got.data.next ?? 'Sent back.') : got.message))
-  await refresh($)
+  const station = s?.stations.find(one => one.isCurrent)?.name ?? 'current'
+  await update($, sendingBack, () => false)
+  await offer(
+    $,
+    `Send the ${station} station of ${storyRef(a)} back with send_back, reason: "${reason.trim().replace(/"/g, "'")}".`,
+    'The send-back',
+  )
 }
-

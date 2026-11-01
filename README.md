@@ -47,7 +47,8 @@ do what you can do on app.codebook.work.
 | `/factory stop` | Stops following; the story keeps moving on app.codebook.work. |
 
 The pane shows the story's stations as cards. A station that waits for you shows **Approve** and **Send back**
-(with the pull request to look at); both do exactly what the buttons on app.codebook.work do.
+(with the pull request to look at); both do exactly what the buttons on app.codebook.work do, once you send the
+request they put in your prompt box.
 
 ## The two run modes
 
@@ -76,10 +77,10 @@ if it is the wrong one.
 
 ## Permissions
 
-The Factory pane and `/factory` call the CodeBook connector themselves: when you press a button, type the command, or
-while the pane follows the story you chose. Claude Code's auto mode judges only requests the model makes, so the
-plugin approves these calls of its own, to its own connector and nothing else. Claude's own calls of the CodeBook
-tools (for example the factory-worker's) still go through your permission settings as usual.
+The plugin itself only **reads** CodeBook: the pane lists your factories and follows the story you chose. Every
+change is yours to send. Start, Approve, Send back and moving a story to Claude or to CodeBook put the request,
+in plain words, into your prompt box; you press Enter, and Claude makes the call under your usual permission
+settings (in auto mode, the auto-mode check judges it like anything you type). The pane picks up the answer.
 
 ## What is sent where
 
