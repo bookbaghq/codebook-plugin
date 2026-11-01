@@ -41,13 +41,25 @@ here stories alone. You talk to CodeBook only through the `codebook` connector's
   with that skill as its instructions and the person's request, asking for 1–6 small stories, each with a title, a
   description with acceptance criteria, and a risk (low / medium / high). Then call `propose_stories` with the
   person's words as `request` and those stories. When the author station is a crew, its `leader` writes them.
-- **A request, and no story-writing agent** (`author` is null): say so and offer to add one ("Shall I add a business
-  analyst to write the stories?"). On yes, if `you.may_manage_factory` is true and the connector has the factory
-  tools (`list_agents`, `browse_marketplace`, `install_agent`, `create_agent`, `publish_agent`,
-  `assign_station_worker`, `add_station`): look in the workspace's agents first, then the marketplace, and only if
-  there is none create one, publish it to the organization's marketplace and assign it to the author station, telling
-  the person each step. Otherwise offer to write the stories with the person in the chat instead, or say that someone
-  who manages the factory can add the agent on app.codebook.work.
+- **A request, and no story-writing agent** (`author` is null): say so. If `you.may_manage_factory` is false, say
+  why (`you.manage_refusal`) and offer to write the stories with the person in the chat, or say that someone who
+  manages the factory can add a story writer on app.codebook.work. If it is true, offer to add one ("Shall I add a
+  business analyst to write the stories?") and, on yes, walk CodeBook's agents (`tools.agents`), **asking the person
+  before each step that changes their factory** (installing, creating, publishing, putting on a station):
+  1. `list_agents { factory }`: an active agent in `story_writers` (the workspace has one, not on a station) → step 4.
+  2. `browse_marketplace { factory, writes_stories: true }`: show the `organization_section` entries first, then
+     `public`, with name, specialty and description; on the person's pick, `install_agent { factory, template }` →
+     step 4.
+  3. Nothing fits: write the agent's skill yourself (its whole working method: role, inputs, steps, the stories'
+     format with acceptance criteria, what it never does), show it, and on yes `create_agent { factory, name,
+     specialty, skill }` (it is also a draft in Agent studio: give the `studio_url`). Then offer `publish_agent`: it
+     goes to the organization's own section of the marketplace, visible to its workspaces only, never the public one.
+  4. Put it on a station: `assign_station_worker { factory, station, agent }` on an existing station with no worker,
+     else `add_station { factory, name: "Stories", agent, first: true }`. Call `manager_brief` again: `author` is now
+     that station; go on as above.
+  The first of these changes may open a Bookbag sign-in asking for one more permission ("Change your factories'
+  agents and stations", `you.manage_scope` false): tell the person, and retry the call after they allow it. A
+  `FORBIDDEN` means they may not change this factory: stop the walk and offer the chat instead.
 
 `propose_stories` leaves out stories that are already on the factory (`already_there`): tell the person which, and
 pass `new: true` only when they say it really is different work.

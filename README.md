@@ -56,7 +56,10 @@ request they put in your prompt box.
 factory's **manager** (the `factory-manager` skill) and works by CodeBook's rules:
 
 1. **No story, no work.** Your request becomes stories first. The factory's story-writing agent (for example its
-   business analyst) writes them here. If the factory has none, Claude offers to add one.
+   business analyst) writes them here. If the factory has none and you may change it, Claude offers to add one: an
+   agent your workspace already has, one from the marketplace (your organization's section first), or a new one it
+   writes and publishes to your organization's section only. Each change is asked first, and the first one asks
+   Bookbag for one more permission ("Change your factories' agents and stations").
 2. **"Proceed?"** Claude shows the proposed stories, with a link that opens them on app.codebook.work, and creates
    nothing until you say yes.
 3. **Every station runs here.** For each agent station Claude spawns a **factory-worker** sub-agent that becomes that
