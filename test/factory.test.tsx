@@ -62,7 +62,8 @@ function status(at: At) {
     events: isBuild
       ? [{ id: 9001, kind: 'run.passed', occurred_at: '2026-11-01T10:00:00Z', station: 'Plan', subject: null }]
       : [
-          { id: 9002, kind: 'agent.assigned', occurred_at: '2026-11-01T10:01:00Z', station: 'Build', where: 'here', who: { agent: { name: 'Alex', role: 'Developer' }, person: { name: 'Tom', is_you: true }, via: 'Claude Code' } },
+          { id: 9001.5, kind: 'agent.assigned', occurred_at: '2026-11-01T10:00:30Z', station: 'Build', card: null, where: null, who: { agent: { name: 'Alex', role: 'Developer' }, person: null, via: null } },
+          { id: 9002, kind: 'agent.assigned', occurred_at: '2026-11-01T10:01:00Z', station: 'Build', card: { key: '6KjN', reference: 57 }, where: 'here', who: { agent: { name: 'Alex', role: 'Developer' }, person: { name: 'Tom', is_you: true }, via: 'Claude Code' } },
           { id: 9003, kind: 'pr.linked', occurred_at: '2026-11-01T10:05:00Z', station: 'Build', subject: 'acme/payments#212 — Refunds', where: 'here' },
           { id: 9004, kind: 'card.moved', occurred_at: '2026-11-01T10:06:00Z', station: 'Build', to_station: 'Review' },
         ],

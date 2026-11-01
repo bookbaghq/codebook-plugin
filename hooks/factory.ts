@@ -210,7 +210,8 @@ export function narration(e: WireEvent, reference: string): string | null {
     case 'card.moved':
       return e.to_station ? `▸ ${reference} moved to ${e.to_station}.` : null
     case 'agent.assigned':
-      return e.where === 'here' ? `${who ?? 'An agent'} is working ${reference}${at}, here.` : null
+      // Also fired with no card when a station is given an agent: only a claim on a card is someone working.
+      return e.card && e.where === 'here' ? `${who ?? 'An agent'} is working ${reference}${at}, here.` : null
     case 'run.started':
       return e.where === 'here' ? null : `${who ?? 'An agent'} started ${reference}${at} in ${e.where === 'outside' ? 'an outside runtime' : 'CodeBook'}.`
     case 'run.passed':
