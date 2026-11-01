@@ -5,8 +5,10 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { CodebookActive, CodebookLink, CodebookMode, CodebookStory } from '../types'
+import type { CodebookActive, CodebookClaim, CodebookLink, CodebookMode, CodebookStory } from '../types'
 import { call, words } from './connector'
+import { allowedOf, repoOf, targetsOf } from './guard'
+import type { Target } from './guard'
 import {
   adopt,
   follow,
@@ -32,6 +34,7 @@ const link = atom({ plugin: 'codebook', key: 'link' } as const, { state: 'idle' 
   shape: 'link-1',
 })
 const handed = atom({ plugin: 'codebook', key: 'handed' } as const, [] as number[])
+const claims = atom({ plugin: 'codebook', key: 'claims' } as const, [] as CodebookClaim[], { shape: 'claims-1' })
 
 const POLL_MS = 4000
 const QUIET_POLL_MS = 30000
@@ -125,6 +128,19 @@ const OWN_TOOLS = 'mcp__plugin_codebook_codebook__'
 /** The reads the pane makes by itself (following the story the person chose); writes go through the person. */
 const OWN_READS = new Set(['list_factories', 'factory_board', 'story_status', 'list_my_work'].map(name => OWN_TOOLS + name))
 
+/** The repository a push or pull request reaches, as `owner/name`, from the remote's address in that checkout. */
+async function reaches($: EngineInterface, target: Target): Promise<string | null> {
+  if (target.kind === 'pr' && target.repo) return repoOf(target.repo)
+  const remote = target.kind === 'push' ? target.remote : 'origin'
+  const direct = repoOf(remote)
+  if (direct !== null && remote.includes('/')) return direct
+  const base = await $.session.cwd()
+  const home = (await $.env.get('HOME')) ?? ''
+  const dir = target.cwd === null ? base : target.cwd.replace(/^~/, home).replace(/^(?!\/)/, `${base}/`)
+  const got = await $.process.run(['git', '-C', dir, 'remote', 'get-url', '--push', remote])
+  return got.exitCode === 0 ? repoOf(got.stdout) : null
+}
+
 /** A connector result as a tool call answers it: the structured payload, else its text as JSON. */
 function payloadOf(ran: { result?: unknown; text?: string }): unknown {
   const structured = (ran.result as { structuredContent?: unknown } | undefined)?.structuredContent
@@ -152,9 +168,42 @@ export const register: Register = on => {
     const ran = await next(e)
     const tool = String(e.tool)
     if (!tool.startsWith(OWN_TOOLS) || OWN_READS.has(tool) || ran.deny !== undefined || ran.isError) return ran
-    await adopt($, tool.slice(OWN_TOOLS.length), payloadOf(ran))
+    const name = tool.slice(OWN_TOOLS.length)
+    const data = payloadOf(ran) as { run?: number; brief?: unknown; recorded?: boolean } | null
+    // The guard's list: a claim brings its brief's repositories, a report ends the claim.
+    if (name === 'claim_work' && typeof data?.run === 'number') {
+      const claim: CodebookClaim = { run: data.run, repos: allowedOf(data.brief) }
+      await update($, claims, list => [...list.filter(one => one.run !== claim.run), claim])
+    }
+    if (name === 'complete_work' && typeof data?.run === 'number') {
+      const run = data.run
+      await update($, claims, list => list.filter(one => one.run !== run))
+    }
+    await adopt($, name, data)
     return ran
   }).catch(($, e, next) => next(e))
+
+  // The repository guard (G5 decision 6): while this session works a CodeBook run, pushes and pull requests reach only
+  // the repositories its brief lists. Outside CodeBook work it stands aside. It only ever refuses.
+  on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
+    const held = await read($, claims)
+    if (held.length === 0) return next(e)
+    const allowed = [...new Set(held.flatMap(one => one.repos))]
+    const targets = targetsOf(String(e.command ?? ''))
+    if (targets === null) {
+      return { deny: `CodeBook: this command pushes in a way the repository guard cannot read (a subshell, eval or sh -c). While CodeBook run ${held.map(one => one.run).join(', ')} is worked here, write the git push or gh pr create plainly.` }
+    }
+    for (const target of targets) {
+      const repo = await reaches($, target)
+      if (repo === null || !allowed.includes(repo)) {
+        const what = target.kind === 'push' ? `git push to ${target.remote}` : 'gh pr create'
+        const where = repo ?? 'a repository the guard could not tell'
+        const may = allowed.length > 0 ? allowed.join(', ') : 'no repository (its brief names none)'
+        return { deny: `CodeBook: ${what} reaches ${where}. While CodeBook run ${held.map(one => one.run).join(', ')} is worked here, the factory allows ${may}.` }
+      }
+    }
+    return next(e)
+  }).catch(($, e, next) => (next.called ? next(e) : { deny: 'CodeBook: the repository guard failed, so the push was not made. Try again.' }))
 
   on('session.start', async ($, e, next) => {
     await $.command.register({

@@ -67,6 +67,9 @@ export type CodebookFactory = {
   url: string | null
 }
 
+/** A CodeBook run this session holds, and the repositories its brief lets it change (`owner/name`). */
+export type CodebookClaim = { run: number; repos: string[] }
+
 /** The connector as the pane last found it. */
 export type CodebookLink =
   | { state: 'idle' }
@@ -88,6 +91,7 @@ declare module 'claude-code' {
       sendingBack: boolean
       handed: number[]
       notice: string | null
+      claims: Shaped<CodebookClaim[]>
     }
   }
 }
