@@ -1,0 +1,23 @@
+{
+  "name": "codebook",
+  "displayName": "CodeBook",
+  "version": "0.1.0",
+  "description": "Run CodeBook factories from Claude Code: the CodeBook connector, a live Factory pane beside the chat, /factory, and a factory-worker agent that works run-here stations in your checkout.",
+  "author": {
+    "name": "Bookbag",
+    "url": "https://github.com/bookbaghq"
+  },
+  "homepage": "https://app.codebook.work",
+  "repository": "https://github.com/bookbaghq/codebook-plugin",
+  "license": "MIT",
+  "keywords": [
+    "codebook",
+    "factory",
+    "agents",
+    "mcp",
+    "bookbag"
+  ],
+  "types": "./types/index.d.ts",
+  "privacyPolicyUrl": "https://codebook.work/privacy",
+  "icon": "./.claude-plugin/icon.png"
+}

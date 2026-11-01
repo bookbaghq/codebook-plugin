@@ -1,0 +1,12 @@
+{
+  "name": "codebook",
+  "owner": { "name": "Bookbag", "url": "https://github.com/bookbaghq" },
+  "description": "The CodeBook plugin for Claude Code.",
+  "plugins": [
+    {
+      "name": "codebook",
+      "source": "./",
+      "description": "Run CodeBook factories from Claude Code: the connector, the Factory pane, /factory and the factory-worker agent."
+    }
+  ]
+}

@@ -1,0 +1,466 @@
+// The Factory pane, drawn like the approved prototype (Main.dc.html): a hero card for the story, the two
+// "Run here / Run in CodeBook" picture choices, illustrated station cards with Approve / Send back, and
+// the latest events. MadeBook's style in CodeBook's teal. Pictures are Svg on the desktop; the terminal
+// draws the same pane in words.
+
+import { atom, read, update } from 'claude-code'
+import type { EngineInterface, RenderElement, RenderInput } from 'claude-code'
+
+import type { CodebookLink, CodebookMode, CodebookStation, CodebookStory } from '../types'
+import { ART } from './art'
+import type { ArtName } from './art'
+import {
+  approve,
+  loadFactories,
+  refresh,
+  sendBack,
+  setMode,
+  startStory,
+  unfollow,
+} from './factory'
+
+// The pane's values, declared again here: the engine reads state only through atoms written in the same file.
+// Keep each tag as factory.ts has it.
+const mode = atom({ plugin: 'codebook', key: 'mode' } as const, 'here' as CodebookMode)
+const active = atom({ plugin: 'codebook', key: 'active' } as const, null, { shape: 'active-1' })
+const story = atom({ plugin: 'codebook', key: 'story' } as const, null, { shape: 'story-1' })
+const events = atom({ plugin: 'codebook', key: 'events' } as const, [], { shape: 'events-1' })
+const factories = atom({ plugin: 'codebook', key: 'factories' } as const, null, { shape: 'factories-1' })
+const picked = atom({ plugin: 'codebook', key: 'picked' } as const, null, { shape: 'factories-1' })
+const link = atom({ plugin: 'codebook', key: 'link' } as const, { state: 'idle' } as CodebookLink, {
+  shape: 'link-1',
+})
+const busy = atom({ plugin: 'codebook', key: 'busy' } as const, null as string | null)
+const sendingBack = atom({ plugin: 'codebook', key: 'sendingBack' } as const, false)
+const notice = atom({ plugin: 'codebook', key: 'notice' } as const, null as string | null)
+
+export const PANE = 'codebook-factory'
+
+const TEAL = '#2F6E60'
+const INK = '#1B2422'
+const MUTED = '#46524E'
+const SOFT = '#66716D'
+const LINE = '#E3EEEA'
+const MIST = '#F3F7F5'
+
+type Tone = 'done' | 'running' | 'person' | 'you' | 'waiting' | 'bad'
+
+const TONES: Record<Tone, { pill: string; ink: string; tint: string; border: string }> = {
+  done: { pill: '#DDF1E9', ink: '#14583E', tint: '#E3F2ED', border: '#CDE7DD' },
+  running: { pill: '#E3EEF9', ink: '#204A82', tint: '#EAF3F7', border: '#9FC3E6' },
+  person: { pill: '#FFE8DA', ink: '#8A4313', tint: '#FFF0E6', border: '#F2BE96' },
+  you: { pill: '#FFE8DA', ink: '#8A4313', tint: '#FFF0E6', border: '#F2BE96' },
+  waiting: { pill: '#EDF4F1', ink: '#46524E', tint: MIST, border: LINE },
+  bad: { pill: '#FBE1DE', ink: '#8E2A1F', tint: '#FCEDEB', border: '#EBB3AB' },
+}
+
+/** A rounded tile holding one illustration, as an Svg (the desktop's picture element). */
+function tile(name: ArtName, size: number, tint: string): string {
+  const pad = Math.round(size * 0.07)
+  const inner = size - pad * 2
+  return (
+    `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">` +
+    `<rect width="${size}" height="${size}" rx="${Math.round(size * 0.28)}" fill="${tint}"/>` +
+    `<image x="${pad}" y="${pad}" width="${inner}" height="${inner}" href="${ART[name]}" xlink:href="${ART[name]}"/>` +
+    `</svg>`
+  )
+}
+
+function bar(done: number, total: number, width: number): string {
+  const filled = total === 0 ? 0 : Math.round((done / total) * width)
+  return (
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="8" viewBox="0 0 ${width} 8">` +
+    `<rect width="${width}" height="8" rx="4" fill="#DCE8E3"/>` +
+    (filled > 0 ? `<rect width="${filled}" height="8" rx="4" fill="${TEAL}"/>` : '') +
+    `</svg>`
+  )
+}
+
+function artFor(s: CodebookStation): ArtName {
+  const name = s.name.toLowerCase()
+  if (/plan|spec|design|refine/.test(name)) return 'plan'
+  if (/review|approv|sign.?off|check/.test(name)) return 'approve'
+  if (/test|qa|verif/.test(name)) return 'test'
+  if (/ship|deploy|merge|release|launch/.test(name)) return 'ship'
+  if (/build|code|implement|develop|fix/.test(name)) return 'build'
+  if (s.workerType === 'person') return 'approve'
+  if (s.workerType === 'outside') return 'here'
+  return 'build'
+}
+
+function who(s: CodebookStation, runsHere: boolean): string {
+  switch (s.workerType) {
+    case 'person':
+      return s.isYou ? 'You · decide here' : `${s.workerName || 'A person'} · decides`
+    case 'outside':
+      return 'Agent · your Claude, this checkout'
+    case 'agent':
+      return runsHere ? 'Agent · your Claude, this checkout' : "Agent · CodeBook's cloud"
+    case 'gate':
+      return 'Waits for the parallel stations'
+    case 'factory':
+      return `Hands over to ${s.workerName || 'another factory'}`
+    default:
+      return 'Nobody works this station yet'
+  }
+}
+
+function look(s: CodebookStation, st: CodebookStory | null): { tone: Tone; label: string } {
+  const runsHere = st?.runHere === true || s.workerType === 'outside'
+  switch (s.state) {
+    case 'passed':
+      return { tone: 'done', label: '✓ Done' }
+    case 'running':
+      return { tone: 'running', label: runsHere ? 'Running here' : 'Running in CodeBook' }
+    case 'with_outside_agent':
+      return st?.waitingClaimed ? { tone: 'running', label: 'Running here' } : { tone: 'running', label: 'Ready to run here' }
+    case 'testing':
+      return { tone: 'running', label: 'Testing' }
+    case 'queued':
+      return { tone: 'running', label: 'Starting' }
+    case 'waiting_for_person':
+    case 'waiting_for_approval':
+      return s.isCurrent && st?.waitingOnYou
+        ? { tone: 'you', label: 'Needs you' }
+        : { tone: 'person', label: `Waiting for ${s.workerName || 'a person'}` }
+    case 'waiting_for_review':
+      return { tone: 'person', label: 'In review' }
+    case 'failed':
+      return { tone: 'bad', label: 'Failed' }
+    case 'blocked':
+      return { tone: 'bad', label: 'Blocked' }
+    case 'sent_back':
+      return { tone: 'bad', label: 'Sent back' }
+    case 'idle':
+      return { tone: 'waiting', label: 'Waiting' }
+    default:
+      return { tone: 'waiting', label: s.state.replace(/_/g, ' ') }
+  }
+}
+
+export async function drawPane($: EngineInterface, e: RenderInput): Promise<RenderElement> {
+  const els = $.ui.resolve(e)
+  const { Box, Text, Button, Link } = els
+  const hasPictures = e.surface !== 'terminal'
+  const Svg = 'Svg' in els ? els.Svg : null
+  const Input = 'Input' in els ? els.Input : null
+  const width = Math.max(28, ('bodyColumns' in e.props ? Number(e.props.bodyColumns) : 60) || 60)
+
+  const picture = (name: ArtName, size: number, tint: string) =>
+    hasPictures && Svg ? <Svg source={tile(name, size, tint)} alt="" width={size} height={size} /> : null
+
+  const pill = (tone: Tone, label: string) => (
+    <Text backgroundColor={TONES[tone].pill} color={TONES[tone].ink} weight="bold" size="footnote">
+      {` ${label} `}
+    </Text>
+  )
+
+  const l = await read($, link)
+  const a = await read($, active)
+  const st = await read($, story)
+  const m = await read($, mode)
+  const said = await read($, notice)
+  const working = await read($, busy)
+
+  const header = (
+    <Box flexDirection="row" alignItems="center" gap={1}>
+      <Text backgroundColor={TEAL} color="#FFFFFF" weight="bold">
+        {' C '}
+      </Text>
+      <Text weight="bold" size="heading" color={INK}>
+        Factory
+      </Text>
+      <Box flexGrow={1} />
+      {l.state === 'ok' && a !== null && st?.finished == null ? pill('done', '● Live') : null}
+      {l.state === 'signin' ? pill('person', 'Sign in') : null}
+      {l.state === 'error' ? pill('bad', 'Offline') : null}
+    </Box>
+  )
+
+  const choice = (where: 'here' | 'cloud') => {
+    const isOn = m === where
+    return (
+      <Box
+        key={`mode-${where}`}
+        flexDirection="row"
+        alignItems="center"
+        gap={1}
+        flexGrow={1}
+        padding={1}
+        borderStyle="round"
+        borderColor={isOn ? TEAL : LINE}
+        backgroundColor={isOn ? '#EFF7F4' : '#FFFFFF'}
+      >
+        {picture(where === 'here' ? 'here' : 'cloud', 44, isOn ? '#E3F2ED' : MIST)}
+        <Box flexDirection="column">
+          <Button
+            key={`run-${where}`}
+            plain
+            variant={isOn ? 'primary' : 'secondary'}
+            onPress={() => setMode($, where)}
+          >
+            {where === 'here' ? 'Run here' : 'Run in CodeBook'}
+          </Button>
+          <Text size="footnote" color={MUTED}>
+            {where === 'here' ? 'Your Claude, this checkout' : "CodeBook's cloud"}
+          </Text>
+        </Box>
+      </Box>
+    )
+  }
+
+  const modes = (
+    <Box flexDirection={width < 44 ? 'column' : 'row'} gap={1}>
+      {choice('here')}
+      {choice('cloud')}
+    </Box>
+  )
+
+  const footer = (
+    <Box flexDirection="column" gap={1}>
+      {said ? (
+        <Text size="footnote" color={MUTED}>
+          {said}
+        </Text>
+      ) : null}
+      <Link href={a?.url ?? 'https://app.codebook.work'} label="Open on app.codebook.work →" />
+    </Box>
+  )
+
+  if (l.state === 'signin') {
+    return (
+      <Box flexDirection="column" gap={1}>
+        {header}
+        <Box flexDirection="row" alignItems="center" gap={1} padding={1} backgroundColor={MIST}>
+          {picture('factory', 72, '#E3F2ED')}
+          <Text color={INK}>{l.message}</Text>
+        </Box>
+        <Button key="retry" onPress={() => (a ? refresh($) : loadFactories($))}>
+          I've signed in — try again
+        </Button>
+      </Box>
+    )
+  }
+
+  if (a === null) return drawPicker()
+
+  // The story the pane follows.
+  const stations = st?.stations ?? []
+  const done = st?.finished ? stations.length : stations.filter(s => s.state === 'passed').length
+  const runsHere = st?.runHere === true || (st?.runHere == null && m === 'here')
+  const isSendingBack = await read($, sendingBack)
+  const log = (await read($, events)).slice(-4)
+
+  const hero = (
+    <Box flexDirection="row" alignItems="center" gap={2} padding={1} backgroundColor={MIST}>
+      {picture('factory', 84, '#E3F2ED')}
+      <Box flexDirection="column" flexGrow={1} gap={0}>
+        <Text size="caption" weight="bold" color={SOFT}>
+          {`${a.factoryName.toUpperCase()} FACTORY · ${a.reference}`}
+        </Text>
+        <Text size="heading" weight="bold" color={INK}>
+          {a.title}
+        </Text>
+        <Box flexDirection="row" alignItems="center" gap={1}>
+          {hasPictures && Svg ? (
+            <Svg source={bar(done, stations.length, 220)} alt={`${done} of ${stations.length} stations done`} width={220} height={8} />
+          ) : null}
+          <Text size="footnote" weight="bold" color={MUTED}>
+            {st?.finished === 'done'
+              ? 'Done'
+              : st?.finished === 'dropped'
+                ? 'Dropped'
+                : st?.inBacklog
+                  ? 'In the backlog'
+                  : `${done} of ${stations.length}`}
+          </Text>
+        </Box>
+      </Box>
+    </Box>
+  )
+
+  const card = (s: CodebookStation) => {
+    const { tone, label } = look(s, st)
+    const isAsk = s.isCurrent && st?.waitingOn === 'person' && st.waitingOnYou
+    const isWorkHere =
+      s.isCurrent && st?.waitingOn === 'outside_agent' && !st.waitingClaimed && m === 'cloud'
+    return (
+      <Box
+        key={`station-${s.station}`}
+        flexDirection="column"
+        gap={1}
+        padding={1}
+        borderStyle="round"
+        borderColor={s.isCurrent ? TONES[tone].border : tone === 'done' ? TONES.done.border : LINE}
+        backgroundColor="#FFFFFF"
+      >
+        <Box flexDirection="row" alignItems="center" gap={1}>
+          {picture(artFor(s), 52, TONES[tone].tint)}
+          <Box flexDirection="column" flexGrow={1}>
+            <Text weight="bold" color={INK}>
+              {s.name}
+            </Text>
+            <Text size="footnote" color={MUTED}>
+              {s.summary && tone !== 'waiting' ? s.summary.slice(0, 140) : who(s, runsHere)}
+            </Text>
+          </Box>
+          {pill(tone, label)}
+        </Box>
+        {isAsk ? (
+          <Box flexDirection="column" gap={1}>
+            {st.pullRequests.map(pr =>
+              pr.html_url ? (
+                <Link key={`pr-${pr.pull_request_id}`} href={pr.html_url} label={`Pull request #${pr.number ?? pr.pull_request_id}`} />
+              ) : null,
+            )}
+            <Box flexDirection="row" gap={1}>
+              <Button key="approve" variant="primary" onPress={() => approve($)}>
+                {working === 'approve' ? 'Approving…' : 'Approve'}
+              </Button>
+              <Button key="send-back" onPress={() => update($, sendingBack, v => !v)}>
+                Send back
+              </Button>
+            </Box>
+            {isSendingBack && Input ? (
+              <Input
+                key="reason"
+                label="What should change?"
+                placeholder="Say what to fix; it is written on the story"
+                submitLabel={working === 'send_back' ? 'Sending…' : 'Send back'}
+                onSubmit={value => sendBack($, value)}
+              />
+            ) : null}
+          </Box>
+        ) : null}
+        {isWorkHere ? (
+          <Button
+            key="work-here"
+            onPress={() =>
+              $.prompt.submit({
+                text: `CodeBook: use the codebook:factory-worker agent to claim run ${st?.waitingRun} of story ${a.reference} ("${a.title}", ${a.factoryName}) and work it in this checkout.`,
+              })
+            }
+          >
+            Work it here
+          </Button>
+        ) : null}
+      </Box>
+    )
+  }
+
+  const recent =
+    log.length === 0 ? null : (
+      <Box flexDirection="column" gap={0}>
+        <Text size="caption" weight="bold" color={SOFT}>
+          LATEST
+        </Text>
+        {log.map(ev => (
+          <Text key={`ev-${ev.id}`} size="footnote" color={MUTED}>
+            {ev.station ? `${ev.station} · ` : ''}
+            {ev.text}
+          </Text>
+        ))}
+      </Box>
+    )
+
+  return (
+    <Box flexDirection="column" gap={1}>
+      {header}
+      {hero}
+      {modes}
+      {st === null ? (
+        <Text color={MUTED}>{l.state === 'error' ? l.message : 'Asking CodeBook where the story is…'}</Text>
+      ) : (
+        <Box flexDirection="column" gap={1}>
+          {stations.map(card)}
+        </Box>
+      )}
+      {recent}
+      <Box flexDirection="row" gap={1}>
+        <Button key="refresh" plain onPress={() => refresh($)}>
+          Refresh
+        </Button>
+        <Button key="stop" plain onPress={() => unfollow($)}>
+          Pick another story
+        </Button>
+      </Box>
+      {footer}
+    </Box>
+  )
+
+  // No story yet: pick a factory, then name a story.
+  async function drawPicker(): Promise<RenderElement> {
+    const list = await read($, factories)
+    const chosen = await read($, picked)
+    const body =
+      list === null ? (
+        <Button key="load" variant="primary" onPress={() => loadFactories($)}>
+          Show my factories
+        </Button>
+      ) : list.length === 0 ? (
+        <Text color={MUTED}>No factories yet. Make one on app.codebook.work, then come back.</Text>
+      ) : chosen === null ? (
+        <Box flexDirection="column" gap={1}>
+          <Text weight="bold" color={INK}>
+            Pick a factory
+          </Text>
+          {list.map(f => (
+            <Button key={`factory-${f.factory}`} plain onPress={() => update($, picked, () => f)}>
+              {f.name}
+              <Text dimColor>{f.workspace ? `  ${f.workspace}` : ''}</Text>
+            </Button>
+          ))}
+        </Box>
+      ) : (
+        <Box flexDirection="column" gap={1}>
+          <Text weight="bold" color={INK}>
+            {`New story in ${chosen.name}`}
+          </Text>
+          {Input && chosen.mayStart ? (
+            <Input
+              key="title"
+              label="What should the factory make?"
+              placeholder="Let customers refund a payment from the order page"
+              submitLabel={working === 'start' ? 'Starting…' : 'Start'}
+              onSubmit={async value => {
+                if (value.trim() === '') return
+                await update($, busy, () => 'start')
+                const started = await startStory($, chosen.factory, value.trim(), m)
+                await update($, busy, () => null)
+                await update($, notice, () => started.text)
+                if (started.ok) await update($, picked, () => null)
+              }}
+            />
+          ) : (
+            <Text color={MUTED}>
+              {chosen.mayStart
+                ? `Type /factory run "${chosen.name}" "<story title>" to start one.`
+                : 'You can watch this factory but not start stories in it.'}
+            </Text>
+          )}
+          <Button key="back" plain onPress={() => update($, picked, () => null)}>
+            ← Other factories
+          </Button>
+        </Box>
+      )
+
+    return (
+      <Box flexDirection="column" gap={1}>
+        {header}
+        <Box flexDirection="row" alignItems="center" gap={2} padding={1} backgroundColor={MIST}>
+          {picture('factory', 84, '#E3F2ED')}
+          <Box flexDirection="column" flexGrow={1}>
+            <Text size="heading" weight="bold" color={INK}>
+              Run a CodeBook factory from here
+            </Text>
+            <Text color={MUTED}>Start a story and watch its stations move. You approve the person stations here.</Text>
+          </Box>
+        </Box>
+        {modes}
+        {l.state === 'error' ? <Text color={TONES.bad.ink}>{l.message}</Text> : null}
+        {body}
+        {footer}
+      </Box>
+    )
+  }
+}
