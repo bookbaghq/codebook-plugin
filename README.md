@@ -52,28 +52,32 @@ request they put in your prompt box.
 
 ## The two run modes
 
-**Run here** (the default): the story's agent stations wait for you instead of running in CodeBook's cloud. Only you
-can take them. When one is ready, the pane asks Claude to work it with the **factory-worker** agent, which:
+**Run here** (the default): the whole factory runs in your Claude Code session, on your Claude plan. Claude becomes the
+factory's **manager** (the `factory-manager` skill) and works by CodeBook's rules:
 
-1. claims the station's run in CodeBook and reads its brief (the station's own agent instructions, the story, what to
-   produce, and which repository);
-2. checks it is in the right repository, with no uncommitted work of yours in the way;
-3. makes the change on a new branch, runs the tests;
-4. opens a **draft** pull request with your local `git` and `gh`;
-5. keeps its claim alive while it works (a claim nobody keeps alive lapses after 15 minutes and the run waits again),
-   then reports pass, fail or blocked with a short summary.
+1. **No story, no work.** Your request becomes stories first. The factory's story-writing agent (for example its
+   business analyst) writes them here. If the factory has none, Claude offers to add one.
+2. **"Proceed?"** Claude shows the proposed stories (they are also on app.codebook.work, under Work orders) and
+   creates nothing until you say yes.
+3. **Every station runs here.** For each agent station Claude spawns a **factory-worker** sub-agent that becomes that
+   station's agent (its own skill from CodeBook), claims the run, writes its notes and artifacts on the card, works in
+   this checkout, runs the tests, and opens a **draft** pull request with your `git` and `gh`. QA stations run the
+   repository's tests here with CodeBook's "Test it here" skill. A crew's members each get a sub-agent.
+4. **Your stations are asked in the chat**: approve or send back a review, answer a question from the manager.
+5. **You see it move**: the chat says what moved, who is working, when an agent is spawned and when a pull request
+   opens; the Factory pane shows the stations and what is on the card.
+6. **Done** means the card holds every comment (signed "Agent (role) via your Claude Code"), every run (marked "own
+   plan, not billed"), the pull requests and the artifacts.
 
-It never merges, never pushes to your default branch, and never force-pushes. The work uses your Claude plan;
-CodeBook records the run but does not bill it.
+Nothing is ever merged, pushed to a default branch or force-pushed. A factory whose policy keeps work in CodeBook
+refuses Run here.
 
-A factory whose policy keeps work in CodeBook refuses run here; crews, people's stations and outside runtimes always
-stay where the factory puts them.
+**Only the factory's repositories change.** While a CodeBook run is held in the session, the plugin refuses any
+`git push` or `gh pr create` that reaches a repository the run's brief does not list (and CodeBook refuses to link a
+pull request from anywhere else). Open Claude Code in the repository the factory works on.
 
-**Run in CodeBook**: the agent stations run in CodeBook's cloud as they do from the website. The pane still follows the
-story and you still approve your stations here. Nothing runs on your computer unless you press **Work it here**.
-
-Open Claude Code in the repository the factory works on: the worker works in the current checkout and stops (blocked)
-if it is the wrong one.
+**Run in CodeBook**: CodeBook's own agents run the stations on its servers, as from the website. The pane still follows
+the story and you still approve your stations here. Nothing runs on your computer unless you press **Work it here**.
 
 ## Permissions
 
@@ -97,8 +101,9 @@ settings (in auto mode, the auto-mode check judges it like anything you type). T
 | Path | What it is |
 | --- | --- |
 | `.mcp.json` | The CodeBook connector (`https://app.codebook.work/mcp`), with no credentials. |
-| `hooks/` | The Factory pane and `/factory` (a Claude Code hooks module): `register.tsx`, `pane.tsx`, `factory.ts`, `connector.ts`, and `art.ts` (the illustrations, small WebP). |
-| `agents/factory-worker.md` | The agent that works a run-here station. |
+| `hooks/` | The Factory pane, `/factory` and the repository guard (a Claude Code hooks module): `register.tsx`, `pane.tsx`, `factory.ts`, `connector.ts`, `guard.ts`, and `art.ts` (the illustrations, small WebP). |
+| `skills/factory-manager/` | The manager skill Run here follows: stories, "proceed?", stations, people, narration. |
+| `agents/factory-worker.md` | The sub-agent that works one station run here as that station's agent. |
 | `types/index.d.ts` | The pane's state contract. |
 | `test/` | Tests for `claude plugin test`. |
 | `.claude-plugin/` | The plugin manifest, the marketplace file and the icon. |

@@ -12,6 +12,7 @@ import type {
   CodebookMode,
   CodebookStation,
   CodebookStory,
+  CodebookTrail,
 } from '../types'
 import { call } from './connector'
 
@@ -27,6 +28,7 @@ export const link = atom({ plugin: 'codebook', key: 'link' } as const, { state: 
 })
 export const busy = atom({ plugin: 'codebook', key: 'busy' } as const, null as string | null)
 export const sendingBack = atom({ plugin: 'codebook', key: 'sendingBack' } as const, false)
+export const trail = atom({ plugin: 'codebook', key: 'trail' } as const, null as CodebookTrail | null, { shape: 'trail-1' })
 export const notice = atom({ plugin: 'codebook', key: 'notice' } as const, null as string | null)
 
 export const STORE_ACTIVE = 'active-1'
@@ -53,6 +55,13 @@ type WireEvent = {
   detail?: string | null
   outcome?: string | null
   actor?: string | null
+  card?: { reference?: number | string | null } | null
+  who?: {
+    agent?: { name?: string; role?: string | null } | null
+    person?: { name?: string; is_you?: boolean } | null
+    via?: string | null
+  } | null
+  where?: 'here' | 'cloud' | 'outside' | null
 }
 type Lease = { fence: number; expires_at?: string; expired?: boolean }
 type RunLocation = {
@@ -73,7 +82,7 @@ export type Status = {
   waiting:
     | null
     | {
-        on: 'person' | 'outside_agent' | 'runner'
+        on: 'person' | 'outside_agent' | 'runner' | 'review'
         run: number
         on_you?: boolean
         claimed?: boolean
@@ -186,13 +195,57 @@ function eventText(e: WireEvent): string {
   }
 }
 
+function agentOf(e: WireEvent): string | null {
+  const agent = e.who?.agent
+  if (!agent?.name) return null
+  return agent.role ? `${agent.name} (${agent.role})` : agent.name
+}
+
+/** The chat line for an event of the followed story (G5b's who/where), or null for one not worth a line. */
+export function narration(e: WireEvent, reference: string): string | null {
+  const who = agentOf(e)
+  const person = e.who?.person?.is_you ? 'you' : (e.who?.person?.name ?? e.actor ?? 'someone')
+  const at = e.station ? ` at ${e.station}` : ''
+  switch (e.kind) {
+    case 'card.moved':
+      return e.to_station ? `▸ ${reference} moved to ${e.to_station}.` : null
+    case 'agent.assigned':
+      return e.where === 'here' ? `${who ?? 'An agent'} is working ${reference}${at}, here.` : null
+    case 'run.started':
+      return e.where === 'here' ? null : `${who ?? 'An agent'} started ${reference}${at} in ${e.where === 'outside' ? 'an outside runtime' : 'CodeBook'}.`
+    case 'run.passed':
+      return `✓ ${e.station ?? 'The station'} passed on ${reference}.`
+    case 'run.failed':
+      return `✗ ${e.station ?? 'The station'} failed on ${reference}${e.detail ? `: ${e.detail}` : '.'}`
+    case 'run.blocked':
+      return `${e.station ?? 'The station'} is blocked on ${reference}${e.detail ? `: ${e.detail}` : '.'}`
+    case 'run.claim_expired':
+      return `The claim on ${reference}${at} lapsed; it is waiting again.`
+    case 'pr.linked':
+      return `Pull request ${e.subject ?? ''} linked to ${reference}.`.replace('  ', ' ')
+    case 'human.review_requested':
+      return `${reference}${at} is waiting for a person's review.`
+    case 'supervisor.escalated':
+      return `The manager has a question on ${reference}.`
+    case 'human.approved':
+      return `${e.station ?? 'The station'} approved by ${person} on ${reference}.`
+    case 'human.rejected':
+      return `${e.station ?? 'The station'} sent back by ${person} on ${reference}.`
+    case 'card.finished':
+      return `${reference} is done.`
+    default:
+      return null
+  }
+}
+
 /** Asks story_status for the followed story and folds it into the pane's values. */
 export async function refresh($: EngineInterface): Promise<void> {
   const a = await read($, active)
   if (a === null) return
   await loadBoard($, a)
   const before = await read($, story)
-  const args: Record<string, unknown> = { story: a.story, factory: a.factory, limit: 50 }
+  const args: Record<string, unknown> = { story: a.story, limit: 50 }
+  if (a.factory) args.factory = a.factory
   if (a.workflow) args.workflow = a.workflow
   if (before?.lastEvent != null) args.after = before.lastEvent
   const got = await call<Status>($, 'story_status', args)
@@ -245,6 +298,15 @@ export async function refresh($: EngineInterface): Promise<void> {
     checkedAt: await $.clock.now(),
   }
   await update($, story, () => next)
+  // A line in the chat for each new event; the first look at a story only fills the pane.
+  if (before !== null) {
+    for (const e of s.events) {
+      if (e.id <= (before.lastEvent ?? 0)) continue
+      const line = narration(e, s.story.reference)
+      if (line) $.ui.log(`CodeBook: ${line}`)
+    }
+  }
+  if (before === null || (s.last_event ?? null) !== (before.lastEvent ?? null)) await loadTrail($, s.story.story)
   if (s.events.length > 0) {
     const rows: CodebookEvent[] = s.events.map(e => ({
       id: e.id,
@@ -258,7 +320,40 @@ export async function refresh($: EngineInterface): Promise<void> {
       return [...list, ...rows.filter(one => !seen.has(one.id))].slice(-40)
     })
   }
-  if (s.url && s.url !== a.url) await update($, active, () => ({ ...a, url: s.url ?? null }))
+  // A story followed by its id alone (from confirm_stories) learns its factory here.
+  const known: CodebookActive = {
+    ...a,
+    factory: a.factory || s.factory.factory,
+    factoryName: a.factoryName || s.factory.name,
+    workflow: a.workflow ?? s.workflow?.workflow ?? null,
+    reference: a.reference || s.story.reference,
+    title: a.title || s.story.title,
+    url: s.url ?? a.url,
+  }
+  if (JSON.stringify(known) !== JSON.stringify(a)) await update($, active, () => known)
+}
+
+type Trail = {
+  comments?: { id: number; author: string; text: string; at: string }[]
+  artifacts?: { id: number; kind: string; title: string; url?: string | null }[]
+  pull_requests?: { number: number; title?: string; state?: string; repository?: string; url?: string }[]
+}
+
+/** The card's trail for the pane (G5b story_trail): pull requests, the latest comments, the artifacts. */
+async function loadTrail($: EngineInterface, storyId: string): Promise<void> {
+  const got = await call<Trail>($, 'story_trail', { story: storyId })
+  if (!got.ok) return
+  const t = got.data
+  const next: CodebookTrail = {
+    pullRequests: (t.pull_requests ?? []).map(pr => ({
+      label: `${pr.repository ?? ''}#${pr.number}${pr.title ? ` ${pr.title}` : ''}`.trim(),
+      url: pr.url ?? null,
+      state: pr.state ?? null,
+    })),
+    comments: (t.comments ?? []).slice(-3).map(c => ({ id: c.id, author: c.author, text: c.text.split('\n')[0]?.slice(0, 160) ?? '' })),
+    artifacts: (t.artifacts ?? []).length,
+  }
+  await update($, trail, () => next)
 }
 
 /** Starts following a story: the pane, the timer and later sessions all read it. */
@@ -267,6 +362,7 @@ export async function follow($: EngineInterface, a: CodebookActive): Promise<voi
   await update($, active, () => a)
   await update($, story, () => null)
   await update($, events, () => [])
+  await update($, trail, () => null)
   await update($, sendingBack, () => false)
   await $.store.set(STORE_ACTIVE, a)
   await refresh($)
@@ -360,6 +456,28 @@ export async function adopt($: EngineInterface, tool: string, data: unknown): Pr
     })
     await update($, notice, () => (s.next ? s.next : `Following ${s.story.reference}.`))
     return
+  }
+  if (tool === 'confirm_stories') {
+    const created = (data as { created?: { story: string; reference: string; title: string; url?: string }[] } | null)?.created ?? []
+    const first = created[0]
+    if (first) {
+      const a = await read($, active)
+      await follow($, {
+        story: first.story,
+        factory: '',
+        factoryName: '',
+        workflow: null,
+        reference: first.reference,
+        title: first.title,
+        url: first.url ?? null,
+      })
+      if (a === null || a.story !== first.story) {
+        await update($, notice, () =>
+          created.length > 1 ? `Following ${first.reference}; ${created.length - 1} more created.` : `Following ${first.reference}.`,
+        )
+      }
+      return
+    }
   }
   const said = (data as { next?: unknown } | null)?.next
   if (typeof said === 'string') await update($, notice, () => said)

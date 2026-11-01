@@ -78,6 +78,12 @@ calls (`sleep 5` in the shell). For what you see:
   station, what was done (the summary), and the pull request link, then ask "Approve, or send back (and why)?". Call
   `approve_station` (with the pull request `heads` from `waiting.pull_requests`) or `send_back` with their reason. A
   person's station for someone else: say who it waits for.
+- **A review waiting for this person** (`waiting.on: "review"`, `on_you: true`): show each review's label and
+  criteria and what was done, ask "Pass or fail (and why)?", then `answer_review { story, verdict, notes, review }`.
+- **A question from the manager or an escalation** (`story.question`): ask the person in the chat, then
+  `answer_question { story, answer, question }` with their words.
+- **An agent asked for a person mid-run** (`request_person`, the run `waiting_for_person`): show its question and
+  decide it with the person as above.
 - **A station in CodeBook's cloud** (`runs: "cloud"`): say it runs there and keep following.
 - **Stuck or failed**: say so with the station's summary, and offer `start_card` (retry, with guidance),
   `send_card` (to another station) or `stop_card`. Never retry in a loop by yourself.
@@ -87,7 +93,13 @@ To steer a Run here story use `assign_work`, `start_card`, `send_card`, `stop_ca
 
 ## 5. Narrate
 
-One line per event, newest last, in plain words, for example:
+The Factory pane also posts a dim line in the chat for each event of the story it follows. You narrate what you do
+and what you see in `story_status` events (or `factory_events { factory, after }` for several stories): each event
+has `who` (`agent` with name and role, `person`, `via`) and `where` (here, cloud, outside). "Who is working now" is
+`agent.assigned` (here) or `run.started` (cloud); "PR opened" is `pr.linked`; "moved" is `card.moved`; "needs you" is
+`human.review_requested`, `supervisor.escalated`, or a run waiting for a person.
+
+One line each, newest last, in plain words, for example:
 
 - "▸ #58 'CSV export for invoices' moved to Build."
 - "Alex (Developer) is working #58, spawned here."
@@ -98,8 +110,12 @@ One line per event, newest last, in plain words, for example:
 
 ## 6. Finish
 
-When every story is done (or stopped), give a short summary: each story, its pull request, and the link to it on
+When every story is done (or stopped), read `story_trail { story }` and give a short summary per story: its pull
+request(s), the runs (here, on the person's own plan, not billed), the artifacts (test reports), and the link on
 app.codebook.work, where the card holds every comment, run, artifact and pull request.
+
+When you speak on a story for a station's agent outside a run (a reply the person asked an agent for), use
+`story_comment { story, text, agent }`: it is signed "<Agent> (<role>) via <person>'s Claude Code".
 
 ## Limits
 

@@ -6,7 +6,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, RenderElement, RenderInput } from 'claude-code'
 
-import type { CodebookLink, CodebookMode, CodebookStation, CodebookStory } from '../types'
+import type { CodebookLink, CodebookMode, CodebookStation, CodebookStory, CodebookTrail } from '../types'
 import { ART } from './art'
 import type { ArtName } from './art'
 import {
@@ -33,6 +33,7 @@ const link = atom({ plugin: 'codebook', key: 'link' } as const, { state: 'idle' 
 const busy = atom({ plugin: 'codebook', key: 'busy' } as const, null as string | null)
 const sendingBack = atom({ plugin: 'codebook', key: 'sendingBack' } as const, false)
 const notice = atom({ plugin: 'codebook', key: 'notice' } as const, null as string | null)
+const trail = atom({ plugin: 'codebook', key: 'trail' } as const, null as CodebookTrail | null, { shape: 'trail-1' })
 
 export const PANE = 'codebook-factory'
 
@@ -211,7 +212,9 @@ export async function drawPane($: EngineInterface, e: RenderInput): Promise<Rend
         <Box flexDirection="column" flexGrow={1} gap={0}>
           <Text weight="bold">{where === 'here' ? 'Run here' : 'Run in CodeBook'}</Text>
           <Text size="footnote" dimColor>
-            {where === 'here' ? 'Your Claude, this checkout' : "CodeBook's cloud"}
+            {where === 'here'
+              ? 'Claude manages it here: writes the stories, asks “proceed?”, then runs every station in this checkout.'
+              : "CodeBook's agents run it on its servers; you still approve your stations here."}
           </Text>
         </Box>
         {isOn ? (
@@ -374,6 +377,34 @@ export async function drawPane($: EngineInterface, e: RenderInput): Promise<Rend
     )
   }
 
+  const card_ = await read($, trail)
+  const onCard =
+    card_ === null || (card_.pullRequests.length === 0 && card_.comments.length === 0 && card_.artifacts === 0) ? null : (
+      <Box flexDirection="column" gap={0} padding={1} borderStyle="round" borderColor={LINE}>
+        <Text size="caption" weight="bold" dimColor>
+          ON THE CARD
+        </Text>
+        {card_.pullRequests.map(pr =>
+          pr.url ? (
+            <Link key={`trail-pr-${pr.label}`} href={pr.url} label={`Pull request ${pr.label}${pr.state ? ` (${pr.state})` : ''}`} />
+          ) : (
+            <Text key={`trail-pr-${pr.label}`}>{`Pull request ${pr.label}`}</Text>
+          ),
+        )}
+        {card_.comments.map(c => (
+          <Text key={`trail-c-${c.id}`} size="footnote">
+            <Text weight="bold">{c.author}</Text>
+            <Text dimColor>{`: ${c.text}`}</Text>
+          </Text>
+        ))}
+        {card_.artifacts > 0 ? (
+          <Text size="footnote" dimColor>
+            {`${card_.artifacts} artifact${card_.artifacts === 1 ? '' : 's'} (reports, plans) — open the card to see them`}
+          </Text>
+        ) : null}
+      </Box>
+    )
+
   const recent =
     log.length === 0 ? null : (
       <Box flexDirection="column" gap={0}>
@@ -389,10 +420,36 @@ export async function drawPane($: EngineInterface, e: RenderInput): Promise<Rend
       </Box>
     )
 
+  const now =
+    st === null
+      ? null
+      : st.finished === 'done'
+        ? 'Done. Everything is on the card.'
+        : st.finished === 'dropped'
+          ? 'Dropped.'
+          : st.waitingOn === 'person' && st.waitingOnYou
+            ? 'Waiting for you: Approve or Send back below.'
+            : st.waitingOn === 'review' && st.waitingOnYou
+              ? 'Waiting for your review: answer it in the chat.'
+              : st.waitingOn === 'runner' && st.waitingClaimedByYou
+                ? 'Being worked here: follow it in the chat.'
+                : st.waitingOn === 'runner'
+                  ? 'Ready to run here: the manager in the chat starts it (or press Work it here).'
+                  : st.waitingOn === 'outside_agent'
+                    ? 'Waiting for an outside agent.'
+                    : st.waitingOn === 'person'
+                      ? 'Waiting for a person.'
+                      : st.inBacklog
+                        ? 'In the backlog.'
+                        : 'Moving: the next station is starting.'
+
   return (
     <Box flexDirection="column" gap={1}>
       {header}
       {hero}
+      {now ? (
+        <Text weight="bold">{`Now: ${now}`}</Text>
+      ) : null}
       {modes}
       {problem}
       {st === null ? (
@@ -402,6 +459,7 @@ export async function drawPane($: EngineInterface, e: RenderInput): Promise<Rend
           {stations.map(card)}
         </Box>
       )}
+      {onCard}
       {recent}
       <Box flexDirection="row" gap={1}>
         <Button key="refresh" onPress={() => refresh($)}>
@@ -493,6 +551,13 @@ export async function drawPane($: EngineInterface, e: RenderInput): Promise<Rend
           </Box>
         </Box>
         {modes}
+        <Text size="footnote" dimColor>
+          {list === null
+            ? 'Next: show your factories and pick one.'
+            : chosen === null
+              ? 'Next: pick the factory to work in.'
+              : 'Next: say what it should make and press Start. The request lands in your prompt box: press Enter to send it.'}
+        </Text>
         {problem}
         {body}
         {footer}

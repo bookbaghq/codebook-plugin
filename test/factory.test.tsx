@@ -59,8 +59,14 @@ function status(at: At) {
       { station: 'col40', name: 'Plan', run: 810, state: 'passed', summary: 'Six steps, written on the card.' },
       ...(isBuild ? [] : [{ station: 'col41', name: 'Build', run: 811, state: 'passed', summary: 'Draft pull request #212 is open.' }]),
     ],
-    events: [{ id: isBuild ? 9001 : 9002, kind: 'run.passed', occurred_at: '2026-11-01T10:00:00Z', station: 'Plan', subject: null }],
-    last_event: isBuild ? 9001 : 9002,
+    events: isBuild
+      ? [{ id: 9001, kind: 'run.passed', occurred_at: '2026-11-01T10:00:00Z', station: 'Plan', subject: null }]
+      : [
+          { id: 9002, kind: 'agent.assigned', occurred_at: '2026-11-01T10:01:00Z', station: 'Build', where: 'here', who: { agent: { name: 'Alex', role: 'Developer' }, person: { name: 'Tom', is_you: true }, via: 'Claude Code' } },
+          { id: 9003, kind: 'pr.linked', occurred_at: '2026-11-01T10:05:00Z', station: 'Build', subject: 'acme/payments#212 — Refunds', where: 'here' },
+          { id: 9004, kind: 'card.moved', occurred_at: '2026-11-01T10:06:00Z', station: 'Build', to_station: 'Review' },
+        ],
+    last_event: isBuild ? 9001 : 9004,
     url: 'https://app.codebook.work/workspace/ws1/factory/k3Vb9QmZ?card=6KjN',
   }
 }
@@ -75,6 +81,14 @@ function typed(args: string) {
   }
 }
 
+const TRAIL = {
+  story: { story: '6KjN', reference: '#57', title: 'Let customers refund a payment' },
+  comments: [{ id: 1, author: 'Alex (Developer) via Tom’s Claude Code', by: 'agent', text: 'Starting: refunds from the order page.\nMore.', at: '2026-11-01T10:02:00Z' }],
+  runs: [],
+  artifacts: [{ id: 3, kind: 'test_report', title: 'Tests' }],
+  pull_requests: [{ number: 212, title: 'Refunds', state: 'open', repository: 'acme/payments', url: 'https://github.com/acme/payments/pull/212' }],
+}
+
 type Calls = { tool: string; args: Record<string, unknown> }[]
 
 /** The engine beneath the plugin: a connected codebook server answering from the fixtures above. */
@@ -82,6 +96,7 @@ function engine(on: On, at: { now: At }) {
   const calls: Calls = []
   const prompts: string[] = []
   const filled: string[] = []
+  const logged: string[] = []
   mock.store(on)
   const clock = mock.clock(on, { now: 1_000_000 })
   on('command.register', () => ({ value: { command: 'factory' } }))
@@ -90,6 +105,10 @@ function engine(on: On, at: { now: At }) {
   on('prompt.submit', (_, e) => {
     prompts.push(e.text)
     return { text: e.text }
+  })
+  on('ui.log', (_, e) => {
+    logged.push(e.text)
+    return { value: undefined }
   })
   on('prompt.fill', (_, e) => {
     filled.push(e.text)
@@ -124,37 +143,19 @@ function engine(on: On, at: { now: At }) {
                 ? { factories: [{ factory: 'k3Vb9QmZ', name: 'Payments', workspace: { name: 'Claims' }, may_start_stories: true }], total: 1 }
                 : tool === 'set_run_location'
                   ? { next: "The story's agent stations now run in CodeBook." }
-                  : { error: { code: 'NOT_FOUND', message: 'no such tool here' } }
+                  : tool === 'story_trail'
+                    ? TRAIL
+                    : tool === 'confirm_stories'
+                      ? { proposal: { proposal: 'wo7', reference: 'WO-7', status: 'open' }, created: [{ item: 41, story: '6KjN', reference: '#57', title: 'Let customers refund a payment' }, { item: 42, story: '7LmP', reference: '#58', title: 'Refund email' }], skipped: [], waiting: [] }
+                      : { error: { code: 'NOT_FOUND', message: 'no such tool here' } }
   }
   on('mcp.call', (_, e) => {
     calls.push({ tool: e.tool, args: e.args })
-    const data =
-      e.tool === 'start_story'
-        ? {
-            story: { story: '6KjN', reference: '#57', title: String(e.args.title) },
-            factory: { factory: 'k3Vb9QmZ', name: 'Payments' },
-            workflow: { workflow: 'wf12', name: 'Delivery' },
-            station: { station: 'col40', name: 'Plan' },
-            run: { run: 810, state: 'queued' },
-            url: 'https://app.codebook.work/workspace/ws1/factory/k3Vb9QmZ?card=6KjN',
-          }
-        : e.tool === 'factory_board'
-          ? BOARD
-          : e.tool === 'story_status'
-            ? status(at.now)
-            : e.tool === 'approve_station'
-              ? { decided: 'approved', run: 812, next: 'Review approved; the story moves on.' }
-              : e.tool === 'heartbeat_work'
-                ? { run: 811, lease: { fence: 3, expires_at: '2026-11-01T10:20:00Z', seconds: 900, heartbeat_every_seconds: 300 } }
-                : e.tool === 'list_factories'
-                  ? { factories: [{ factory: 'k3Vb9QmZ', name: 'Payments', workspace: { name: 'Claims' }, may_start_stories: true }], total: 1 }
-                  : e.tool === 'set_run_location'
-                  ? { next: "The story's agent stations now run in CodeBook." }
-              : { error: { code: 'NOT_FOUND', message: 'no such tool here' } }
+    const data = answer(e.tool, e.args)
     const isError = 'error' in data
     return { value: { content: [{ type: 'text', text: JSON.stringify(data) }], structuredContent: data, isError } }
   })
-  return { calls, prompts, filled, clock }
+  return { calls, prompts, filled, logged, clock }
 }
 
 /** What the person does with the request the pane offered: sends it, and Claude starts the story. */
@@ -213,7 +214,7 @@ test('the plugin itself sends nothing while it follows a story: the manager sess
   await clock.advance(5000)
   expect(prompts.length).toBe(0)
   // Only reads went to CodeBook from the plugin.
-  expect(calls.every(one => ['factory_board', 'story_status', 'start_story'].includes(one.tool))).toBe(true)
+  expect(calls.every(one => ['factory_board', 'story_status', 'story_trail', 'start_story'].includes(one.tool))).toBe(true)
 })
 
 test('Work it here offers the worker request for a station waiting here', async ($, on) => {
@@ -320,5 +321,35 @@ test('the run choice shows which is chosen and switches on Choose', async ($, on
   expect(await ui.find({ key: 'run-cloud' })).toBeUndefined()
   expect(await ui.find({ key: 'run-here' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /run in CodeBook's cloud/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('new events of the followed story become lines in the chat, and the pane shows the card', async ($, on) => {
+  const at: { now: At } = { now: 'build' }
+  const { logged, clock } = engine(on, at)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await claudeStarts($)
+  // The first look fills the pane only.
+  expect(logged.length).toBe(0)
+  at.now = 'review'
+  await clock.advance(5000)
+  expect(logged).toEqual([
+    'CodeBook: Alex (Developer) is working #57 at Build, here.',
+    'CodeBook: Pull request acme/payments#212 — Refunds linked to #57.',
+    'CodeBook: ▸ #57 moved to Review.',
+  ])
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ type: 'Text', text: /ON THE CARD/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Starting: refunds from the order page\.$/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('confirming stories follows the first one created', async ($, on) => {
+  engine(on, { now: 'build' })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: 'mcp__plugin_codebook_codebook__confirm_stories', proposal: 'wo7', run_location: 'here' } as never)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ type: 'Text', text: /PAYMENTS FACTORY · #57/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /1 more created/ })).toBeDefined()
   await ui.unmount()
 })

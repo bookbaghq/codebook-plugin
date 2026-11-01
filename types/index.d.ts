@@ -36,7 +36,7 @@ export type CodebookStory = {
   inBacklog: boolean
   runHere: boolean | null
   canMove: boolean
-  waitingOn: 'person' | 'outside_agent' | 'runner' | null
+  waitingOn: 'person' | 'outside_agent' | 'runner' | 'review' | null
   waitingRun: number | null
   waitingOnYou: boolean
   waitingClaimed: boolean
@@ -67,6 +67,13 @@ export type CodebookFactory = {
   url: string | null
 }
 
+/** What the card holds, for the pane (G5b story_trail). */
+export type CodebookTrail = {
+  pullRequests: { label: string; url: string | null; state: string | null }[]
+  comments: { id: number; author: string; text: string }[]
+  artifacts: number
+}
+
 /** A CodeBook run this session holds, and the repositories its brief lets it change (`owner/name`). */
 export type CodebookClaim = { run: number; repos: string[] }
 
@@ -91,6 +98,7 @@ declare module 'claude-code' {
       sendingBack: boolean
       notice: string | null
       claims: Shaped<CodebookClaim[]>
+      trail: Shaped<CodebookTrail | null>
     }
   }
 }

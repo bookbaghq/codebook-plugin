@@ -102,7 +102,16 @@ async function statusText($: EngineInterface): Promise<{ text: string; context?:
 const OWN_TOOLS = 'mcp__plugin_codebook_codebook__'
 /** The reads the pane makes by itself (following the story the person chose); writes go through the person. */
 const OWN_READS = new Set(
-  ['list_factories', 'factory_board', 'story_status', 'list_my_work', 'manager_brief', 'read_agent_conversations'].map(
+  [
+    'list_factories',
+    'factory_board',
+    'story_status',
+    'list_my_work',
+    'manager_brief',
+    'read_agent_conversations',
+    'story_trail',
+    'factory_events',
+  ].map(
     name => OWN_TOOLS + name,
   ),
 )
