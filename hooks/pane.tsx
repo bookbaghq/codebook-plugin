@@ -338,6 +338,9 @@ export async function drawPane($: EngineInterface, e: RenderInput): Promise<Rend
                 <Link key={`pr-${pr.pull_request_id}`} href={pr.html_url} label={`Pull request #${pr.number ?? pr.pull_request_id}`} />
               ) : null,
             )}
+            {st.pullRequests.length > 0 ? (
+              <Text dimColor>Approving may merge the pull request: some factories merge on approval, even a draft.</Text>
+            ) : null}
             <Box flexDirection="row" gap={1}>
               <Button key="approve" variant="primary" onPress={() => approve($)}>
                 Approve

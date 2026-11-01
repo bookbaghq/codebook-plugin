@@ -69,8 +69,9 @@ factory's **manager** (the `factory-manager` skill) and works by CodeBook's rule
 6. **Done** means the card holds every comment (signed "Agent (role) via your Claude Code"), every run (marked "own
    plan, not billed"), the pull requests and the artifacts.
 
-Nothing is ever merged, pushed to a default branch or force-pushed. A factory whose policy keeps work in CodeBook
-refuses Run here.
+Claude and its workers never merge, push to a default branch or force-push. **Approving a person's station can
+merge**: a factory may merge the story's pull request when its station is approved, even a draft. Claude says so before
+it asks you, and the pane says so under Approve. A factory whose policy keeps work in CodeBook refuses Run here.
 
 **Only the factory's repositories change.** While a CodeBook run is held in the session, the plugin refuses any
 `git push` or `gh pr create` that reaches a repository the run's brief does not list (and CodeBook refuses to link a

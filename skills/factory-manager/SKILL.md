@@ -98,9 +98,14 @@ calls (`sleep 5` in the shell). For what you see:
      `complete_work` once with the crew's outcome and a summary naming who did what.
   When `runs` says `cloud` for a crew, CodeBook runs it in its cloud: say so and keep following.
 - **A person's station waiting for this person** (`waiting.on: "person"`, `on_you: true`): ask in the chat. Show the
-  station, what was done (the summary), and the pull request link, then ask "Approve, or send back (and why)?". Call
-  `approve_station` (with the pull request `heads` from `waiting.pull_requests`) or `send_back` with their reason. A
-  person's station for someone else: say who it waits for.
+  station, what was done (the summary), and the pull request link. **Then say what approving does to the pull
+  request, before asking.** A factory may merge on approval, draft or not. Read the `waiting` block, the station in
+  `manager_brief` and the `approve_station` tool's description for what approval does: when they say it merges, say
+  so plainly ("Approving merges PR #3 into main."); when you cannot tell, say "Approving may merge PR #3 into main:
+  this factory can merge on approval." Never tell the person approving does not merge unless CodeBook says so. Then
+  ask "Approve, or send back (and why)?". Call `approve_station` (with the pull request `heads` from
+  `waiting.pull_requests`) or `send_back` with their reason. A person's station for someone else: say who it waits
+  for.
 - **A review waiting for this person** (`waiting.on: "review"`, `on_you: true`): show each review's label and
   criteria and what was done, ask "Pass or fail (and why)?", then `answer_review { story, verdict, notes, review }`.
 - **A question from the manager or an escalation** (`story.question`): ask the person in the chat, then

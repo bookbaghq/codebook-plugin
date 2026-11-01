@@ -264,16 +264,18 @@ test('Run in CodeBook moves the followed story', async ($, on) => {
   await ui.unmount()
 })
 
-test('Approve in the pane offers the approval with the pull request heads', async ($, on) => {
+test('Approve in the pane warns it may merge and offers the approval with the pull request heads', async ($, on) => {
   const { filled } = engine(on, { now: 'review' })
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await claudeStarts($)
 
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   expect(await ui.find({ type: 'Text', text: /Needs you/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Approving may merge the pull request/ })).toBeDefined()
   await ui.press({ key: 'approve' })
   expect(filled.at(-1)).toContain('Approve the Review station')
   expect(filled.at(-1)).toContain('[{"pull_request_id":5,"head_sha":"abc"}]')
+  expect(filled.at(-1)).toContain('may merge the pull request')
   await ui.unmount()
 })
 

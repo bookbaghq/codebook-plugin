@@ -494,7 +494,8 @@ export async function approve($: EngineInterface): Promise<void> {
   await offer(
     $,
     `Approve the ${station} station of ${storyRef(a)} with approve_station` +
-      (heads.length > 0 ? `, binding the pull request heads ${JSON.stringify(heads)}.` : '.'),
+      (heads.length > 0 ? `, binding the pull request heads ${JSON.stringify(heads)}.` : '.') +
+      (heads.length > 0 ? ' (Approving may merge the pull request: this factory can merge on approval.)' : ''),
     'The approval',
   )
 }
