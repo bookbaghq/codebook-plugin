@@ -55,7 +55,7 @@ pass `new: true` only when they say it really is different work.
 Show the proposal plainly: its reference (WO-7), each story's title, a one-line summary and risk, and the link. Then ask,
 in these words: **"Proceed?"** Wait for the person.
 
-- Yes → `confirm_stories { proposal, run_location: "here" }`. Say which stories were created (#58, #59) and where each
+- Yes → `confirm_stories { proposal }` (the stories run here for you, the proposal's runner). Say which stories were created (#58, #59) and where each
   starts.
 - They change something → `propose_stories` again with `proposal` to add to it, or `discard_proposal` with `stories`
   for the ones to drop, then ask again.
@@ -70,10 +70,12 @@ calls (`sleep 5` in the shell). For what you see:
   `codebook:factory-worker` sub-agent for that run (`subagent_type: "codebook:factory-worker"`), telling it the run
   number, the story, the station and the agent's name. Independent stories' runs may go in parallel. Say:
   "Alex (Developer) is working #58 at Build, spawned here."
-- **A QA station**: the same, and tell the worker it is a QA station: it runs the repository's tests and the
-  station's checks here and reports the evidence.
-- **A crew station**: spawn one worker per crew member the brief names, each with that member's part; you lead the
-  crew: collect their results and have the run reported once.
+- **A QA station**: the same. Its brief carries CodeBook's "Test it here" skill (`run_here.testing`), so the worker
+  runs the repository's tests and the station's checks here and posts the evidence; say "Maya (QA) is testing #58
+  here."
+- **A crew station**: when `stations[].runs` says `cloud` for it, CodeBook runs the crew in its cloud: say so and keep
+  following. Only when a crew's run waits here and its brief names the members, spawn one worker per member with that
+  member's part and lead them yourself: collect their results and have the run reported once.
 - **A person's station waiting for this person** (`waiting.on: "person"`, `on_you: true`): ask in the chat. Show the
   station, what was done (the summary), and the pull request link, then ask "Approve, or send back (and why)?". Call
   `approve_station` (with the pull request `heads` from `waiting.pull_requests`) or `send_back` with their reason. A
@@ -88,8 +90,10 @@ calls (`sleep 5` in the shell). For what you see:
 - **Stuck or failed**: say so with the station's summary, and offer `start_card` (retry, with guidance),
   `send_card` (to another station) or `stop_card`. Never retry in a loop by yourself.
 
-To steer a Run here story use `assign_work`, `start_card`, `send_card`, `stop_card`; to ask an agent a question use
-`ask_agent`, then spawn that agent here with its `answer_here` skill to answer it.
+To steer a Run here story use `assign_work`, `start_card`, `send_card`, `stop_card`. To ask an agent a question use
+`ask_agent`: its `answer_here` names the agent, the call that fetches its skill (`manager_brief { factory, agent }`)
+and the call for its reply (`story_comment { story, agent }`); spawn a sub-agent with that skill to answer, and post
+the answer with `story_comment` as that agent.
 
 ## 5. Narrate
 
