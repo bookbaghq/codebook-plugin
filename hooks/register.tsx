@@ -136,7 +136,19 @@ async function statusText($: EngineInterface): Promise<{ text: string; context?:
   return { text, context: [JSON.stringify({ codebook_story: a, stations: s.stations, waiting: s.waitingOn })] }
 }
 
+/** The plugin's own connector tools, as the permission check names them. */
+const OWN_TOOLS = 'mcp__plugin_codebook_codebook__'
+
 export const register: Register = on => {
+  // The pane's and /factory's own calls to the connector: the person's press or command (or the timer that follows the
+  // story they chose) is the grant. Auto mode's classifier judges the model's requests and has no verdict for these,
+  // so they are allowed here. The model's own calls of the same tools are not touched (their origin is the engine).
+  on('tool.check', ($, e, next) =>
+    next.origin.plugin === $.plugin.name && e.tool.startsWith(OWN_TOOLS)
+      ? { decision: 'allow', reason: 'The CodeBook Factory pane or /factory, on the person’s behalf.' }
+      : next(e),
+  ).catch(($, e, next) => next(e))
+
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'factory',

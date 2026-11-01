@@ -51,8 +51,12 @@ export async function call<T>($: EngineInterface, tool: string, args: Record<str
   try {
     result = await $.mcp.call(named.data, tool, args)
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    const isSignIn = /401|unauthori[sz]ed|auth/i.test(message)
+    const raw = error instanceof Error ? error.message : String(error)
+    // The engine's refusal names the call and the permission check; say it in the pane's words.
+    const message = /classifier|permission|refused/i.test(raw)
+      ? `Claude Code's permission check refused the call to CodeBook (${tool}). ${raw.replace(/^.*refused:\s*/, '').slice(0, 200)}`
+      : raw
+    const isSignIn = /\b401\b|unauthori[sz]ed|needs auth/i.test(raw)
     if (isSignIn) serverName = null
     return { ok: false, code: isSignIn ? 'SIGN_IN' : 'UNREACHABLE', message: isSignIn ? SIGN_IN : message, isSignIn }
   }

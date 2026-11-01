@@ -36,42 +36,48 @@ const notice = atom({ plugin: 'codebook', key: 'notice' } as const, null as stri
 
 export const PANE = 'codebook-factory'
 
+// CodeBook's teal and the status tints. Text takes the surface's own theme colours (dark or light); a colour
+// is written only where its background is written beside it (the pills), so every pairing reads in both themes.
 const TEAL = '#2F6E60'
-const INK = '#1B2422'
-const MUTED = '#46524E'
-const SOFT = '#66716D'
-const LINE = '#E3EEEA'
-const MIST = '#F3F7F5'
+const TEAL_BRIGHT = '#3E8F7D'
+const LINE = '#7F8C88'
 
 type Tone = 'done' | 'running' | 'person' | 'you' | 'waiting' | 'bad'
 
 const TONES: Record<Tone, { pill: string; ink: string; tint: string; border: string }> = {
-  done: { pill: '#DDF1E9', ink: '#14583E', tint: '#E3F2ED', border: '#CDE7DD' },
-  running: { pill: '#E3EEF9', ink: '#204A82', tint: '#EAF3F7', border: '#9FC3E6' },
-  person: { pill: '#FFE8DA', ink: '#8A4313', tint: '#FFF0E6', border: '#F2BE96' },
-  you: { pill: '#FFE8DA', ink: '#8A4313', tint: '#FFF0E6', border: '#F2BE96' },
-  waiting: { pill: '#EDF4F1', ink: '#46524E', tint: MIST, border: LINE },
-  bad: { pill: '#FBE1DE', ink: '#8E2A1F', tint: '#FCEDEB', border: '#EBB3AB' },
+  done: { pill: '#DDF1E9', ink: '#14583E', tint: '#DDF1E9', border: TEAL_BRIGHT },
+  running: { pill: '#E3EEF9', ink: '#204A82', tint: '#E3EEF9', border: '#6F9FD3' },
+  person: { pill: '#FFE8DA', ink: '#8A4313', tint: '#FFE8DA', border: '#E59A63' },
+  you: { pill: '#FFE8DA', ink: '#8A4313', tint: '#FFE8DA', border: '#E59A63' },
+  waiting: { pill: '#E6ECEA', ink: '#3A4542', tint: '#E6ECEA', border: LINE },
+  bad: { pill: '#FBE1DE', ink: '#8E2A1F', tint: '#FBE1DE', border: '#D9786B' },
 }
 
-/** A rounded tile holding one illustration, as an Svg (the desktop's picture element). */
+/** A rounded tile holding one illustration: an Svg with the picture embedded (the desktop draws an Svg as an image). */
 function tile(name: ArtName, size: number, tint: string): string {
   const pad = Math.round(size * 0.07)
   const inner = size - pad * 2
   return (
-    `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">` +
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">` +
     `<rect width="${size}" height="${size}" rx="${Math.round(size * 0.28)}" fill="${tint}"/>` +
-    `<image x="${pad}" y="${pad}" width="${inner}" height="${inner}" href="${ART[name]}" xlink:href="${ART[name]}"/>` +
+    `<image x="${pad}" y="${pad}" width="${inner}" height="${inner}" href="${ART[name]}"/>` +
     `</svg>`
   )
 }
+
+/** The CodeBook mark: a teal rounded square with a white C, vector only. */
+const MARK =
+  '<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 28 28">' +
+  `<rect width="28" height="28" rx="8" fill="${TEAL}"/>` +
+  '<path d="M18.2 10.1a6 6 0 1 0 0 7.8" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round"/>' +
+  '</svg>'
 
 function bar(done: number, total: number, width: number): string {
   const filled = total === 0 ? 0 : Math.round((done / total) * width)
   return (
     `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="8" viewBox="0 0 ${width} 8">` +
-    `<rect width="${width}" height="8" rx="4" fill="#DCE8E3"/>` +
-    (filled > 0 ? `<rect width="${filled}" height="8" rx="4" fill="${TEAL}"/>` : '') +
+    `<rect width="${width}" height="8" rx="4" fill="${LINE}" fill-opacity="0.35"/>` +
+    (filled > 0 ? `<rect width="${filled}" height="8" rx="4" fill="${TEAL_BRIGHT}"/>` : '') +
     `</svg>`
   )
 }
@@ -149,13 +155,12 @@ function look(s: CodebookStation, st: CodebookStory | null): { tone: Tone; label
 export async function drawPane($: EngineInterface, e: RenderInput): Promise<RenderElement> {
   const els = $.ui.resolve(e)
   const { Box, Text, Button, Link } = els
-  const hasPictures = e.surface !== 'terminal'
-  const Svg = 'Svg' in els ? els.Svg : null
+  const Svg = e.surface !== 'terminal' && 'Svg' in els ? els.Svg : null
   const Input = 'Input' in els ? els.Input : null
   const width = Math.max(28, ('bodyColumns' in e.props ? Number(e.props.bodyColumns) : 60) || 60)
 
   const picture = (name: ArtName, size: number, tint: string) =>
-    hasPictures && Svg ? <Svg source={tile(name, size, tint)} alt="" width={size} height={size} /> : null
+    Svg ? <Svg source={tile(name, size, tint)} alt={`${name} illustration`} width={size} height={size} /> : null
 
   const pill = (tone: Tone, label: string) => (
     <Text backgroundColor={TONES[tone].pill} color={TONES[tone].ink} weight="bold" size="footnote">
@@ -172,16 +177,20 @@ export async function drawPane($: EngineInterface, e: RenderInput): Promise<Rend
 
   const header = (
     <Box flexDirection="row" alignItems="center" gap={1}>
-      <Text backgroundColor={TEAL} color="#FFFFFF" weight="bold">
-        {' C '}
-      </Text>
-      <Text weight="bold" size="heading" color={INK}>
+      {Svg ? (
+        <Svg source={MARK} alt="CodeBook" width={28} height={28} />
+      ) : (
+        <Text backgroundColor={TEAL} color="#FFFFFF" weight="bold">
+          {' C '}
+        </Text>
+      )}
+      <Text weight="bold" size="heading">
         Factory
       </Text>
       <Box flexGrow={1} />
       {l.state === 'ok' && a !== null && st?.finished == null ? pill('done', '● Live') : null}
       {l.state === 'signin' ? pill('person', 'Sign in') : null}
-      {l.state === 'error' ? pill('bad', 'Offline') : null}
+      {l.state === 'error' ? pill('bad', 'Not reached') : null}
     </Box>
   )
 
@@ -196,20 +205,14 @@ export async function drawPane($: EngineInterface, e: RenderInput): Promise<Rend
         flexGrow={1}
         padding={1}
         borderStyle="round"
-        borderColor={isOn ? TEAL : LINE}
-        backgroundColor={isOn ? '#EFF7F4' : '#FFFFFF'}
+        borderColor={isOn ? TEAL_BRIGHT : LINE}
       >
-        {picture(where === 'here' ? 'here' : 'cloud', 44, isOn ? '#E3F2ED' : MIST)}
-        <Box flexDirection="column">
-          <Button
-            key={`run-${where}`}
-            plain
-            variant={isOn ? 'primary' : 'secondary'}
-            onPress={() => setMode($, where)}
-          >
+        {picture(where === 'here' ? 'here' : 'cloud', 44, isOn ? TONES.done.tint : TONES.waiting.tint)}
+        <Box flexDirection="column" gap={0}>
+          <Button key={`run-${where}`} variant={isOn ? 'primary' : 'secondary'} onPress={() => setMode($, where)}>
             {where === 'here' ? 'Run here' : 'Run in CodeBook'}
           </Button>
-          <Text size="footnote" color={MUTED}>
+          <Text size="footnote" dimColor>
             {where === 'here' ? 'Your Claude, this checkout' : "CodeBook's cloud"}
           </Text>
         </Box>
@@ -224,10 +227,17 @@ export async function drawPane($: EngineInterface, e: RenderInput): Promise<Rend
     </Box>
   )
 
+  const problem =
+    l.state === 'error' ? (
+      <Text color="error" size="footnote">
+        {l.message}
+      </Text>
+    ) : null
+
   const footer = (
     <Box flexDirection="column" gap={1}>
       {said ? (
-        <Text size="footnote" color={MUTED}>
+        <Text size="footnote" dimColor>
           {said}
         </Text>
       ) : null}
@@ -239,11 +249,11 @@ export async function drawPane($: EngineInterface, e: RenderInput): Promise<Rend
     return (
       <Box flexDirection="column" gap={1}>
         {header}
-        <Box flexDirection="row" alignItems="center" gap={1} padding={1} backgroundColor={MIST}>
-          {picture('factory', 72, '#E3F2ED')}
-          <Text color={INK}>{l.message}</Text>
+        <Box flexDirection="row" alignItems="center" gap={2} padding={1} borderStyle="round" borderColor={TEAL_BRIGHT}>
+          {picture('factory', 72, TONES.done.tint)}
+          <Text>{l.message}</Text>
         </Box>
-        <Button key="retry" onPress={() => (a ? refresh($) : loadFactories($))}>
+        <Button key="retry" variant="primary" onPress={() => (a ? refresh($) : loadFactories($))}>
           I've signed in — try again
         </Button>
       </Box>
@@ -260,20 +270,20 @@ export async function drawPane($: EngineInterface, e: RenderInput): Promise<Rend
   const log = (await read($, events)).slice(-4)
 
   const hero = (
-    <Box flexDirection="row" alignItems="center" gap={2} padding={1} backgroundColor={MIST}>
-      {picture('factory', 84, '#E3F2ED')}
+    <Box flexDirection="row" alignItems="center" gap={2} padding={1} borderStyle="round" borderColor={TEAL_BRIGHT}>
+      {picture('factory', 84, TONES.done.tint)}
       <Box flexDirection="column" flexGrow={1} gap={0}>
-        <Text size="caption" weight="bold" color={SOFT}>
+        <Text size="caption" weight="bold" dimColor>
           {`${a.factoryName.toUpperCase()} FACTORY · ${a.reference}`}
         </Text>
-        <Text size="heading" weight="bold" color={INK}>
+        <Text size="heading" weight="bold">
           {a.title}
         </Text>
         <Box flexDirection="row" alignItems="center" gap={1}>
-          {hasPictures && Svg ? (
-            <Svg source={bar(done, stations.length, 220)} alt={`${done} of ${stations.length} stations done`} width={220} height={8} />
+          {Svg ? (
+            <Svg source={bar(done, stations.length, 200)} alt={`${done} of ${stations.length} stations done`} width={200} height={8} />
           ) : null}
-          <Text size="footnote" weight="bold" color={MUTED}>
+          <Text size="footnote" weight="bold" dimColor>
             {st?.finished === 'done'
               ? 'Done'
               : st?.finished === 'dropped'
@@ -301,16 +311,13 @@ export async function drawPane($: EngineInterface, e: RenderInput): Promise<Rend
         gap={1}
         padding={1}
         borderStyle="round"
-        borderColor={s.isCurrent ? TONES[tone].border : tone === 'done' ? TONES.done.border : LINE}
-        backgroundColor="#FFFFFF"
+        borderColor={s.isCurrent || tone === 'done' ? TONES[tone].border : LINE}
       >
         <Box flexDirection="row" alignItems="center" gap={1}>
           {picture(artFor(s), 52, TONES[tone].tint)}
           <Box flexDirection="column" flexGrow={1}>
-            <Text weight="bold" color={INK}>
-              {s.name}
-            </Text>
-            <Text size="footnote" color={MUTED}>
+            <Text weight="bold">{s.name}</Text>
+            <Text size="footnote" dimColor>
               {s.summary && tone !== 'waiting' ? s.summary.slice(0, 140) : who(s, runsHere)}
             </Text>
           </Box>
@@ -361,11 +368,11 @@ export async function drawPane($: EngineInterface, e: RenderInput): Promise<Rend
   const recent =
     log.length === 0 ? null : (
       <Box flexDirection="column" gap={0}>
-        <Text size="caption" weight="bold" color={SOFT}>
+        <Text size="caption" weight="bold" dimColor>
           LATEST
         </Text>
         {log.map(ev => (
-          <Text key={`ev-${ev.id}`} size="footnote" color={MUTED}>
+          <Text key={`ev-${ev.id}`} size="footnote" dimColor>
             {ev.station ? `${ev.station} · ` : ''}
             {ev.text}
           </Text>
@@ -378,8 +385,9 @@ export async function drawPane($: EngineInterface, e: RenderInput): Promise<Rend
       {header}
       {hero}
       {modes}
+      {problem}
       {st === null ? (
-        <Text color={MUTED}>{l.state === 'error' ? l.message : 'Asking CodeBook where the story is…'}</Text>
+        l.state === 'error' ? null : <Text dimColor>Asking CodeBook where the story is…</Text>
       ) : (
         <Box flexDirection="column" gap={1}>
           {stations.map(card)}
@@ -387,10 +395,10 @@ export async function drawPane($: EngineInterface, e: RenderInput): Promise<Rend
       )}
       {recent}
       <Box flexDirection="row" gap={1}>
-        <Button key="refresh" plain onPress={() => refresh($)}>
+        <Button key="refresh" onPress={() => refresh($)}>
           Refresh
         </Button>
-        <Button key="stop" plain onPress={() => unfollow($)}>
+        <Button key="stop" onPress={() => unfollow($)}>
           Pick another story
         </Button>
       </Box>
@@ -404,28 +412,41 @@ export async function drawPane($: EngineInterface, e: RenderInput): Promise<Rend
     const chosen = await read($, picked)
     const body =
       list === null ? (
-        <Button key="load" variant="primary" onPress={() => loadFactories($)}>
-          Show my factories
+        <Button
+          key="load"
+          variant="primary"
+          onPress={async () => {
+            await update($, busy, () => 'load')
+            await loadFactories($)
+            await update($, busy, () => null)
+          }}
+        >
+          {working === 'load' ? 'Asking CodeBook…' : 'Show my factories'}
         </Button>
       ) : list.length === 0 ? (
-        <Text color={MUTED}>No factories yet. Make one on app.codebook.work, then come back.</Text>
+        <Text dimColor>No factories yet. Make one on app.codebook.work, then come back.</Text>
       ) : chosen === null ? (
         <Box flexDirection="column" gap={1}>
-          <Text weight="bold" color={INK}>
-            Pick a factory
-          </Text>
+          <Text weight="bold">Pick a factory</Text>
           {list.map(f => (
-            <Button key={`factory-${f.factory}`} plain onPress={() => update($, picked, () => f)}>
-              {f.name}
-              <Text dimColor>{f.workspace ? `  ${f.workspace}` : ''}</Text>
-            </Button>
+            <Box key={`factory-${f.factory}`} flexDirection="row" alignItems="center" gap={1} padding={1} borderStyle="round" borderColor={LINE}>
+              {picture('templates', 36, TONES.waiting.tint)}
+              <Box flexDirection="column" flexGrow={1}>
+                <Text weight="bold">{f.name}</Text>
+                <Text size="footnote" dimColor>
+                  {f.workspace ? `Workspace ${f.workspace}` : 'Factory'}
+                  {f.mayStart ? '' : ' · watch only'}
+                </Text>
+              </Box>
+              <Button key={`pick-${f.factory}`} onPress={() => update($, picked, () => f)}>
+                Choose
+              </Button>
+            </Box>
           ))}
         </Box>
       ) : (
         <Box flexDirection="column" gap={1}>
-          <Text weight="bold" color={INK}>
-            {`New story in ${chosen.name}`}
-          </Text>
+          <Text weight="bold">{`New story in ${chosen.name}`}</Text>
           {Input && chosen.mayStart ? (
             <Input
               key="title"
@@ -442,13 +463,13 @@ export async function drawPane($: EngineInterface, e: RenderInput): Promise<Rend
               }}
             />
           ) : (
-            <Text color={MUTED}>
+            <Text dimColor>
               {chosen.mayStart
                 ? `Type /factory run "${chosen.name}" "<story title>" to start one.`
                 : 'You can watch this factory but not start stories in it.'}
             </Text>
           )}
-          <Button key="back" plain onPress={() => update($, picked, () => null)}>
+          <Button key="back" onPress={() => update($, picked, () => null)}>
             ← Other factories
           </Button>
         </Box>
@@ -457,17 +478,17 @@ export async function drawPane($: EngineInterface, e: RenderInput): Promise<Rend
     return (
       <Box flexDirection="column" gap={1}>
         {header}
-        <Box flexDirection="row" alignItems="center" gap={2} padding={1} backgroundColor={MIST}>
-          {picture('factory', 84, '#E3F2ED')}
-          <Box flexDirection="column" flexGrow={1}>
-            <Text size="heading" weight="bold" color={INK}>
+        <Box flexDirection="row" alignItems="center" gap={2} padding={1} borderStyle="round" borderColor={TEAL_BRIGHT}>
+          {picture('factory', 84, TONES.done.tint)}
+          <Box flexDirection="column" flexGrow={1} gap={0}>
+            <Text size="heading" weight="bold">
               Run a CodeBook factory from here
             </Text>
-            <Text color={MUTED}>Start a story and watch its stations move. You approve the person stations here.</Text>
+            <Text dimColor>Start a story and watch its stations move. You approve the person stations here.</Text>
           </Box>
         </Box>
         {modes}
-        {l.state === 'error' ? <Text color={TONES.bad.ink}>{l.message}</Text> : null}
+        {problem}
         {body}
         {footer}
       </Box>

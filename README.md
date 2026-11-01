@@ -74,6 +74,13 @@ story and you still approve your stations here. Nothing runs on your computer un
 Open Claude Code in the repository the factory works on: the worker works in the current checkout and stops (blocked)
 if it is the wrong one.
 
+## Permissions
+
+The Factory pane and `/factory` call the CodeBook connector themselves: when you press a button, type the command, or
+while the pane follows the story you chose. Claude Code's auto mode judges only requests the model makes, so the
+plugin approves these calls of its own, to its own connector and nothing else. Claude's own calls of the CodeBook
+tools (for example the factory-worker's) still go through your permission settings as usual.
+
 ## What is sent where
 
 - **To CodeBook (app.codebook.work)**, over the connector, signed in as you: the factory and story you pick, the story

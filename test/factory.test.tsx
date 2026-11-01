@@ -248,3 +248,9 @@ test('/factory list names the factories', async ($, on) => {
   const ran = await $.command.run(typed('list'))
   expect(ran.text).toBe('Payments (Claims)')
 })
+
+test("the model's own calls of the connector are left to the person's permission settings", async ($, on) => {
+  on('tool.check', () => ({ decision: 'ask', reason: 'the mode decides' }))
+  const verdict = await $.tool.check({ tool: 'mcp__plugin_codebook_codebook__start_story', input: { factory: 'Payments' } })
+  expect(verdict.decision).toBe('ask')
+})
