@@ -86,7 +86,8 @@ calls (`sleep 5` in the shell). For what you see:
      leader's: when it is false, no member changes code (say `why_not`).
   2. Split the story into at most `max_tasks` parts by the members' `focus`. For each, fetch the member's skill
      (`skill.fetch`, a `manager_brief { factory, agent }` call) and spawn a `codebook:factory-worker` sub-agent in
-     **crew member mode**: give it the member's name and skill, its part, the run number and fence, the branch
+     **crew member mode** (its notes take `member`, so each is signed by that member; the lead's own notes leave it
+     out and are signed as the leader): give it the member's name and skill, its part, the run number and fence, the branch
      (`card_reference.branch`) and whether it may change code (`repository_access`). At most `max_parallel` at once;
      parts that touch the same files go one after another. Say "Crew 'Web' on #58: Ben (Frontend) and Ana (API),
      spawned here."
