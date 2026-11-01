@@ -189,8 +189,8 @@ test('/factory run offers the start request; once Claude starts it, the pane dra
   expect(ran.text).toContain('press Enter')
   // The plugin writes nothing itself: the request waits in the person's prompt box.
   expect(calls.find(one => one.tool === 'start_story')).toBeUndefined()
-  expect(filled[0]).toContain('"Payments"')
-  expect(filled[0]).toContain('run_location "here"')
+  expect(filled[0]).toContain('codebook:factory-manager')
+  expect(filled[0]).toContain('"Payments": Let customers refund a payment')
 
   await claudeStarts($)
 
@@ -205,17 +205,26 @@ test('/factory run offers the start request; once Claude starts it, the pane dra
   }
 })
 
-test('a station waiting here is handed to the factory-worker once', async ($, on) => {
-  const { prompts, clock } = engine(on, { now: 'build' })
+test('the plugin itself sends nothing while it follows a story: the manager session runs the stations', async ($, on) => {
+  const { prompts, calls, clock } = engine(on, { now: 'build' })
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await claudeStarts($)
+  await clock.advance(5000)
+  await clock.advance(5000)
+  expect(prompts.length).toBe(0)
+  // Only reads went to CodeBook from the plugin.
+  expect(calls.every(one => ['factory_board', 'story_status', 'start_story'].includes(one.tool))).toBe(true)
+})
 
-  await clock.advance(5000)
-  await clock.advance(5000)
-  await clock.advance(5000)
-  const handed = prompts.filter(text => text.includes('codebook:factory-worker'))
-  expect(handed.length).toBe(1)
-  expect(handed[0]).toContain('run 811')
+test('Work it here offers the worker request for a station waiting here', async ($, on) => {
+  const { filled } = engine(on, { now: 'build' })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await claudeStarts($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'work-here' })
+  expect(filled.at(-1)).toContain('codebook:factory-worker')
+  expect(filled.at(-1)).toContain('run 811')
+  await ui.unmount()
 })
 
 test('a cloud story is offered with run_location cloud', async ($, on) => {
@@ -233,7 +242,8 @@ test('a story typed in the pane is offered, not started', async ($, on) => {
   await ui.press({ key: 'load' })
   await ui.press({ key: 'pick-k3Vb9QmZ' })
   await ui.input({ key: 'title', text: 'Add a discount' })
-  expect(filled[0]).toContain('titled "Add a discount"')
+  expect(filled[0]).toContain('codebook:factory-manager')
+  expect(filled[0]).toContain('Add a discount')
   expect(calls.find(one => one.tool === 'start_story')).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: /press Enter/ })).toBeDefined()
   await ui.unmount()

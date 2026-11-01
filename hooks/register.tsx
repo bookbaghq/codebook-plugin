@@ -1,6 +1,6 @@
-// The CodeBook plugin's hooks: the /factory command, the Factory pane beside the chat, and the
-// timer that follows the story and hands run-here stations to the factory-worker agent. The plugin
-// itself only reads CodeBook; every write is a request the person sends and Claude makes.
+// The CodeBook plugin's hooks: the /factory command, the Factory pane beside the chat, the timer that follows the
+// story, and the repository guard. The plugin itself only reads CodeBook; every write is a request the person sends
+// and Claude makes (Run here: the codebook:factory-manager skill runs the stations with sub-agents).
 
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
@@ -33,7 +33,6 @@ const factories = atom({ plugin: 'codebook', key: 'factories' } as const, null, 
 const link = atom({ plugin: 'codebook', key: 'link' } as const, { state: 'idle' } as CodebookLink, {
   shape: 'link-1',
 })
-const handed = atom({ plugin: 'codebook', key: 'handed' } as const, [] as number[])
 const claims = atom({ plugin: 'codebook', key: 'claims' } as const, [] as CodebookClaim[], { shape: 'claims-1' })
 
 const POLL_MS = 4000
@@ -42,29 +41,6 @@ const QUIET_POLL_MS = 30000
 // Module memory: rebuilt after a reload from the next poll.
 let lastPoll = 0
 let isPolling = false
-
-function workerPrompt(a: CodebookActive, s: CodebookStory): string {
-  const at = s.stations.find(one => one.isCurrent)?.name ?? 'its station'
-  return [
-    `CodeBook: story ${a.reference} "${a.title}" (${a.factoryName}) is waiting at ${at} for an agent here (run ${s.waitingRun}).`,
-    `Use the codebook:factory-worker agent to claim run ${s.waitingRun}, do the station's work in this checkout, open a draft pull request, and report the outcome to CodeBook.`,
-  ].join(' ')
-}
-
-/** Hands a run-here station to this session once, as a prompt the person sees. */
-async function handOff($: EngineInterface): Promise<void> {
-  const a = await read($, active)
-  const s = await read($, story)
-  if (a === null || s === null || s.waitingRun === null || s.waitingClaimed) return
-  // A run-here run waits for THIS person's runner; an outside-agent station is taken here only in "Run here" mode.
-  const isMine = s.waitingOn === 'runner' && s.waitingOnYou
-  const isOpen = s.waitingOn === 'outside_agent' && (await read($, mode)) === 'here'
-  if (!isMine && !isOpen) return
-  const run = s.waitingRun
-  if ((await read($, handed)).includes(run)) return
-  await update($, handed, list => [...list, run].slice(-50))
-  await $.prompt.submit({ text: workerPrompt(a, s) })
-}
 
 async function tick($: EngineInterface): Promise<void> {
   if (isPolling) return
@@ -78,7 +54,6 @@ async function tick($: EngineInterface): Promise<void> {
   try {
     lastPoll = now
     await refresh($)
-    await handOff($)
   } finally {
     isPolling = false
   }
@@ -126,7 +101,11 @@ async function statusText($: EngineInterface): Promise<{ text: string; context?:
 /** The plugin's own connector tools, as the permission check and tool.call name them. */
 const OWN_TOOLS = 'mcp__plugin_codebook_codebook__'
 /** The reads the pane makes by itself (following the story the person chose); writes go through the person. */
-const OWN_READS = new Set(['list_factories', 'factory_board', 'story_status', 'list_my_work'].map(name => OWN_TOOLS + name))
+const OWN_READS = new Set(
+  ['list_factories', 'factory_board', 'story_status', 'list_my_work', 'manager_brief', 'read_agent_conversations'].map(
+    name => OWN_TOOLS + name,
+  ),
+)
 
 /** The repository a push or pull request reaches, as `owner/name`, from the remote's address in that checkout. */
 async function reaches($: EngineInterface, target: Target): Promise<string | null> {
@@ -270,7 +249,9 @@ export const register: Register = on => {
       await openPane($)
       return {
         text: filled.isFilled
-          ? 'The request to start the story is in your prompt box: press Enter to send it. The Factory pane follows the story once CodeBook has it.'
+          ? where === 'here'
+            ? 'The request is in your prompt box: press Enter. Claude, as the factory manager, will write the stories, ask "proceed?", then run the stations here.'
+            : 'The request to start the story is in your prompt box: press Enter to send it. The Factory pane follows the story once CodeBook has it.'
           : `Send this in the chat to start the story: ${request}`,
       }
     }

@@ -25,8 +25,8 @@ Call `claim_work { run }`. Keep two things from its answer:
   `brief.run_here`: the `repository` to work in (`name`, `url`, `default_branch`, or null), `may_change_code`,
   and `how` (CodeBook's own steps for a run here; follow them).
 
-Read all of it. If the claim is refused (CONFLICT: someone else has it, it is no longer waiting; FORBIDDEN: it is
-another person's run), say so and stop.
+Read all of it. If the claim is refused (CONFLICT: someone else has it, it is no longer waiting, or "No story, no work":
+the run has no story; FORBIDDEN: it is another person's run), say so and stop.
 
 ## 2. Check you are in the right place
 
@@ -50,6 +50,11 @@ another person's run), say so and stop.
 5. Push the branch and open a **draft** pull request with `gh pr create --draft`, its body naming the
    CodeBook story (reference, title, and the story link when the brief has one) and what you changed and
    tested. Never merge, never mark it ready, never push to the default branch, never force-push.
+
+**A story-writing station** (the business analyst): when `brief.run_here.story_writing.may_propose_stories` is true,
+write the stories as a proposal with `propose_stories { factory, request, stories, run, fence }`, following its `how`.
+They become stories only when the person confirms in the main session; never create stories any other way. Then
+report the run with the proposal's reference in the summary.
 
 A planning or review station may produce text instead of code (`must_produce` says so). Then write it as
 the station asks, and pass it as an artifact; no branch or pull request is needed unless the station asks.

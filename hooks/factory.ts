@@ -27,7 +27,6 @@ export const link = atom({ plugin: 'codebook', key: 'link' } as const, { state: 
 })
 export const busy = atom({ plugin: 'codebook', key: 'busy' } as const, null as string | null)
 export const sendingBack = atom({ plugin: 'codebook', key: 'sendingBack' } as const, false)
-export const handed = atom({ plugin: 'codebook', key: 'handed' } as const, [] as number[])
 export const notice = atom({ plugin: 'codebook', key: 'notice' } as const, null as string | null)
 
 export const STORE_ACTIVE = 'active-1'
@@ -331,14 +330,13 @@ export async function setMode($: EngineInterface, to: CodebookMode): Promise<str
   return null
 }
 
-/** The words that ask Claude to start a story; with run here, CodeBook leaves its agent stations to this Claude. */
+/** The words that start work: Run here hands the request to the factory-manager skill (stories, "proceed?", then
+ * every station here); Run in CodeBook starts one story in CodeBook's cloud. */
 export function startRequest(factory: string, title: string, where: CodebookMode): string {
-  return (
-    `Start a story in the CodeBook factory "${factory}" titled "${title.replace(/"/g, "'")}", ` +
-    (where === 'here'
-      ? 'with its agent stations run here, on my computer (start_story with run_location "here").'
-      : 'with its agent stations run in CodeBook\'s cloud (start_story with run_location "cloud").')
-  )
+  const said = title.replace(/"/g, "'")
+  return where === 'here'
+    ? `Use the codebook:factory-manager skill to run this here, in the CodeBook factory "${factory}": ${said}`
+    : `Start a story in the CodeBook factory "${factory}" titled "${said}", with its agent stations run in CodeBook's cloud (start_story with run_location "cloud").`
 }
 
 /** Offers the start request from the pane. */

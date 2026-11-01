@@ -89,7 +89,6 @@ declare module 'claude-code' {
       link: Shaped<CodebookLink>
       busy: string | null
       sendingBack: boolean
-      handed: number[]
       notice: string | null
       claims: Shaped<CodebookClaim[]>
     }
