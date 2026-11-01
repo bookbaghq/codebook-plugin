@@ -42,7 +42,7 @@ do what you can do on app.codebook.work.
 | `/factory run Payments "Let customers refund a payment"` | Starts a story in the Payments factory and follows it in the pane. Add `--here` or `--cloud` to choose for this story. |
 | `/factory status` | Where the story is, station by station. |
 | `/factory follow #57 Payments` | Follows a story that is already on the board. |
-| `/factory here` / `/factory cloud` | Where the agent stations of the next stories run. |
+| `/factory here` / `/factory cloud` | Where agent stations run: for the next stories, and for the followed story too (while none of its runs is being worked). The pane's two picture buttons do the same. |
 | `/factory stop` | Stops following; the story keeps moving on app.codebook.work. |
 
 The pane shows the story's stations as cards. A station that waits for you shows **Approve** and **Send back**
@@ -50,17 +50,22 @@ The pane shows the story's stations as cards. A station that waits for you shows
 
 ## The two run modes
 
-**Run here** (the default): the factory's agent stations come to this Claude Code. When one is ready, the pane asks
-Claude to work it with the **factory-worker** agent, which:
+**Run here** (the default): the story's agent stations wait for you instead of running in CodeBook's cloud. Only you
+can take them. When one is ready, the pane asks Claude to work it with the **factory-worker** agent, which:
 
-1. claims the station's run in CodeBook and reads its brief (instructions, the story, what to produce);
+1. claims the station's run in CodeBook and reads its brief (the station's own agent instructions, the story, what to
+   produce, and which repository);
 2. checks it is in the right repository, with no uncommitted work of yours in the way;
 3. makes the change on a new branch, runs the tests;
 4. opens a **draft** pull request with your local `git` and `gh`;
-5. keeps its claim alive while it works, then reports pass, fail or blocked with a short summary.
+5. keeps its claim alive while it works (a claim nobody keeps alive lapses after 15 minutes and the run waits again),
+   then reports pass, fail or blocked with a short summary.
 
 It never merges, never pushes to your default branch, and never force-pushes. The work uses your Claude plan;
 CodeBook records the run but does not bill it.
+
+A factory whose policy keeps work in CodeBook refuses run here; crews, people's stations and outside runtimes always
+stay where the factory puts them.
 
 **Run in CodeBook**: the agent stations run in CodeBook's cloud as they do from the website. The pane still follows the
 story and you still approve your stations here. Nothing runs on your computer unless you press **Work it here**.

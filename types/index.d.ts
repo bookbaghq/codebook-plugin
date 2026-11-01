@@ -24,6 +24,8 @@ export type CodebookStation = {
   state: string
   run: number | null
   summary: string | null
+  /** Where this station's runs go for this story: here, cloud, person, outside, gate, factory or none. */
+  runs: string | null
   isCurrent: boolean
 }
 
@@ -33,11 +35,14 @@ export type CodebookStory = {
   finished: string | null
   inBacklog: boolean
   runHere: boolean | null
-  waitingOn: 'person' | 'outside_agent' | null
+  canMove: boolean
+  waitingOn: 'person' | 'outside_agent' | 'runner' | null
   waitingRun: number | null
   waitingOnYou: boolean
   waitingClaimed: boolean
   waitingClaimedByYou: boolean
+  waitingFence: number | null
+  leaseExpired: boolean
   pullRequests: { pull_request_id: number; head_sha: string; number: number | null; html_url: string | null }[]
   lastEvent: number | null
   checkedAt: number

@@ -23,7 +23,7 @@ import {
 // Keep each tag as factory.ts has it.
 const mode = atom({ plugin: 'codebook', key: 'mode' } as const, 'here' as CodebookMode)
 const active = atom({ plugin: 'codebook', key: 'active' } as const, null, { shape: 'active-1' })
-const story = atom({ plugin: 'codebook', key: 'story' } as const, null, { shape: 'story-1' })
+const story = atom({ plugin: 'codebook', key: 'story' } as const, null, { shape: 'story-2' })
 const events = atom({ plugin: 'codebook', key: 'events' } as const, [], { shape: 'events-1' })
 const factories = atom({ plugin: 'codebook', key: 'factories' } as const, null, { shape: 'factories-1' })
 const picked = atom({ plugin: 'codebook', key: 'picked' } as const, null, { shape: 'factories-1' })
@@ -89,11 +89,15 @@ function artFor(s: CodebookStation): ArtName {
 }
 
 function who(s: CodebookStation, runsHere: boolean): string {
+  // G2: story_status says per station where its runs go for this story.
+  if (s.runs === 'here') return 'Agent · your Claude, this checkout'
+  if (s.runs === 'cloud') return s.workerType === 'crew' ? "Crew · CodeBook's cloud" : "Agent · CodeBook's cloud"
+  if (s.runs === 'outside') return `Outside agent${s.workerName ? ` · ${s.workerName}` : ''}`
   switch (s.workerType) {
     case 'person':
       return s.isYou ? 'You · decide here' : `${s.workerName || 'A person'} · decides`
     case 'outside':
-      return 'Agent · your Claude, this checkout'
+      return `Outside agent${s.workerName ? ` · ${s.workerName}` : ''}`
     case 'agent':
       return runsHere ? 'Agent · your Claude, this checkout' : "Agent · CodeBook's cloud"
     case 'gate':
@@ -106,14 +110,18 @@ function who(s: CodebookStation, runsHere: boolean): string {
 }
 
 function look(s: CodebookStation, st: CodebookStory | null): { tone: Tone; label: string } {
-  const runsHere = st?.runHere === true || s.workerType === 'outside'
+  const runsHere = s.runs === 'here' || (s.runs === null && st?.runHere === true)
   switch (s.state) {
     case 'passed':
       return { tone: 'done', label: '✓ Done' }
     case 'running':
       return { tone: 'running', label: runsHere ? 'Running here' : 'Running in CodeBook' }
     case 'with_outside_agent':
-      return st?.waitingClaimed ? { tone: 'running', label: 'Running here' } : { tone: 'running', label: 'Ready to run here' }
+      if (s.isCurrent && st?.leaseExpired) return { tone: 'person', label: 'Claim lapsed' }
+      if (s.isCurrent && st?.waitingClaimed) {
+        return st.waitingClaimedByYou ? { tone: 'running', label: 'Running here' } : { tone: 'running', label: 'Taken by an agent' }
+      }
+      return s.runs === 'outside' ? { tone: 'waiting', label: 'Waiting for an agent' } : { tone: 'running', label: 'Ready to run here' }
     case 'testing':
       return { tone: 'running', label: 'Testing' }
     case 'queued':
@@ -283,7 +291,9 @@ export async function drawPane($: EngineInterface, e: RenderInput): Promise<Rend
     const { tone, label } = look(s, st)
     const isAsk = s.isCurrent && st?.waitingOn === 'person' && st.waitingOnYou
     const isWorkHere =
-      s.isCurrent && st?.waitingOn === 'outside_agent' && !st.waitingClaimed && m === 'cloud'
+      s.isCurrent &&
+      !st?.waitingClaimed &&
+      ((st?.waitingOn === 'outside_agent' && m === 'cloud') || (st?.waitingOn === 'runner' && st.waitingOnYou))
     return (
       <Box
         key={`station-${s.station}`}

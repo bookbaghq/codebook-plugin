@@ -18,7 +18,7 @@ import { call } from './connector'
 // Change a tag when that value's fields change: it declines what an earlier version stored.
 export const mode = atom({ plugin: 'codebook', key: 'mode' } as const, 'here' as CodebookMode)
 export const active = atom({ plugin: 'codebook', key: 'active' } as const, null, { shape: 'active-1' })
-export const story = atom({ plugin: 'codebook', key: 'story' } as const, null, { shape: 'story-1' })
+export const story = atom({ plugin: 'codebook', key: 'story' } as const, null, { shape: 'story-2' })
 export const events = atom({ plugin: 'codebook', key: 'events' } as const, [], { shape: 'events-1' })
 export const factories = atom({ plugin: 'codebook', key: 'factories' } as const, null, { shape: 'factories-1' })
 export const picked = atom({ plugin: 'codebook', key: 'picked' } as const, null, { shape: 'factories-1' })
@@ -55,23 +55,31 @@ type WireEvent = {
   outcome?: string | null
   actor?: string | null
 }
+type Lease = { fence: number; expires_at?: string; expired?: boolean }
+type RunLocation = {
+  where: 'here' | 'cloud'
+  person?: { name?: string; is_you?: boolean } | null
+  changeable?: boolean
+  stations?: { station: string; name: string; runs: string }[]
+}
 export type Status = {
-  story: { story: string; reference: string; title: string; run_here?: boolean }
+  story: { story: string; reference: string; title: string }
   factory: { factory: string; name: string }
   workflow?: { workflow: string; name: string } | null
   station: { station: string; name: string; worker?: Worker } | null
   in_backlog: boolean
   finished: string | null
-  run: { run: number; state: string } | null
-  run_here?: boolean
+  run: { run: number; state: string; where?: string } | null
+  run_location?: RunLocation | null
   waiting:
     | null
     | {
-        on: 'person' | 'outside_agent'
+        on: 'person' | 'outside_agent' | 'runner'
         run: number
         on_you?: boolean
         claimed?: boolean
         claimed_by_you?: boolean
+        lease?: Lease | null
         pull_requests?: { pull_request_id: number; head_sha: string; number?: number; html_url?: string }[]
       }
   stations: StatusStation[]
@@ -85,6 +93,7 @@ type Started = {
   workflow?: { workflow: string; name: string } | null
   station?: { station: string; name: string } | null
   run?: { run: number; state: string } | null
+  run_location?: RunLocation | null
   url?: string
   next?: string
 }
@@ -192,6 +201,7 @@ export async function refresh($: EngineInterface): Promise<void> {
   if (!got.ok) return
   const s = got.data
   const byStation = new Map(s.stations.map(one => [one.station, one]))
+  const runsAt = new Map((s.run_location?.stations ?? []).map(one => [one.station, one.runs]))
   const fromBoard: BoardStation[] = board?.stations ?? s.stations.map(one => ({ station: one.station, name: one.name }))
   const listed = fromBoard.filter(one => one.ends_work == null)
   const stations: CodebookStation[] = listed.map(one => {
@@ -208,6 +218,7 @@ export async function refresh($: EngineInterface): Promise<void> {
       state,
       run: isCurrent && s.run ? s.run.run : (ran?.run ?? null),
       summary: ran?.summary ?? null,
+      runs: runsAt.get(one.station) ?? null,
       isCurrent,
     }
   })
@@ -216,12 +227,15 @@ export async function refresh($: EngineInterface): Promise<void> {
     stations,
     finished: s.finished,
     inBacklog: s.in_backlog,
-    runHere: s.run_here ?? s.story.run_here ?? null,
+    runHere: s.run_location ? s.run_location.where === 'here' : null,
+    canMove: s.run_location?.changeable !== false,
     waitingOn: w?.on ?? null,
     waitingRun: w?.run ?? null,
     waitingOnYou: w?.on_you === true,
     waitingClaimed: w?.claimed === true,
     waitingClaimedByYou: w?.claimed_by_you === true,
+    waitingFence: w?.lease?.fence ?? null,
+    leaseExpired: w?.lease?.expired === true,
     pullRequests: (w?.pull_requests ?? []).map(pr => ({
       pull_request_id: pr.pull_request_id,
       head_sha: pr.head_sha,
@@ -267,9 +281,27 @@ export async function unfollow($: EngineInterface): Promise<void> {
   await $.store.delete(STORE_ACTIVE)
 }
 
-export async function setMode($: EngineInterface, to: CodebookMode): Promise<void> {
+/** Sets where the next stories run and, when a story is followed, moves that story there too (set_run_location). */
+export async function setMode($: EngineInterface, to: CodebookMode): Promise<string | null> {
   await update($, mode, () => to)
   await $.store.set(STORE_MODE, to)
+  const a = await read($, active)
+  const s = await read($, story)
+  if (a === null || s === null || s.finished !== null || s.runHere === (to === 'here')) return null
+  if (!s.canMove) {
+    const said = 'A station of this story is being worked here right now; it can move once that run is reported.'
+    await update($, notice, () => said)
+    return said
+  }
+  const args: Record<string, unknown> = { story: a.story, factory: a.factory, run_location: to }
+  if (a.workflow) args.workflow = a.workflow
+  const moved = await call<{ next?: string }>($, 'set_run_location', args)
+  const said = moved.ok
+    ? (moved.data.next ?? (to === 'here' ? 'Its agent stations now run here.' : "Its agent stations now run in CodeBook's cloud."))
+    : moved.message
+  await update($, notice, () => said)
+  await refresh($)
+  return said
 }
 
 /** Starts a story; with run here, CodeBook leaves its agent stations to this Claude. */
@@ -280,7 +312,7 @@ export async function startStory(
   where: CodebookMode,
   description?: string,
 ): Promise<{ ok: true; text: string; active: CodebookActive } | { ok: false; text: string }> {
-  const args: Record<string, unknown> = { factory, title, run_here: where === 'here' }
+  const args: Record<string, unknown> = { factory, title, run_location: where }
   if (description) args.description = description
   const got = await call<Started>($, 'start_story', args)
   await setLink($, got)

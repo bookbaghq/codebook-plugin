@@ -25,7 +25,7 @@ import { drawPane, PANE } from './pane'
 // Keep each tag as factory.ts has it.
 const mode = atom({ plugin: 'codebook', key: 'mode' } as const, 'here' as CodebookMode)
 const active = atom({ plugin: 'codebook', key: 'active' } as const, null, { shape: 'active-1' })
-const story = atom({ plugin: 'codebook', key: 'story' } as const, null, { shape: 'story-1' })
+const story = atom({ plugin: 'codebook', key: 'story' } as const, null, { shape: 'story-2' })
 const factories = atom({ plugin: 'codebook', key: 'factories' } as const, null, { shape: 'factories-1' })
 const link = atom({ plugin: 'codebook', key: 'link' } as const, { state: 'idle' } as CodebookLink, {
   shape: 'link-1',
@@ -34,7 +34,8 @@ const handed = atom({ plugin: 'codebook', key: 'handed' } as const, [] as number
 
 const POLL_MS = 4000
 const QUIET_POLL_MS = 30000
-const HEARTBEAT_MS = 60000
+// The connector asks for one every 300 s (lease.heartbeat_every_seconds); the worker beats too.
+const HEARTBEAT_MS = 120000
 
 // Module memory: rebuilt after a reload from the next poll.
 let lastPoll = 0
@@ -54,25 +55,27 @@ function workerPrompt(a: CodebookActive, s: CodebookStory): string {
 async function handOff($: EngineInterface): Promise<void> {
   const a = await read($, active)
   const s = await read($, story)
-  if (a === null || s === null || (await read($, mode)) !== 'here') return
-  if (s.waitingOn !== 'outside_agent' || s.waitingRun === null || s.waitingClaimed) return
-  if (s.runHere === false) return
+  if (a === null || s === null || s.waitingRun === null || s.waitingClaimed) return
+  // A run-here run waits for THIS person's runner; an outside-agent station is taken here only in "Run here" mode.
+  const isMine = s.waitingOn === 'runner' && s.waitingOnYou
+  const isOpen = s.waitingOn === 'outside_agent' && (await read($, mode)) === 'here'
+  if (!isMine && !isOpen) return
   const run = s.waitingRun
   if ((await read($, handed)).includes(run)) return
   await update($, handed, list => [...list, run].slice(-50))
   await $.prompt.submit({ text: workerPrompt(a, s) })
 }
 
-/** Keeps the lease of a run this person holds alive while the worker works it (G2). */
+/** Keeps the lease of a run this person holds alive while the worker works it, with the claim's fence (G2 §9). */
 async function heartbeat($: EngineInterface, now: number): Promise<void> {
   if (!hasHeartbeat) return
   const s = await read($, story)
-  if (s === null || !s.waitingClaimedByYou || s.waitingRun === null) return
+  if (s === null || !s.waitingClaimedByYou || s.waitingRun === null || s.waitingFence === null) return
   const run = s.waitingRun
   if (now - (lastBeat[run] ?? 0) < HEARTBEAT_MS) return
   lastBeat = { ...lastBeat, [run]: now }
-  const beat = await call($, 'heartbeat_work', { run })
-  if (!beat.ok && /unknown tool|not found: tool|-32602|method not found/i.test(beat.message)) hasHeartbeat = false
+  const beat = await call($, 'heartbeat_work', { run, fence: s.waitingFence })
+  if (!beat.ok && /unknown tool|-32601|-32602|method not found/i.test(beat.message)) hasHeartbeat = false
 }
 
 async function tick($: EngineInterface): Promise<void> {
@@ -123,7 +126,7 @@ async function statusText($: EngineInterface): Promise<{ text: string; context?:
       ? s.waitingOnYou
         ? 'waiting for you: Approve or Send back in the Factory pane'
         : 'waiting for a person'
-      : s.waitingOn === 'outside_agent'
+      : s.waitingOn === 'outside_agent' || s.waitingOn === 'runner'
         ? s.waitingClaimedByYou
           ? 'being worked here'
           : 'waiting for an agent here'
@@ -221,13 +224,12 @@ export const register: Register = on => {
     }
 
     if (lower === 'here' || lower === 'cloud') {
-      await setMode($, lower)
-      return {
-        text:
-          lower === 'here'
-            ? 'Agent stations of the stories you start run here, with your Claude, in this checkout.'
-            : "Agent stations of the stories you start run in CodeBook's cloud.",
-      }
+      const moved = await setMode($, lower)
+      const next =
+        lower === 'here'
+          ? 'Agent stations of the stories you start run here, with your Claude, in this checkout.'
+          : "Agent stations of the stories you start run in CodeBook's cloud."
+      return { text: moved ? `${next}\n${moved}` : next }
     }
 
     if (lower === 'stop') {

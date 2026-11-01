@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-// A story in the "Payments" factory: Plan passed, Build is waiting for an agent here, Review is a person (you).
+// A story in the "Payments" factory: Plan passed, Build waits for this person's runner, Review is a person (you).
 const BOARD = {
   factory: 'k3Vb9QmZ',
   name: 'Payments',
@@ -9,25 +9,44 @@ const BOARD = {
   workflow: { workflow: 'wf12', name: 'Delivery' },
   stations: [
     { station: 'col40', name: 'Plan', ends_work: null, worker: { type: 'agent', name: 'Planner' } },
-    { station: 'col41', name: 'Build', ends_work: null, worker: { type: 'outside', name: 'Claude Code' } },
+    { station: 'col41', name: 'Build', ends_work: null, worker: { type: 'agent', name: 'Builder' } },
     { station: 'col42', name: 'Review', ends_work: null, worker: { type: 'person', name: 'Tom', person: { name: 'Tom', is_you: true } } },
     { station: 'col43', name: 'Done', ends_work: 'done', worker: { type: 'none' } },
   ],
 }
 
-function status(at: 'build' | 'review') {
-  const isBuild = at === 'build'
+type At = 'build' | 'claimed' | 'review'
+
+function status(at: At) {
+  const isBuild = at !== 'review'
   return {
-    story: { story: '6KjN', reference: '#57', title: 'Let customers refund a payment', run_here: true },
+    story: { story: '6KjN', reference: '#57', title: 'Let customers refund a payment' },
     factory: { factory: 'k3Vb9QmZ', name: 'Payments' },
     workflow: { workflow: 'wf12', name: 'Delivery' },
     station: isBuild ? { station: 'col41', name: 'Build' } : { station: 'col42', name: 'Review' },
     in_backlog: false,
     finished: null,
-    run_here: true,
-    run: isBuild ? { run: 811, state: 'with_outside_agent' } : { run: 812, state: 'waiting_for_person' },
+    run: isBuild ? { run: 811, state: 'with_outside_agent', where: 'here' } : { run: 812, state: 'waiting_for_person' },
+    run_location: {
+      where: 'here',
+      person: { name: 'Tom', is_you: true },
+      changeable: at !== 'claimed',
+      stations: [
+        { station: 'col40', name: 'Plan', runs: 'here' },
+        { station: 'col41', name: 'Build', runs: 'here' },
+        { station: 'col42', name: 'Review', runs: 'person' },
+      ],
+    },
     waiting: isBuild
-      ? { on: 'outside_agent', run: 811, claimed: false, claimed_by_you: false, tools: ['claim_work', 'complete_work'] }
+      ? {
+          on: 'runner',
+          run: 811,
+          on_you: true,
+          claimed: at === 'claimed',
+          claimed_by_you: at === 'claimed',
+          lease: at === 'claimed' ? { fence: 3, expires_at: '2026-11-01T10:15:00Z', expired: false } : null,
+          tools: ['claim_work', 'heartbeat_work', 'complete_work'],
+        }
       : {
           on: 'person',
           run: 812,
@@ -58,7 +77,7 @@ function typed(args: string) {
 type Calls = { tool: string; args: Record<string, unknown> }[]
 
 /** The engine beneath the plugin: a connected codebook server answering from the fixtures above. */
-function engine(on: On, at: { now: 'build' | 'review' }) {
+function engine(on: On, at: { now: At }) {
   const calls: Calls = []
   const prompts: string[] = []
   mock.store(on)
@@ -89,6 +108,10 @@ function engine(on: On, at: { now: 'build' | 'review' }) {
             ? status(at.now)
             : e.tool === 'approve_station'
               ? { decided: 'approved', run: 812, next: 'Review approved; the story moves on.' }
+              : e.tool === 'heartbeat_work'
+                ? { run: 811, lease: { fence: 3, expires_at: '2026-11-01T10:20:00Z', seconds: 900, heartbeat_every_seconds: 300 } }
+                : e.tool === 'set_run_location'
+                  ? { next: "The story's agent stations now run in CodeBook." }
               : { error: { code: 'NOT_FOUND', message: 'no such tool here' } }
     const isError = 'error' in data
     return { value: { content: [{ type: 'text', text: JSON.stringify(data) }], structuredContent: data, isError } }
@@ -117,7 +140,7 @@ test('/factory run starts a run-here story and the pane draws its stations', asy
   const ran = await $.command.run(typed('run Payments "Let customers refund a payment"'))
   expect(ran.text).toContain('Story #57')
   const started = calls.find(one => one.tool === 'start_story')
-  expect(started?.args).toEqual({ factory: 'Payments', title: 'Let customers refund a payment', run_here: true })
+  expect(started?.args).toEqual({ factory: 'Payments', title: 'Let customers refund a payment', run_location: 'here' })
 
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
@@ -143,13 +166,38 @@ test('a station waiting here is handed to the factory-worker once', async ($, on
   expect(handed[0]).toContain('run 811')
 })
 
-test('in cloud mode nothing is handed over unasked', async ($, on) => {
-  const { prompts, clock } = engine(on, { now: 'build' })
+test('a cloud story is started with run_location cloud', async ($, on) => {
+  const { calls } = engine(on, { now: 'build' })
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await $.command.run(typed('cloud'))
   await $.command.run(typed('run Payments "Let customers refund a payment"'))
-  await clock.advance(10000)
-  expect(prompts.length).toBe(0)
+  expect(calls.find(one => one.tool === 'start_story')?.args.run_location).toBe('cloud')
+})
+
+test('a run this person holds is kept alive with its fence', async ($, on) => {
+  const { calls, clock } = engine(on, { now: 'claimed' })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.command.run(typed('run Payments "Let customers refund a payment"'))
+  await clock.advance(5000)
+  const beat = calls.find(one => one.tool === 'heartbeat_work')
+  expect(beat?.args).toEqual({ run: 811, fence: 3 })
+})
+
+test('Run in CodeBook moves the followed story', async ($, on) => {
+  const at: { now: At } = { now: 'build' }
+  const { calls } = engine(on, at)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.command.run(typed('run Payments "Let customers refund a payment"'))
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'run-cloud' })
+  expect(calls.find(one => one.tool === 'set_run_location')?.args).toEqual({
+    story: '6KjN',
+    factory: 'k3Vb9QmZ',
+    workflow: 'wf12',
+    run_location: 'cloud',
+  })
+  await ui.unmount()
 })
 
 test('Approve in the pane approves the review with the pull request heads', async ($, on) => {
