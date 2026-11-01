@@ -44,6 +44,8 @@ export type CodebookStory = {
   waitingFence: number | null
   leaseExpired: boolean
   pullRequests: { pull_request_id: number; head_sha: string; number: number | null; html_url: string | null }[]
+  /** What approving does to the pull requests, in CodeBook's words (`waiting.on_approve.sentence`), when it says. */
+  onApprove: string | null
   lastEvent: number | null
   checkedAt: number
 }

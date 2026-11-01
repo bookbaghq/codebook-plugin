@@ -28,7 +28,7 @@ import { drawPane, PANE } from './pane'
 // Keep each tag as factory.ts has it.
 const mode = atom({ plugin: 'codebook', key: 'mode' } as const, 'here' as CodebookMode)
 const active = atom({ plugin: 'codebook', key: 'active' } as const, null, { shape: 'active-1' })
-const story = atom({ plugin: 'codebook', key: 'story' } as const, null, { shape: 'story-2' })
+const story = atom({ plugin: 'codebook', key: 'story' } as const, null, { shape: 'story-3' })
 const factories = atom({ plugin: 'codebook', key: 'factories' } as const, null, { shape: 'factories-1' })
 const link = atom({ plugin: 'codebook', key: 'link' } as const, { state: 'idle' } as CodebookLink, {
   shape: 'link-1',

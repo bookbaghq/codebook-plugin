@@ -17,6 +17,9 @@ const BOARD = {
 }
 
 type At = 'build' | 'claimed' | 'review'
+/** A CodeBook from before §12.10: person stations carry no on_approve. */
+const older = { codebook: false }
+const MERGES = 'Approving moves the story to Done, and CodeBook then merges pull request #212 — the commit you approve, once its checks pass.'
 
 function status(at: At) {
   const isBuild = at !== 'review'
@@ -53,6 +56,7 @@ function status(at: At) {
           run: 812,
           on_you: true,
           pull_requests: [{ pull_request_id: 5, number: 212, head_sha: 'abc', html_url: 'https://github.com/acme/payments/pull/212' }],
+          ...(older.codebook ? {} : { on_approve: { merge: 'now', by: 'codebook', sentence: MERGES } }),
           tools: ['approve_station', 'send_back'],
         },
     stations: [
@@ -264,19 +268,36 @@ test('Run in CodeBook moves the followed story', async ($, on) => {
   await ui.unmount()
 })
 
-test('Approve in the pane warns it may merge and offers the approval with the pull request heads', async ($, on) => {
+test("Approve in the pane shows CodeBook's merge sentence and offers the approval with the pull request heads", async ($, on) => {
   const { filled } = engine(on, { now: 'review' })
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await claudeStarts($)
 
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   expect(await ui.find({ type: 'Text', text: /Needs you/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /Approving may merge the pull request/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /CodeBook then merges pull request #212/ })).toBeDefined()
   await ui.press({ key: 'approve' })
   expect(filled.at(-1)).toContain('Approve the Review station')
   expect(filled.at(-1)).toContain('[{"pull_request_id":5,"head_sha":"abc"}]')
-  expect(filled.at(-1)).toContain('may merge the pull request')
+  expect(filled.at(-1)).toContain(`CodeBook says: ${MERGES}`)
   await ui.unmount()
+})
+
+test('without CodeBook\'s merge sentence, Approve still warns it may merge', async ($, on) => {
+  older.codebook = true
+  try {
+    const { filled } = engine(on, { now: 'review' })
+    await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+    await claudeStarts($)
+
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+    expect(await ui.find({ type: 'Text', text: /Approving may merge the pull request/ })).toBeDefined()
+    await ui.press({ key: 'approve' })
+    expect(filled.at(-1)).toContain('may merge the pull request')
+    await ui.unmount()
+  } finally {
+    older.codebook = false
+  }
 })
 
 test('a missing sign-in says how to sign in', async ($, on) => {

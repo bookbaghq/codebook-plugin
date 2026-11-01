@@ -23,7 +23,7 @@ import {
 // Keep each tag as factory.ts has it.
 const mode = atom({ plugin: 'codebook', key: 'mode' } as const, 'here' as CodebookMode)
 const active = atom({ plugin: 'codebook', key: 'active' } as const, null, { shape: 'active-1' })
-const story = atom({ plugin: 'codebook', key: 'story' } as const, null, { shape: 'story-2' })
+const story = atom({ plugin: 'codebook', key: 'story' } as const, null, { shape: 'story-3' })
 const events = atom({ plugin: 'codebook', key: 'events' } as const, [], { shape: 'events-1' })
 const factories = atom({ plugin: 'codebook', key: 'factories' } as const, null, { shape: 'factories-1' })
 const picked = atom({ plugin: 'codebook', key: 'picked' } as const, null, { shape: 'factories-1' })
@@ -338,7 +338,9 @@ export async function drawPane($: EngineInterface, e: RenderInput): Promise<Rend
                 <Link key={`pr-${pr.pull_request_id}`} href={pr.html_url} label={`Pull request #${pr.number ?? pr.pull_request_id}`} />
               ) : null,
             )}
-            {st.pullRequests.length > 0 ? (
+            {st.onApprove !== null ? (
+              <Text dimColor>{st.onApprove}</Text>
+            ) : st.pullRequests.length > 0 ? (
               <Text dimColor>Approving may merge the pull request: some factories merge on approval, even a draft.</Text>
             ) : null}
             <Box flexDirection="row" gap={1}>

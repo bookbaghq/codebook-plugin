@@ -66,7 +66,9 @@ five notes per run, never a stream.
 2. Do exactly what the station and the story ask, nothing else. Small and readable; follow the repository's own
    conventions (README, CLAUDE.md, AGENTS.md, CONTRIBUTING).
 3. Run the repository's tests (and linter or type check when it has them). Fix what you broke; name tests that were
-   already failing instead of hiding them.
+   already failing instead of hiding them. Keep each command you ran for the report: the command line, its exit code,
+   the passed / failed / skipped counts when the runner prints them, how long it took, the commit, and the last lines
+   of its output.
 4. Commit with a message naming the story reference. Push the branch and open a **draft** pull request with
    `gh pr create --draft`, its title starting with `card_reference.pull_request_title`'s key and its body naming the
    story and what you changed and tested.
@@ -78,8 +80,8 @@ Never merge, mark a pull request ready, push to a default branch or force-push.
 **QA stations** (`brief.run_here.testing` present): follow the "Test it here" skill. Run the repository's own tests
 here (its documented command; `testing.commands` are hints), check each of `testing.evaluators` and the story's
 acceptance criteria, and when a browser tool is available and `testing.browser.addresses` are listed, open them and
-check the story there. Record `run_artifact { kind: "test_report", title, content }` with the commands, counts,
-failures and the commit tested, and a `run_note` with the verdict. Change no code unless the station says so.
+check the story there. Record `run_artifact { kind: "test_report", title, content, commands }` with the commands,
+counts, failures and the commit tested (`commands` as in step 5), and a `run_note` with the verdict. Change no code unless the station says so.
 
 **The story-writing station** (`story_writing.may_propose_stories` true): write the stories as a proposal with
 `propose_stories { factory, request, stories, run, fence }`, following its `how`. They become stories only when the
@@ -98,12 +100,17 @@ the lease runs 900 s). `run_note` and `run_artifact` renew it too. If a call ans
 
 ## 5. Report
 
-Call `complete_work { run, fence, outcome, summary, url?, artifacts? }` once:
+Call `complete_work { run, fence, outcome, summary, url?, artifacts?, commands? }` once:
 - `outcome`: `pass` when the station's work is done and its checks pass; `fail` when you did the work but it does not
   meet the station's bar; `blocked` when you could not do it (say exactly what is needed).
 - `summary`: three to six plain sentences: what you did, what the tests said, what is left.
 - `url`: the draft pull request's link, when there is one (CodeBook links it to the story).
 - `artifacts`: what `must_produce` asks for that you have not recorded yet, at most 10.
+- `commands`: the test, lint and type-check commands you ran (at most 20), each `{ command, exit_code, passed?,
+  failed?, skipped?, duration_ms?, commit?, output? }` with `output` its last lines. CodeBook records them as the
+  story's evidence, marked as reported by this computer. Only commands you really ran, with their real results; leave
+  out a count the runner did not print. (If an older CodeBook refuses `commands`, call again without it and put them
+  in the summary.)
 - `tokens`: leave it out unless you know the number. A run here is on the person's own plan, not billed.
 
 If `complete_work` is refused because the contract wants something you did not produce, produce it and call again;

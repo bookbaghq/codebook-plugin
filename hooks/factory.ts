@@ -19,7 +19,7 @@ import { call } from './connector'
 // Change a tag when that value's fields change: it declines what an earlier version stored.
 export const mode = atom({ plugin: 'codebook', key: 'mode' } as const, 'here' as CodebookMode)
 export const active = atom({ plugin: 'codebook', key: 'active' } as const, null, { shape: 'active-1' })
-export const story = atom({ plugin: 'codebook', key: 'story' } as const, null, { shape: 'story-2' })
+export const story = atom({ plugin: 'codebook', key: 'story' } as const, null, { shape: 'story-3' })
 export const events = atom({ plugin: 'codebook', key: 'events' } as const, [], { shape: 'events-1' })
 export const factories = atom({ plugin: 'codebook', key: 'factories' } as const, null, { shape: 'factories-1' })
 export const picked = atom({ plugin: 'codebook', key: 'picked' } as const, null, { shape: 'factories-1' })
@@ -89,6 +89,7 @@ export type Status = {
         claimed_by_you?: boolean
         lease?: Lease | null
         pull_requests?: { pull_request_id: number; head_sha: string; number?: number; html_url?: string }[]
+        on_approve?: { merge?: string; sentence?: string } | null
       }
   stations: StatusStation[]
   events: WireEvent[]
@@ -295,6 +296,7 @@ export async function refresh($: EngineInterface): Promise<void> {
       number: pr.number ?? null,
       html_url: pr.html_url ?? null,
     })),
+    onApprove: typeof w?.on_approve?.sentence === 'string' ? w.on_approve.sentence : null,
     lastEvent: s.last_event ?? before?.lastEvent ?? null,
     checkedAt: await $.clock.now(),
   }
@@ -495,7 +497,11 @@ export async function approve($: EngineInterface): Promise<void> {
     $,
     `Approve the ${station} station of ${storyRef(a)} with approve_station` +
       (heads.length > 0 ? `, binding the pull request heads ${JSON.stringify(heads)}.` : '.') +
-      (heads.length > 0 ? ' (Approving may merge the pull request: this factory can merge on approval.)' : ''),
+      (s.onApprove !== null
+        ? ` (CodeBook says: ${s.onApprove})`
+        : heads.length > 0
+          ? ' (Approving may merge the pull request: this factory can merge on approval.)'
+          : ''),
     'The approval',
   )
 }
