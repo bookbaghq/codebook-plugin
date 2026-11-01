@@ -57,8 +57,8 @@ factory's **manager** (the `factory-manager` skill) and works by CodeBook's rule
 
 1. **No story, no work.** Your request becomes stories first. The factory's story-writing agent (for example its
    business analyst) writes them here. If the factory has none, Claude offers to add one.
-2. **"Proceed?"** Claude shows the proposed stories (they are also on app.codebook.work, under Work orders) and
-   creates nothing until you say yes.
+2. **"Proceed?"** Claude shows the proposed stories, with a link that opens them on app.codebook.work, and creates
+   nothing until you say yes.
 3. **Every station runs here.** For each agent station Claude spawns a **factory-worker** sub-agent that becomes that
    station's agent (its own skill from CodeBook), claims the run, writes its notes and artifacts on the card, works in
    this checkout, runs the tests, and opens a **draft** pull request with your `git` and `gh`. QA stations run the

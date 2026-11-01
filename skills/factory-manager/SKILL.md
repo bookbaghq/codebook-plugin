@@ -41,11 +41,12 @@ here stories alone. You talk to CodeBook only through the `codebook` connector's
   description with acceptance criteria, and a risk (low / medium / high). Then call `propose_stories` with the
   person's words as `request` and those stories.
 - **A request, and no story-writing agent** (`author` is null): say so and offer to add one ("Shall I add a business
-  analyst to write the stories?"). On yes, if the connector has the factory tools (`list_agents`,
-  `browse_marketplace`, `install_agent`, `create_agent`, `publish_agent`, `assign_station_worker`, `add_station`):
-  look in the workspace's agents first, then the marketplace, and only if there is none create one, publish it to the
-  organization's marketplace and assign it to the author station, telling the person each step. Without those tools,
-  offer to write the stories with the person in the chat instead, or to add the agent on app.codebook.work.
+  analyst to write the stories?"). On yes, if `you.may_manage_factory` is true and the connector has the factory
+  tools (`list_agents`, `browse_marketplace`, `install_agent`, `create_agent`, `publish_agent`,
+  `assign_station_worker`, `add_station`): look in the workspace's agents first, then the marketplace, and only if
+  there is none create one, publish it to the organization's marketplace and assign it to the author station, telling
+  the person each step. Otherwise offer to write the stories with the person in the chat instead, or say that someone
+  who manages the factory can add the agent on app.codebook.work.
 
 `propose_stories` leaves out stories that are already on the factory (`already_there`): tell the person which, and
 pass `new: true` only when they say it really is different work.
