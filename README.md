@@ -41,6 +41,7 @@ do what you can do on app.codebook.work.
 | `/factory` | Opens the Factory pane. Pick a factory and type what it should make. |
 | `/factory run Payments "Let customers refund a payment"` | Starts a story in the Payments factory and follows it in the pane. Add `--here` or `--cloud` to choose for this story. |
 | `/factory status` | Where the story is, station by station. |
+| `/factory list` | The factories you can see. |
 | `/factory follow #57 Payments` | Follows a story that is already on the board. |
 | `/factory here` / `/factory cloud` | Where agent stations run: for the next stories, and for the followed story too (while none of its runs is being worked). The pane's two picture buttons do the same. |
 | `/factory stop` | Stops following; the story keeps moving on app.codebook.work. |

@@ -106,6 +106,7 @@ const HELP = [
   '/factory — open the Factory pane (pick a factory, follow a story)',
   '/factory run <factory> "<story title>" [--here | --cloud] — start a story and follow it',
   '/factory status — where the followed story is',
+  '/factory list — the factories you can see',
   '/factory follow <story> [<factory>] — follow a story already on the board (#57 needs the factory)',
   '/factory here | cloud — where agent stations of the next story run',
   '/factory stop — stop following the story',
@@ -174,6 +175,17 @@ export const register: Register = on => {
     }
 
     if (lower === 'help') return { text: HELP }
+
+    if (lower === 'list') {
+      const failed = await loadFactories($)
+      if (failed) return { text: failed }
+      const list = (await read($, factories)) ?? []
+      if (list.length === 0) return { text: 'You have no factories yet. Make one on app.codebook.work.' }
+      const lines = list.map(
+        f => `${f.name}${f.workspace ? ` (${f.workspace})` : ''}${f.mayStart ? '' : ' · watch only'}${f.url ? ` ${f.url}` : ''}`,
+      )
+      return { text: lines.join('\n') }
+    }
 
     if (lower === 'run' || lower === 'start') {
       let where = await read($, mode)

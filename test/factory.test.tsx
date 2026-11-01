@@ -110,7 +110,9 @@ function engine(on: On, at: { now: At }) {
               ? { decided: 'approved', run: 812, next: 'Review approved; the story moves on.' }
               : e.tool === 'heartbeat_work'
                 ? { run: 811, lease: { fence: 3, expires_at: '2026-11-01T10:20:00Z', seconds: 900, heartbeat_every_seconds: 300 } }
-                : e.tool === 'set_run_location'
+                : e.tool === 'list_factories'
+                  ? { factories: [{ factory: 'k3Vb9QmZ', name: 'Payments', workspace: { name: 'Claims' }, may_start_stories: true }], total: 1 }
+                  : e.tool === 'set_run_location'
                   ? { next: "The story's agent stations now run in CodeBook." }
               : { error: { code: 'NOT_FOUND', message: 'no such tool here' } }
     const isError = 'error' in data
@@ -238,4 +240,11 @@ test('/factory run without a title explains itself', async ($, on) => {
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   const ran = await $.command.run(typed('run Payments'))
   expect(ran.text).toContain('Usage: /factory run')
+})
+
+test('/factory list names the factories', async ($, on) => {
+  engine(on, { now: 'build' })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const ran = await $.command.run(typed('list'))
+  expect(ran.text).toBe('Payments (Claims)')
 })
