@@ -208,20 +208,25 @@ export async function drawPane($: EngineInterface, e: RenderInput): Promise<Rend
         borderColor={isOn ? TEAL_BRIGHT : LINE}
       >
         {picture(where === 'here' ? 'here' : 'cloud', 44, isOn ? TONES.done.tint : TONES.waiting.tint)}
-        <Box flexDirection="column" gap={0}>
-          <Button key={`run-${where}`} variant={isOn ? 'primary' : 'secondary'} onPress={() => setMode($, where)}>
-            {where === 'here' ? 'Run here' : 'Run in CodeBook'}
-          </Button>
+        <Box flexDirection="column" flexGrow={1} gap={0}>
+          <Text weight="bold">{where === 'here' ? 'Run here' : 'Run in CodeBook'}</Text>
           <Text size="footnote" dimColor>
             {where === 'here' ? 'Your Claude, this checkout' : "CodeBook's cloud"}
           </Text>
         </Box>
+        {isOn ? (
+          pill('done', '✓ Chosen')
+        ) : (
+          <Button key={`run-${where}`} onPress={() => setMode($, where)}>
+            Choose
+          </Button>
+        )}
       </Box>
     )
   }
 
   const modes = (
-    <Box flexDirection={width < 44 ? 'column' : 'row'} gap={1}>
+    <Box flexDirection={width < 100 ? 'column' : 'row'} gap={1}>
       {choice('here')}
       {choice('cloud')}
     </Box>
@@ -338,11 +343,11 @@ export async function drawPane($: EngineInterface, e: RenderInput): Promise<Rend
                 Send back
               </Button>
             </Box>
+            {isSendingBack && Input ? <Text dimColor>What should change? It is written on the story.</Text> : null}
             {isSendingBack && Input ? (
               <Input
                 key="reason"
-                label="What should change?"
-                placeholder="Say what to fix; it is written on the story"
+                placeholder="Say what to fix"
                 submitLabel={working === 'send_back' ? 'Sending…' : 'Send back'}
                 onSubmit={value => sendBack($, value)}
               />
@@ -447,11 +452,11 @@ export async function drawPane($: EngineInterface, e: RenderInput): Promise<Rend
       ) : (
         <Box flexDirection="column" gap={1}>
           <Text weight="bold">{`New story in ${chosen.name}`}</Text>
+          {Input && chosen.mayStart ? <Text dimColor>What should the factory make?</Text> : null}
           {Input && chosen.mayStart ? (
             <Input
               key="title"
-              label="What should the factory make?"
-              placeholder="Let customers refund a payment from the order page"
+              placeholder="Add a discount to the order total"
               submitLabel={working === 'start' ? 'Starting…' : 'Start'}
               onSubmit={async value => {
                 if (value.trim() === '') return

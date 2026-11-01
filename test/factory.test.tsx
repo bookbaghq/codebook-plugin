@@ -254,3 +254,16 @@ test("the model's own calls of the connector are left to the person's permission
   const verdict = await $.tool.check({ tool: 'mcp__plugin_codebook_codebook__start_story', input: { factory: 'Payments' } })
   expect(verdict.decision).toBe('ask')
 })
+
+test('the run choice shows which is chosen and switches on Choose', async ($, on) => {
+  engine(on, { now: 'build' })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  // Run here is the default: only Run in CodeBook offers Choose.
+  expect(await ui.find({ key: 'run-here' })).toBeUndefined()
+  await ui.press({ key: 'run-cloud' })
+  expect(await ui.find({ key: 'run-cloud' })).toBeUndefined()
+  expect(await ui.find({ key: 'run-here' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /run in CodeBook's cloud/ })).toBeDefined()
+  await ui.unmount()
+})

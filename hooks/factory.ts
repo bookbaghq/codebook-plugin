@@ -287,7 +287,14 @@ export async function setMode($: EngineInterface, to: CodebookMode): Promise<str
   await $.store.set(STORE_MODE, to)
   const a = await read($, active)
   const s = await read($, story)
-  if (a === null || s === null || s.finished !== null || s.runHere === (to === 'here')) return null
+  const next =
+    to === 'here'
+      ? 'Agent stations run here, with your Claude, in this checkout.'
+      : "Agent stations run in CodeBook's cloud."
+  if (a === null || s === null || s.finished !== null || s.runHere === (to === 'here')) {
+    await update($, notice, () => next)
+    return null
+  }
   if (!s.canMove) {
     const said = 'A station of this story is being worked here right now; it can move once that run is reported.'
     await update($, notice, () => said)
