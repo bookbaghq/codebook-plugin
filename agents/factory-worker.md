@@ -17,10 +17,10 @@ is not claimed; if there is none, say so and stop.
 **Crew member mode.** When the main session says you are a member of a crew it leads and gives you the run, its
 `fence`, the branch, your part and your member's skill: do NOT claim, heartbeat, push, open a pull request or call
 `complete_work` (the lead does). Be that member: follow its skill, check out the branch the lead names, do only your
-part (change no code if your `repository_access` says read; touch only your part's files), and run the tests that
+part (change no code if your `repository_access` is `read` or `none`; touch only your part's files), and run the tests that
 cover it. Do not commit: other members work in the same checkout, and the lead commits each part.
-Write one or two `run_note { run, fence, text }` (add `member` with your member's name when the connector accepts
-it) and record evidence with `run_artifact` when your part produces any. Finish with two lines for the lead: what
+Write one or two `run_note { run, fence, text }`, each starting with your member's name ("Ben (Frontend): …"; the
+note is signed as the crew), and record evidence with `run_artifact` when your part produces any. Finish with two lines for the lead: what
 you changed (the files), what the tests said. The steps below are for a run you claim yourself.
 
 ## 1. Claim and read the brief

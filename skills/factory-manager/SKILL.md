@@ -82,7 +82,8 @@ calls (`sleep 5` in the shell). For what you see:
      `limits.max_parallel` / `max_tasks`, `leader`, `reviewer`, `members`, `how`). Follow its `how` and keep
      `heartbeat_work { run, fence }` going (every `lease.heartbeat_every_seconds`) while the crew works. Check the
      checkout as a worker would (the remote is one of `run_here.repositories`, nothing uncommitted), then make the
-     branch `card_reference.branch` from the up-to-date default branch.
+     branch `card_reference.branch` from the up-to-date default branch. The run's `run_here.may_change_code` is the
+     leader's: when it is false, no member changes code (say `why_not`).
   2. Split the story into at most `max_tasks` parts by the members' `focus`. For each, fetch the member's skill
      (`skill.fetch`, a `manager_brief { factory, agent }` call) and spawn a `codebook:factory-worker` sub-agent in
      **crew member mode**: give it the member's name and skill, its part, the run number and fence, the branch
