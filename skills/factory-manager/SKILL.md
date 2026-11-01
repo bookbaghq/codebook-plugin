@@ -29,8 +29,9 @@ here stories alone. You talk to CodeBook only through the `codebook` connector's
    example "Harper"); speak as "Harper (manager), here".
 3. If `you.may_run_here` is false, say why (`run_here_refusal`) and offer to run it in CodeBook's cloud instead
    (`start_story` with `run_location: "cloud"`); stop here.
-4. Note the `author` station (who writes stories), the `stations` (who works each, `runs`, `writes_code`) and the
-   `repositories`. Mention open `proposals` if the request may already be there.
+4. Note the `author` station (who writes stories), the `stations` (who works each, `kind` — `agent`, `qa`, `crew` —
+   `runs`, `writes_code`, and a crew's `crew`) and the `repositories`. Mention open `proposals` if the request may
+   already be there.
 
 ## 2. From request to stories
 
@@ -39,7 +40,7 @@ here stories alone. You talk to CodeBook only through the `codebook` connector's
   the stories." Fetch her skill (`manager_brief { factory, agent: "Sarah" }`) and spawn a sub-agent (general purpose)
   with that skill as its instructions and the person's request, asking for 1–6 small stories, each with a title, a
   description with acceptance criteria, and a risk (low / medium / high). Then call `propose_stories` with the
-  person's words as `request` and those stories.
+  person's words as `request` and those stories. When the author station is a crew, its `leader` writes them.
 - **A request, and no story-writing agent** (`author` is null): say so and offer to add one ("Shall I add a business
   analyst to write the stories?"). On yes, if `you.may_manage_factory` is true and the connector has the factory
   tools (`list_agents`, `browse_marketplace`, `install_agent`, `create_agent`, `publish_agent`,
@@ -71,12 +72,29 @@ calls (`sleep 5` in the shell). For what you see:
   `codebook:factory-worker` sub-agent for that run (`subagent_type: "codebook:factory-worker"`), telling it the run
   number, the story, the station and the agent's name. Independent stories' runs may go in parallel. Say:
   "Alex (Developer) is working #58 at Build, spawned here."
-- **A QA station**: the same. Its brief carries CodeBook's "Test it here" skill (`run_here.testing`), so the worker
-  runs the repository's tests and the station's checks here and posts the evidence; say "Maya (QA) is testing #58
-  here."
-- **A crew station**: when `stations[].runs` says `cloud` for it, CodeBook runs the crew in its cloud: say so and keep
-  following. Only when a crew's run waits here and its brief names the members, spawn one worker per member with that
-  member's part and lead them yourself: collect their results and have the run reported once.
+- **A QA station** (`kind: "qa"`, or a run whose brief has `run_here.testing`): the same. Its brief carries
+  CodeBook's "Test it here" skill, so the worker runs the repository's tests and the station's checks here and posts
+  the evidence; say "Maya (QA) is testing #58 here."
+- **A crew station** (`kind: "crew"`) waiting for this runner: **you lead the crew** (a sub-agent cannot start
+  sub-agents, so you do not hand a crew run to a factory-worker). It is ONE run with one outcome and at most one
+  draft pull request:
+  1. `claim_work { run }` yourself. The brief has no `agent`; it has `run_here.crew` (`name`, `instructions`,
+     `limits.max_parallel` / `max_tasks`, `leader`, `reviewer`, `members`, `how`). Follow its `how` and keep
+     `heartbeat_work { run, fence }` going (every `lease.heartbeat_every_seconds`) while the crew works. Check the
+     checkout as a worker would (the remote is one of `run_here.repositories`, nothing uncommitted), then make the
+     branch `card_reference.branch` from the up-to-date default branch.
+  2. Split the story into at most `max_tasks` parts by the members' `focus`. For each, fetch the member's skill
+     (`skill.fetch`, a `manager_brief { factory, agent }` call) and spawn a `codebook:factory-worker` sub-agent in
+     **crew member mode**: give it the member's name and skill, its part, the run number and fence, the branch
+     (`card_reference.branch`) and whether it may change code (`repository_access`). At most `max_parallel` at once;
+     parts that touch the same files go one after another. Say "Crew 'Web' on #58: Ben (Frontend) and Ana (API),
+     spawned here."
+  3. Collect their results on the one branch: commit each member's part yourself (`git add` its files only, a
+     message naming the member). If the crew names a `reviewer`, have that member review the whole change (a
+     sub-agent with the reviewer's skill) before anything is pushed.
+  4. You (as the `leader`) push the branch, open the one draft pull request, `run_artifact` it, and call
+     `complete_work` once with the crew's outcome and a summary naming who did what.
+  When `runs` says `cloud` for a crew, CodeBook runs it in its cloud: say so and keep following.
 - **A person's station waiting for this person** (`waiting.on: "person"`, `on_you: true`): ask in the chat. Show the
   station, what was done (the summary), and the pull request link, then ask "Approve, or send back (and why)?". Call
   `approve_station` (with the pull request `heads` from `waiting.pull_requests`) or `send_back` with their reason. A
