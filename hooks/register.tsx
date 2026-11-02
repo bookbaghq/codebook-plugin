@@ -16,6 +16,7 @@ import {
   refresh,
   setLink,
   setMode,
+  splitRun,
   startRequest,
   STORE_ACTIVE,
   STORE_MODE,
@@ -30,6 +31,7 @@ const mode = atom({ plugin: 'codebook', key: 'mode' } as const, 'here' as Codebo
 const active = atom({ plugin: 'codebook', key: 'active' } as const, null, { shape: 'active-1' })
 const story = atom({ plugin: 'codebook', key: 'story' } as const, null, { shape: 'story-3' })
 const factories = atom({ plugin: 'codebook', key: 'factories' } as const, null, { shape: 'factories-1' })
+const picked = atom({ plugin: 'codebook', key: 'picked' } as const, null, { shape: 'factories-1' })
 const link = atom({ plugin: 'codebook', key: 'link' } as const, { state: 'idle' } as CodebookLink, {
   shape: 'link-1',
 })
@@ -251,9 +253,20 @@ export const register: Register = on => {
         else return true
         return false
       })
-      if (args.length < 2) return { text: `Usage: /factory run <factory> "<story title>"\n\n${HELP}` }
-      const [factory = '', ...title] = args
-      const request = startRequest(factory, title.join(' '), where)
+      if (args.length === 0) return { text: `Usage: /factory run <factory> "<story title>"\n\n${HELP}` }
+      const failed = await loadFactories($)
+      if (failed) return { text: failed }
+      const names = ((await read($, factories)) ?? []).map(f => f.name)
+      const split = splitRun(args, names, (await read($, picked))?.name ?? null)
+      if (split !== null && !split.title) {
+        return { text: `What should ${split.factory} make? Usage: /factory run <factory> "<story title>"` }
+      }
+      if (split === null) {
+        return {
+          text: `Which factory? Start with one of yours: ${names.map(name => `"${name}"`).join(', ')}.\nUsage: /factory run <factory> "<story title>"`,
+        }
+      }
+      const request = startRequest(split.factory, split.title, where)
       const filled = await $.prompt.fill({ text: request, mode: 'replace' })
       await openPane($)
       return {

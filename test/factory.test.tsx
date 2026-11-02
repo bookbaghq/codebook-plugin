@@ -1,6 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
+import { splitRun } from '../hooks/factory'
 
 // A story in the "Payments" factory: Plan passed, Build waits for this person's runner, Review is a person (you).
 const BOARD = {
@@ -431,4 +432,23 @@ test('the chosen run keeps its label whole in a narrow pane', async ($, on) => {
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: { ...PANE.props, bodyColumns: 40 } })
   expect(await ui.find({ type: 'Text', text: ' ✓ Chosen ' })).toBeDefined()
   await ui.unmount()
+})
+
+test("/factory run never takes a request's first word for a factory (found live: \"we have too many branches\" ran in factory \"we\")", async ($, on) => {
+  const { filled } = engine(on, { now: 'build' })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  // Payments is the only factory: the whole text is the request.
+  const ran = await $.command.run(typed('run we have too many branches'))
+  expect(ran.text).toContain('press Enter')
+  expect(filled[0]).toContain('the CodeBook factory "Payments": we have too many branches')
+})
+
+test('the factory is read from the leading words that name one, in any case, quoted or not', () => {
+  const names = ['Vibeforce', 'Bug fix factory', 'Feature factory']
+  expect(splitRun(['bug', 'fix', 'factory', 'fix', 'the', 'login'], names, null)).toEqual({ factory: 'Bug fix factory', title: 'fix the login' })
+  expect(splitRun(['Bug fix factory', 'fix the login'], names, null)).toEqual({ factory: 'Bug fix factory', title: 'fix the login' })
+  expect(splitRun(['vibeforce', 'tidy', 'branches'], names, null)).toEqual({ factory: 'Vibeforce', title: 'tidy branches' })
+  // No name leads: the pane's pick, else nothing (the command asks which factory).
+  expect(splitRun(['we', 'have', 'too', 'many'], names, 'Vibeforce')).toEqual({ factory: 'Vibeforce', title: 'we have too many' })
+  expect(splitRun(['we', 'have', 'too', 'many'], names, null)).toBeNull()
 })
