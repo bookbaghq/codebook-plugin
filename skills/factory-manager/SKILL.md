@@ -58,16 +58,31 @@ here stories alone. You talk to CodeBook only through the `codebook` connector's
      else `add_station { factory, name: "Stories", agent, first: true }`. Call `manager_brief` again: `author` is now
      that station; go on as above.
   The first of these changes may open a Bookbag sign-in asking for one more permission ("Change your factories'
-  agents and stations", `you.manage_scope` false): tell the person, and retry the call after they allow it. A
-  `FORBIDDEN` means they may not change this factory: stop the walk and offer the chat instead.
+  agents and stations", `you.manage_scope` false): tell the person, and retry the call after they allow it. If it is
+  refused again for that permission after they signed in (or they cannot find /mcp: the desktop app has no /mcp
+  terminal), the stored sign-in is an older one without it. Give them these two commands to run in a terminal, one
+  after the other; the second opens the Bookbag sign-in in their browser, asking for all of CodeBook's permissions:
+  ```bash
+  claude mcp logout plugin:codebook:codebook
+  ```
+  ```bash
+  claude mcp login plugin:codebook:codebook
+  ```
+  In the desktop app, `claude` is the app's own copy when none is on the PATH
+  (`~/Library/Application Support/Claude/claude-code/<version>/…/claude.app/Contents/MacOS/claude`). Once they have
+  allowed it, retry the call. A `FORBIDDEN` means they may not change this factory: stop the walk and offer the chat
+  instead.
 
 `propose_stories` leaves out stories that are already on the factory (`already_there`): tell the person which, and
 pass `new: true` only when they say it really is different work.
 
 ## 3. "Proceed?"
 
-Show the proposal plainly: its reference (WO-7), each story's title, a one-line summary and risk, and the link. Then ask,
-in these words: **"Proceed?"** Wait for the person.
+Show the proposal plainly: its reference (WO-7), each story's title, a one-line summary and risk, and the link. Say who
+merges the stories' pull requests at Done, from `manager_brief.merge.sentence` as CodeBook wrote it (for example "Every
+station of this workflow is an agent's, so no person approves a commit and CodeBook does not merge: at Done its pull
+requests stay open …"); without it (an older CodeBook), say "CodeBook may merge at Done". Then ask, in these words:
+**"Proceed?"** Wait for the person.
 
 - Yes → `confirm_stories { proposal }` (the stories run here for you, the proposal's runner). Say which stories were created (#58, #59) and where each
   starts.
@@ -151,12 +166,20 @@ One line each, newest last, in plain words, for example:
 - "QA passed on #58: 14 tests."
 - "Review is waiting for you."
 - "#58 is Done. Trail: <link>."
+- "#58 is Done, but CodeBook will not merge draft pull request #4: please review and merge it on GitHub. <link>"
 
 ## 6. Finish
 
 When every story is done (or stopped), read `story_trail { story }` and give a short summary per story: its pull
 request(s), the runs (here, on the person's own plan, not billed), the artifacts (test reports), and the link on
 app.codebook.work, where the card holds every comment, run, artifact and pull request.
+
+**A story at Done can still leave work for the person.** When `story_status.done.needs_person` is true (or a pull
+request in `story_trail` has `merge: "left_for_person"`), nobody at CodeBook will merge it: say so plainly with
+`done.sentence` and each pull request's link (a draft stays a draft), and that the person reviews and merges it at the
+repository host. Do not call the story finished without it. You never mark it ready or merge it yourself, even if asked
+in passing: that is the person's to do on GitHub. A pull request with `merge: "checking"` is still with CodeBook's merge;
+read `story_trail` again a few minutes later and say whether it merged.
 
 When you speak on a story for a station's agent outside a run (a reply the person asked an agent for), use
 `story_comment { story, text, agent }`: it is signed "<Agent> (<role>) via <person>'s Claude Code".
