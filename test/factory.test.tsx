@@ -404,3 +404,31 @@ test('confirming stories follows the first one created', async ($, on) => {
   expect(await ui.find({ type: 'Text', text: /1 more created/ })).toBeDefined()
   await ui.unmount()
 })
+
+test("auto mode's refusal of the pane's own read says which calls to allow", async ($, on) => {
+  mock.store(on)
+  on('command.register', () => ({ value: { command: 'factory' } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('mcp.connect', () => ({ value: { isConnected: true, server: 'plugin:codebook:codebook' } }))
+  // As the engine refused it live (2 Nov 2026): the call rejects with the classifier's reason.
+  on('mcp.call', () => ({
+    deny: 'Permission to use mcp__plugin_codebook_codebook__list_factories has been refused: The server-side auto mode classifier gave no verdict for mcp__plugin_codebook_codebook__list_factories: the request that produced this action did not ask for one.',
+  }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+
+  const ran = await $.command.run(typed('list'))
+  expect(ran.text).toContain('Auto mode refused')
+  for (const tool of ['list_factories', 'story_status', 'story_trail']) {
+    expect(ran.text).toContain(`mcp__plugin_codebook_codebook__${tool}`)
+  }
+  expect(ran.text).not.toContain('classifier gave no verdict')
+})
+
+test('the chosen run keeps its label whole in a narrow pane', async ($, on) => {
+  engine(on, { now: 'build' })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: { ...PANE.props, bodyColumns: 40 } })
+  expect(await ui.find({ type: 'Text', text: ' ✓ Chosen ' })).toBeDefined()
+  await ui.unmount()
+})

@@ -102,6 +102,27 @@ change is yours to send. Start, Approve, Send back and moving a story to Claude 
 in plain words, into your prompt box; you press Enter, and Claude makes the call under your usual permission
 settings (in auto mode, the auto-mode check judges it like anything you type). The pane picks up the answer.
 
+### Auto mode
+
+In auto mode Claude Code checks each tool call against what you asked for. The pane's own refreshes come from the
+plugin, not from a message of yours, so the check refuses them and the pane says "Not reached". Allow the pane's
+three read-only calls in `~/.claude/settings.json`:
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "mcp__plugin_codebook_codebook__list_factories",
+      "mcp__plugin_codebook_codebook__story_status",
+      "mcp__plugin_codebook_codebook__story_trail"
+    ]
+  }
+}
+```
+
+Only those three reads skip the check. Starting a story, approving, sending back and changing a factory still go
+through your prompt box and your permission mode.
+
 ## What is sent where
 
 - **To CodeBook (app.codebook.work)**, over the connector, signed in as you: the factory and story you pick, the story
