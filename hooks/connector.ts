@@ -13,6 +13,11 @@ export type Called<T> =
 const SIGN_IN =
   'Sign in to CodeBook first: open /mcp (in the desktop app, the connectors menu), pick "codebook" and choose Authenticate. You sign in with your Bookbag account. If /mcp is not there, run `claude mcp login plugin:codebook:codebook` in a terminal.'
 
+/** The three calls the pane makes on its own; auto mode needs an allow rule for each. */
+export const PANE_READS = ['list_factories', 'story_status', 'story_trail'] as const
+
+const AUTO_MODE = `Auto mode refused the pane's own read: it was not made from a message of yours. Allow the pane's three read-only calls in ~/.claude/settings.json under permissions.allow (${PANE_READS.map(tool => `mcp__plugin_codebook_codebook__${tool}`).join(', ')}), then press Refresh. Changes still go through your prompt box.`
+
 let serverName: string | null = null
 
 /** Connects the plugin's server (once) and answers the name `$.mcp.call` takes. */
@@ -58,6 +63,7 @@ export async function call<T>($: EngineInterface, tool: string, args: Record<str
       : raw
     const isSignIn = /\b401\b|unauthori[sz]ed|needs auth/i.test(raw)
     if (isSignIn) serverName = null
+    if (!isSignIn && /auto mode classifier/i.test(raw)) return { ok: false, code: 'AUTO_MODE', message: AUTO_MODE, isSignIn }
     return { ok: false, code: isSignIn ? 'SIGN_IN' : 'UNREACHABLE', message: isSignIn ? SIGN_IN : message, isSignIn }
   }
   const data = payload(result) as { error?: { code?: string; message?: string }; message?: string } | null

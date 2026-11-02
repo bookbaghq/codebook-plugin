@@ -163,10 +163,13 @@ export async function drawPane($: EngineInterface, e: RenderInput): Promise<Rend
   const picture = (name: ArtName, size: number, tint: string) =>
     Svg ? <Svg source={tile(name, size, tint)} alt={`${name} illustration`} width={size} height={size} /> : null
 
+  // A pill keeps its own width: in a narrow row the text beside it gives way, never the pill.
   const pill = (tone: Tone, label: string) => (
-    <Text backgroundColor={TONES[tone].pill} color={TONES[tone].ink} weight="bold" size="footnote">
-      {` ${label} `}
-    </Text>
+    <Box flexShrink={0}>
+      <Text backgroundColor={TONES[tone].pill} color={TONES[tone].ink} weight="bold" size="footnote" wrap="truncate-end">
+        {` ${label} `}
+      </Text>
+    </Box>
   )
 
   const l = await read($, link)
@@ -209,7 +212,7 @@ export async function drawPane($: EngineInterface, e: RenderInput): Promise<Rend
         borderColor={isOn ? TEAL_BRIGHT : LINE}
       >
         {picture(where === 'here' ? 'here' : 'cloud', 44, isOn ? TONES.done.tint : TONES.waiting.tint)}
-        <Box flexDirection="column" flexGrow={1} gap={0}>
+        <Box flexDirection="column" flexGrow={1} flexShrink={1} gap={0}>
           <Text weight="bold">{where === 'here' ? 'Run here' : 'Run in CodeBook'}</Text>
           <Text size="footnote" dimColor>
             {where === 'here'
