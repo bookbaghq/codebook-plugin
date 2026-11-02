@@ -432,6 +432,21 @@ export async function setMode($: EngineInterface, to: CodebookMode): Promise<str
   return null
 }
 
+/**
+ * Splits `/factory run`'s words into a factory and the request: the longest run of leading words that names one of the
+ * person's factories (any case; "Bug fix factory" may be typed unquoted), else the factory picked in the pane, else the
+ * only factory. Null when none of those holds, so a request's first word is never taken for a factory ("we have…").
+ */
+export function splitRun(args: string[], names: string[], pickedName: string | null): { factory: string; title: string } | null {
+  for (let n = args.length; n >= 1; n--) {
+    const said = args.slice(0, n).join(' ').toLowerCase()
+    const name = names.find(candidate => candidate.toLowerCase() === said)
+    if (name) return { factory: name, title: args.slice(n).join(' ') }
+  }
+  const fallback = pickedName ?? (names.length === 1 ? names[0] : null)
+  return fallback && args.length > 0 ? { factory: fallback, title: args.join(' ') } : null
+}
+
 /** The words that start work: Run here hands the request to the factory-manager skill (stories, "proceed?", then
  * every station here); Run in CodeBook starts one story in CodeBook's cloud. */
 export function startRequest(factory: string, title: string, where: CodebookMode): string {
