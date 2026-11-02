@@ -31,6 +31,18 @@ The plugin adds the CodeBook connector, `https://app.codebook.work/mcp`. The fir
 you to sign in: run `/mcp`, pick **plugin:codebook:codebook**, choose **Authenticate**, and sign in with your Bookbag
 account in the browser. In the desktop app the same sign-in starts from the connectors menu.
 
+If you cannot reach `/mcp` (the desktop app has no terminal for it), or CodeBook keeps asking for a permission you
+already allowed (changing a factory's agents and stations needs `codebook:manage`, and an older sign-in does not have
+it), sign in again from a terminal. The second command opens the Bookbag sign-in in your browser:
+
+```bash
+claude mcp logout plugin:codebook:codebook
+```
+
+```bash
+claude mcp login plugin:codebook:codebook
+```
+
 The plugin never sees or stores a password or a token: Claude Code keeps the sign-in, and the connector only lets you
 do what you can do on app.codebook.work.
 

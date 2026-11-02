@@ -16,12 +16,24 @@ const BOARD = {
   ],
 }
 
-type At = 'build' | 'claimed' | 'review'
+type At = 'build' | 'claimed' | 'review' | 'done'
 /** A CodeBook from before §12.10: person stations carry no on_approve. */
 const older = { codebook: false }
 const MERGES = 'Approving moves the story to Done, and CodeBook then merges pull request #212 — the commit you approve, once its checks pass.'
 
+const LEFT = 'pull request #212 (a draft) is still open, and CodeBook will not merge it: no person approved a commit, because every station of this workflow is an agent\'s. Ask the person to review and merge it at the repository host.'
+
 function status(at: At) {
+  if (at === 'done') return {
+    ...status('review'),
+    station: { station: 'col43', name: 'Done' },
+    finished: 'done',
+    run: null,
+    waiting: null,
+    done: { needs_person: true, pull_requests: [{ number: 212, draft: true, outcome: 'left_for_person', needs_person: true }], sentence: LEFT },
+    events: [{ id: 9005, kind: 'card.finished', occurred_at: '2026-11-01T10:09:00Z', station: 'Done' }],
+    last_event: 9005,
+  }
   const isBuild = at !== 'review'
   return {
     story: { story: '6KjN', reference: '#57', title: 'Let customers refund a payment' },
@@ -365,6 +377,21 @@ test('new events of the followed story become lines in the chat, and the pane sh
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   expect(await ui.find({ type: 'Text', text: /ON THE CARD/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /Starting: refunds from the order page\.$/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a story done with a pull request nobody will merge says so in the chat and the pane', async ($, on) => {
+  const at: { now: At } = { now: 'review' }
+  const { logged, clock } = engine(on, at)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await claudeStarts($)
+  at.now = 'done'
+  await clock.advance(5000)
+  expect(logged).toEqual(['CodeBook: #57 is done.', `CodeBook: #57 is done, but ${LEFT}`])
+  await clock.advance(5000)
+  expect(logged.length).toBe(2)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ type: 'Text', text: /^Now: Done, but pull request #212 \(a draft\) is still open/ })).toBeDefined()
   await ui.unmount()
 })
 

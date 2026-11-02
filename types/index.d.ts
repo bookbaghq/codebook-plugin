@@ -46,6 +46,8 @@ export type CodebookStory = {
   pullRequests: { pull_request_id: number; head_sha: string; number: number | null; html_url: string | null }[]
   /** What approving does to the pull requests, in CodeBook's words (`waiting.on_approve.sentence`), when it says. */
   onApprove: string | null
+  /** At Done: what CodeBook says a person still has to merge (story_status.done.sentence), when someone must. */
+  leftForPerson?: string | null
   lastEvent: number | null
   checkedAt: number
 }

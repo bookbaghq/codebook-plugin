@@ -33,12 +33,42 @@ export function allowedOf(brief: unknown): string[] {
 
 const OPTIONS_WITH_VALUE = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace'])
 
+const HEREDOC = /(?<!<)<<(?!<)(-?)\s*(?:'([^'\n]+)'|"([^"\n]+)"|\\([A-Za-z_][A-Za-z0-9_]*)|([A-Za-z_][A-Za-z0-9_]*))/g
+
+/**
+ * The command without its here-documents' bodies. A quoted delimiter (`<<'EOF'`, `<<"EOF"`, `<<\EOF`) makes the body
+ * plain text, such as a pull request's description with backticks in it, never commands; and `"$(cat <<'EOF' … EOF)"`,
+ * the usual way to pass such a body as one argument, becomes one word. An unquoted delimiter expands `$(...)` and
+ * backticks in its body, so a body with either keeps a `$(` for targetsOf to refuse.
+ */
+export function withoutHeredocs(command: string): string {
+  const lines = command.split('\n')
+  const out: string[] = []
+  for (let at = 0; at < lines.length; at++) {
+    const line = lines[at] ?? ''
+    out.push(line)
+    for (const start of line.matchAll(HEREDOC)) {
+      const quoted = start[2] ?? start[3] ?? start[4]
+      const delimiter = quoted ?? start[5] ?? ''
+      const body: string[] = []
+      while (at + 1 < lines.length) {
+        const next = lines[++at] ?? ''
+        if ((start[1] ? next.replace(/^\t+/, '') : next) === delimiter) break
+        body.push(next)
+      }
+      if (quoted === undefined && /\$\(|`/.test(body.join('\n'))) out.push('$(')
+    }
+  }
+  return out.join('\n').replace(/\$\(\s*cat\s+<<-?\s*(?:'[^'\n]+'|"[^"\n]+"|\\[A-Za-z_][A-Za-z0-9_]*)\s*\n\s*\)/g, 'BODY')
+}
+
 /**
  * The pushes and pull requests a shell command would make. Commands joined by `&&`, `||`, `;`, `|` or new lines are
- * read one by one, following `cd`. `null` when the command does something the guard cannot read with confidence (a
+ * read one by one, following `cd`; here-documents' bodies are text (withoutHeredocs). `null` when the command does something the guard cannot read with confidence (a
  * push inside `$(...)`, `eval`, `sh -c`), so the caller refuses rather than guesses.
  */
-export function targetsOf(command: string): Target[] | null {
+export function targetsOf(full: string): Target[] | null {
+  const command = withoutHeredocs(full)
   if (!/\bgit\b[^\n]*\bpush\b|\bgh\b[^\n]*\bpr\b[^\n]*\bcreate\b/.test(command)) return []
   if (/\$\(|`|\beval\b|\b(?:ba|z)?sh\s+-c\b/.test(command)) return null
   const targets: Target[] = []

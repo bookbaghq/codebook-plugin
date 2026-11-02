@@ -91,6 +91,7 @@ export type Status = {
         pull_requests?: { pull_request_id: number; head_sha: string; number?: number; html_url?: string }[]
         on_approve?: { merge?: string; sentence?: string } | null
       }
+  done?: { needs_person?: boolean; sentence?: string } | null
   stations: StatusStation[]
   events: WireEvent[]
   last_event: number | null
@@ -297,6 +298,7 @@ export async function refresh($: EngineInterface): Promise<void> {
       html_url: pr.html_url ?? null,
     })),
     onApprove: typeof w?.on_approve?.sentence === 'string' ? w.on_approve.sentence : null,
+    leftForPerson: s.done?.needs_person === true && typeof s.done.sentence === 'string' ? s.done.sentence : null,
     lastEvent: s.last_event ?? before?.lastEvent ?? null,
     checkedAt: await $.clock.now(),
   }
@@ -308,6 +310,7 @@ export async function refresh($: EngineInterface): Promise<void> {
       const line = narration(e, s.story.reference)
       if (line) $.ui.log(`CodeBook: ${line}`)
     }
+    if (next.leftForPerson && !before.leftForPerson) $.ui.log(`CodeBook: ${s.story.reference} is done, but ${next.leftForPerson}`)
   }
   if (before === null || (s.last_event ?? null) !== (before.lastEvent ?? null)) await loadTrail($, s.story.story)
   if (s.events.length > 0) {

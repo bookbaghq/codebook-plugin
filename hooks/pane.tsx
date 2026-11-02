@@ -429,7 +429,9 @@ export async function drawPane($: EngineInterface, e: RenderInput): Promise<Rend
     st === null
       ? null
       : st.finished === 'done'
-        ? 'Done. Everything is on the card.'
+        ? st.leftForPerson
+          ? `Done, but ${st.leftForPerson}`
+          : 'Done. Everything is on the card.'
         : st.finished === 'dropped'
           ? 'Dropped.'
           : st.waitingOn === 'person' && st.waitingOnYou

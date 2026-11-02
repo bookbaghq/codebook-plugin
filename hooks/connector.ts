@@ -11,7 +11,7 @@ export type Called<T> =
   | { ok: false; code: string; message: string; isSignIn: boolean }
 
 const SIGN_IN =
-  'Sign in to CodeBook first: open /mcp (in the desktop app, the connectors menu), pick "codebook" and choose Authenticate. You sign in with your Bookbag account.'
+  'Sign in to CodeBook first: open /mcp (in the desktop app, the connectors menu), pick "codebook" and choose Authenticate. You sign in with your Bookbag account. If /mcp is not there, run `claude mcp login plugin:codebook:codebook` in a terminal.'
 
 let serverName: string | null = null
 
