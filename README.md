@@ -141,6 +141,7 @@ through your prompt box and your permission mode.
 | `hooks/` | The Factory pane, `/factory` and the repository guard (a Claude Code hooks module): `register.tsx`, `pane.tsx`, `factory.ts`, `connector.ts`, `guard.ts`, and `art.ts` (the illustrations, small WebP). |
 | `skills/factory-manager/` | The manager skill Run here follows: stories, "proceed?", stations, people, narration. |
 | `agents/factory-worker.md` | The sub-agent that works one station run here as that station's agent. |
+| `agents/benchmark-worker.md` | The sub-agent that answers one benchmark run here, as the model the manager chose, for CodeBook's judge to grade. |
 | `types/index.d.ts` | The pane's state contract. |
 | `test/` | Tests for `claude plugin test`. |
 | `.claude-plugin/` | The plugin manifest, the marketplace file and the icon. |

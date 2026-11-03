@@ -227,6 +227,28 @@ read `story_trail` again a few minutes later and say whether it merged.
 When you speak on a story for a station's agent outside a run (a reply the person asked an agent for), use
 `story_comment { story, text, agent }`: it is signed "<Agent> (<role>) via <person>'s Claude Code".
 
+## 7. Measure, when it helps (scorers and benchmarks)
+
+These are yours to use when you judge they would help the person; nothing here is a step every story needs. Each one
+changes the factory or spends budget, so offer it in a sentence, say why, and wait for the person's yes.
+
+- **Scorers** say how good the factory's finished work is ("are the tests any good?", "is this over-engineered?").
+  `list_scorers { factory }` shows them and CodeBook's ready-made questions. When a factory has none and the person
+  cares about quality or is choosing models, you may offer one: `add_scorer { factory, preset }` (or their own
+  question). A new scorer reads only runs that finish after it is made.
+- **Benchmarks** replay a station's past work on other models and grade the answers with the scorers, so the person
+  can see which model is good enough for the least. They need finished runs to replay (`benchmark_candidates`) and at
+  least one scorer to say anything about quality. Worth offering when a station has a good number of finished runs and
+  the person wonders about speed or cost ("QA has 20 finished runs: shall I check whether Sonnet does as well as
+  Opus?"). `create_benchmark` freezes the runs you pick (10 to 20 is plenty for a first look).
+  - `run_benchmark { …, models }` replays in CodeBook on the organization's models, on the factory's budget.
+  - `run_benchmark { …, here: ["haiku", "sonnet", "opus"] }` has Claude answer here, on the person's plan: for each
+    here run it returns, spawn one `codebook:benchmark-worker` with `model` set to that run's model and the run
+    number; they may run side by side. Either way CodeBook's judge grades every answer the same way.
+  - Read `benchmark_report { factory, benchmark }` when the runs finish and say it plainly: quality, coverage, cost
+    ("own plan" for answers made here), speed. A here result tells the person which Claude model to use for that
+    station here; changing a model CodeBook runs is a proposal a second person approves on app.codebook.work.
+
 ## Limits
 
 - 30 manager writes a minute per person: on `RATE_LIMITED`, wait `retry_after_seconds` and continue.
