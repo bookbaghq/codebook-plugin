@@ -147,7 +147,7 @@ the lease runs 900 s). `run_note` and `run_artifact` renew it too. If a call ans
 
 ## 5. Report
 
-Call `complete_work { run, fence, outcome, summary, url?, artifacts?, commands? }` once:
+Call `complete_work { run, fence, outcome, summary, url?, artifacts?, commands?, model? }` once:
 - `outcome`: `pass` when the station's work is done and its checks pass; `fail` when you did the work but it does not
   meet the station's bar; `blocked` when you could not do it (say exactly what is needed).
 - `summary`: three to six plain sentences: what you did, what the tests said, what is left.
@@ -159,6 +159,9 @@ Call `complete_work { run, fence, outcome, summary, url?, artifacts?, commands? 
   out a count the runner did not print. (If an older CodeBook refuses `commands`, call again without it and put them
   in the summary.)
 - `tokens`: leave it out unless you know the number. A run here is on the person's own plan, not billed.
+- `model`: the exact id of the model you are running on (your system prompt names it, such as `claude-sonnet-5-5`).
+  CodeBook records it on the run and, when it is not the model the station asks for (`brief.run_here.model`), notes
+  that on the story itself: do not write that note. (If an older CodeBook refuses `model`, call again without it.)
 
 If `complete_work` is refused because the contract wants something you did not produce, produce it and call again;
 on `REPOSITORY_REFUSED`, the pull request is in the wrong repository: report `blocked` and say so. Otherwise report

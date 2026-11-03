@@ -175,18 +175,25 @@ calls (`sleep 5` in the shell). For what you see:
   `codebook:factory-worker` sub-agent for that run (`subagent_type: "codebook:factory-worker"`), telling it the run
   number, the story, the station, the agent's name and the `checkout_path` from step 0. Say: "Alex (Developer) is
   working #58 at Build, spawned here."
-  - **The model.** When the station's `model.wanted` (in `manager_brief.stations`) is an Anthropic model, pass its
-    alias (`haiku`, `sonnet`, `opus` or `fable`) as `model`. Otherwise, by what the station does: a station that writes
-    code (`writes_code` true, or a crew member who may change code) runs on the session's own model (leave `model`
-    out); every other station (the story writer, QA, review, planning) on `model: "sonnet"`, much faster for reading,
-    testing and writing text. When another provider's model was wanted, tell the worker to write `run_note` "ran on
-    <model> instead of <wanted>" (or `story_comment` it yourself). When the person names a model, use theirs.
+  - **The model.** CodeBook picks it: `manager_brief.stations[].model.here` (the same as the run's
+    `brief.run_here.model.here`). Pass `here.claude` (`haiku`, `sonnet`, `opus` or `fable`) as `model`; when it is
+    null, leave `model` out (the session's own model: a station that writes code, or a crew). When the person names a
+    model, use theirs. When `here.as_wanted` is false the station's first choice is another provider's model this
+    session cannot run (`here.why` says which, and what runs instead): before its first run, tell the person once in
+    plain words ("Review asks for GPT-5; here it runs on Sonnet")
+    and offer to keep that station in CodeBook's cloud on its own model, with `set_station_cloud { factory, station,
+    always: true }` after their yes (the rest of the story still runs here). CodeBook writes the "ran on" note on the
+    story itself: never write it, and never tell the worker to.
+  - **Stations kept in the cloud.** A station with `always_cloud` (its `runs` reads `cloud`) runs in CodeBook for this
+    person's stories: do not wait for it in `list_my_work` and do not spawn a worker for it; follow it with
+    `story_status` and say "Review runs in CodeBook's cloud on GPT-5." `set_station_cloud { …, always: false }` (after
+    a yes) lets it run here again.
   - **Stories in parallel.** Check every Run here story you follow, not only the first: when several have a run
     waiting for this runner, spawn their workers together, in ONE message (they run side by side), at most three at
     a time. Each code worker works in its own git worktree next to `checkout_path`, so they never share a checkout.
     One story's stations still go one after another; one agent may work several stories at once (each is its own
-    run). Never leave `model` out for a station that does not write code: the worker's default is the session's
-    model. Say which ones started: "Alex is on #26 and Ben is on #28, side by side."
+    run). Never leave `model` out when `here.claude` names one: the worker's default is the session's model. Say
+    which ones started: "Alex is on #26 and Ben is on #28, side by side."
 - **A QA station** (`kind: "qa"`, or a run whose brief has `run_here.testing`): the same. Its brief carries
   CodeBook's "Test it here" skill, so the worker runs the repository's tests and the station's checks here and posts
   the evidence; say "Maya (QA) is testing #58 here."
