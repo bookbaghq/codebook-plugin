@@ -6,10 +6,11 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, RenderElement, RenderInput } from 'claude-code'
 
-import type { CodebookLink, CodebookMode, CodebookStation, CodebookStory, CodebookTrail } from '../types'
+import type { CodebookLink, CodebookMode, CodebookStation, CodebookStory, CodebookTrail, CodebookWatch } from '../types'
 import { ART } from './art'
 import type { ArtName } from './art'
 import {
+  answer,
   approve,
   loadFactories,
   refresh,
@@ -23,7 +24,7 @@ import {
 // Keep each tag as factory.ts has it.
 const mode = atom({ plugin: 'codebook', key: 'mode' } as const, 'here' as CodebookMode)
 const active = atom({ plugin: 'codebook', key: 'active' } as const, null, { shape: 'active-1' })
-const story = atom({ plugin: 'codebook', key: 'story' } as const, null, { shape: 'story-3' })
+const story = atom({ plugin: 'codebook', key: 'story' } as const, null, { shape: 'story-4' })
 const events = atom({ plugin: 'codebook', key: 'events' } as const, [], { shape: 'events-1' })
 const factories = atom({ plugin: 'codebook', key: 'factories' } as const, null, { shape: 'factories-1' })
 const picked = atom({ plugin: 'codebook', key: 'picked' } as const, null, { shape: 'factories-1' })
@@ -34,6 +35,7 @@ const busy = atom({ plugin: 'codebook', key: 'busy' } as const, null as string |
 const sendingBack = atom({ plugin: 'codebook', key: 'sendingBack' } as const, false)
 const notice = atom({ plugin: 'codebook', key: 'notice' } as const, null as string | null)
 const trail = atom({ plugin: 'codebook', key: 'trail' } as const, null as CodebookTrail | null, { shape: 'trail-1' })
+const watched = atom({ plugin: 'codebook', key: 'watched' } as const, [] as CodebookWatch[], { shape: 'watched-1' })
 
 export const PANE = 'codebook-factory'
 
@@ -308,6 +310,40 @@ export async function drawPane($: EngineInterface, e: RenderInput): Promise<Rend
     </Box>
   )
 
+  // A question waiting on this person (request_person, ask_person, an escalation): its text and an Answer button
+  // that puts "Answer #57: " in the prompt box; the manager posts the words with answer_question.
+  const asked =
+    st?.question == null ? null : (
+      <Box flexDirection="column" gap={1} padding={1} borderStyle="round" borderColor={TONES.you.border}>
+        <Box flexDirection="row" alignItems="center" gap={1}>
+          <Text weight="bold">Question for you</Text>
+          <Box flexGrow={1} />
+          {pill('you', 'Needs you')}
+        </Box>
+        <Text>{st.question}</Text>
+        <Box flexDirection="row" gap={1}>
+          <Button key="answer" variant="primary" onPress={() => answer($)}>
+            Answer
+          </Button>
+        </Box>
+      </Box>
+    )
+
+  const others = await read($, watched)
+  const alsoFollowing =
+    others.length === 0 ? null : (
+      <Box flexDirection="column" gap={0}>
+        <Text size="caption" weight="bold" dimColor>
+          ALSO FOLLOWING
+        </Text>
+        {others.map(one => (
+          <Text key={`watch-${one.story}`} size="footnote" dimColor>
+            {`${one.reference} ${one.title}${one.question ? ` — asks you: ${one.question}` : one.waitKey ? ' — needs you' : ''}`}
+          </Text>
+        ))}
+      </Box>
+    )
+
   const card = (s: CodebookStation) => {
     const { tone, label } = look(s, st)
     const isAsk = s.isCurrent && st?.waitingOn === 'person' && st.waitingOnYou
@@ -347,7 +383,7 @@ export async function drawPane($: EngineInterface, e: RenderInput): Promise<Rend
               <Text dimColor>Approving may merge the pull request: some factories merge on approval, even a draft.</Text>
             ) : null}
             <Box flexDirection="row" gap={1}>
-              <Button key="approve" variant="primary" onPress={() => approve($)}>
+              <Button key="approve" variant={st.question === null ? 'primary' : 'secondary'} onPress={() => approve($)}>
                 Approve
               </Button>
               <Button key="send-back" onPress={() => update($, sendingBack, v => !v)}>
@@ -437,7 +473,9 @@ export async function drawPane($: EngineInterface, e: RenderInput): Promise<Rend
           : 'Done. Everything is on the card.'
         : st.finished === 'dropped'
           ? 'Dropped.'
-          : st.waitingOn === 'person' && st.waitingOnYou
+          : st.question !== null
+            ? 'A question for you: press Answer below, or answer it in the chat.'
+            : st.waitingOn === 'person' && st.waitingOnYou
             ? 'Waiting for you: Approve or Send back below.'
             : st.waitingOn === 'review' && st.waitingOnYou
               ? 'Waiting for your review: answer it in the chat.'
@@ -460,6 +498,7 @@ export async function drawPane($: EngineInterface, e: RenderInput): Promise<Rend
       {now ? (
         <Text weight="bold">{`Now: ${now}`}</Text>
       ) : null}
+      {asked}
       {modes}
       {problem}
       {st === null ? (
@@ -470,6 +509,7 @@ export async function drawPane($: EngineInterface, e: RenderInput): Promise<Rend
         </Box>
       )}
       {onCard}
+      {alsoFollowing}
       {recent}
       <Box flexDirection="row" gap={1}>
         <Button key="refresh" onPress={() => refresh($)}>

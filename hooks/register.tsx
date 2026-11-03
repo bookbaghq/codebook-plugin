@@ -5,7 +5,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { CodebookActive, CodebookClaim, CodebookLink, CodebookMode, CodebookStory } from '../types'
+import type { CodebookActive, CodebookClaim, CodebookLink, CodebookMode, CodebookStory, CodebookWatch } from '../types'
 import { call, words } from './connector'
 import { allowedOf, repoOf, targetsOf } from './guard'
 import type { Target } from './guard'
@@ -15,12 +15,14 @@ import {
   follow,
   loadFactories,
   refresh,
+  refreshWatched,
   setLink,
   setMode,
   splitRun,
   startRequest,
   STORE_ACTIVE,
   STORE_MODE,
+  STORE_WATCHED,
   unfollow,
 } from './factory'
 import type { Status } from './factory'
@@ -30,12 +32,13 @@ import { drawPane, PANE } from './pane'
 // Keep each tag as factory.ts has it.
 const mode = atom({ plugin: 'codebook', key: 'mode' } as const, 'here' as CodebookMode)
 const active = atom({ plugin: 'codebook', key: 'active' } as const, null, { shape: 'active-1' })
-const story = atom({ plugin: 'codebook', key: 'story' } as const, null, { shape: 'story-3' })
+const story = atom({ plugin: 'codebook', key: 'story' } as const, null, { shape: 'story-4' })
 const factories = atom({ plugin: 'codebook', key: 'factories' } as const, null, { shape: 'factories-1' })
 const picked = atom({ plugin: 'codebook', key: 'picked' } as const, null, { shape: 'factories-1' })
 const link = atom({ plugin: 'codebook', key: 'link' } as const, { state: 'idle' } as CodebookLink, {
   shape: 'link-1',
 })
+const watched = atom({ plugin: 'codebook', key: 'watched' } as const, [] as CodebookWatch[], { shape: 'watched-1' })
 const claims = atom({ plugin: 'codebook', key: 'claims' } as const, [] as CodebookClaim[], { shape: 'claims-1' })
 
 const POLL_MS = 4000
@@ -49,15 +52,17 @@ async function tick($: EngineInterface): Promise<void> {
   flushAsk($)
   if (isPolling) return
   const a = await read($, active)
-  if (a === null) return
+  const others = await read($, watched)
+  if (a === null && others.length === 0) return
   const s = await read($, story)
   const now = await $.clock.now()
-  const isQuiet = s !== null && s.finished !== null
+  const isQuiet = (a === null || (s !== null && s.finished !== null)) && others.length === 0
   if (now - lastPoll < (isQuiet ? QUIET_POLL_MS : POLL_MS) - 200) return
   isPolling = true
   try {
     lastPoll = now
-    await refresh($)
+    if (a !== null) await refresh($)
+    await refreshWatched($)
   } finally {
     isPolling = false
   }
@@ -90,15 +95,17 @@ async function statusText($: EngineInterface): Promise<{ text: string; context?:
   const lines = s.stations.map(one => `${one.isCurrent ? '▸' : ' '} ${one.name}: ${one.state.replace(/_/g, ' ')}`)
   const where = s.finished
     ? `finished (${s.finished})`
-    : s.waitingOn === 'person'
-      ? s.waitingOnYou
-        ? 'waiting for you: Approve or Send back in the Factory pane'
-        : 'waiting for a person'
-      : s.waitingOn === 'outside_agent' || s.waitingOn === 'runner'
-        ? s.waitingClaimedByYou
-          ? 'being worked here'
-          : 'waiting for an agent here'
-        : 'moving'
+    : s.question !== null
+      ? `waiting for your answer: "${s.question}" (Answer in the Factory pane, or in the chat)`
+      : s.waitingOn === 'person'
+        ? s.waitingOnYou
+          ? 'waiting for you: Approve or Send back in the Factory pane'
+          : 'waiting for a person'
+        : s.waitingOn === 'outside_agent' || s.waitingOn === 'runner'
+          ? s.waitingClaimedByYou
+            ? 'being worked here'
+            : 'waiting for an agent here'
+          : 'moving'
   const text = [`${a.reference} "${a.title}" (${a.factoryName}) — ${where}`, ...lines, a.url ?? ''].join('\n').trim()
   return { text, context: [JSON.stringify({ codebook_story: a, stations: s.stations, waiting: s.waitingOn })] }
 }
@@ -209,6 +216,10 @@ export const register: Register = on => {
     const storedActive = (await $.store.get(STORE_ACTIVE)) as CodebookActive | undefined
     if (storedActive && typeof storedActive.story === 'string' && (await read($, active)) === null) {
       await update($, active, () => storedActive)
+    }
+    const storedWatched = (await $.store.get(STORE_WATCHED)) as CodebookWatch[] | undefined
+    if (Array.isArray(storedWatched) && (await read($, watched)).length === 0) {
+      await update($, watched, () => storedWatched.filter(one => typeof one?.story === 'string'))
     }
     $.clock.every(1000, () => {
       void tick($)

@@ -17,14 +17,26 @@ const BOARD = {
   ],
 }
 
-type At = 'build' | 'claimed' | 'review' | 'done'
+type At = 'build' | 'claimed' | 'review' | 'done' | 'asks' | 'escalated'
+const ASKED = 'Refund to the card, or as store credit?'
 /** A CodeBook from before §12.10: person stations carry no on_approve. */
 const older = { codebook: false }
 const MERGES = 'Approving moves the story to Done, and CodeBook then merges pull request #212 — the commit you approve, once its checks pass.'
 
 const LEFT = 'pull request #212 (a draft) is still open, and CodeBook will not merge it: no person approved a commit, because every station of this workflow is an agent\'s. Ask the person to review and merge it at the repository host.'
 
-function status(at: At) {
+function status(at: At): Record<string, unknown> {
+  // An agent asked for a person mid-run (request_person): the run waits on this person with the question's text.
+  if (at === 'asks') return {
+    ...status('build'),
+    run: { run: 811, state: 'waiting_for_person', where: 'here' },
+    waiting: { on: 'person', run: 811, on_you: true, question: ASKED, tools: ['answer_question', 'approve_station', 'send_back'] },
+  }
+  // The manager asked the person (ask_person, an escalation): the story carries the question.
+  if (at === 'escalated') return {
+    ...status('build'),
+    question: { text: 'Which payment providers are in scope?', choices: ['Stripe only', 'Stripe and PayPal'], on_you: true },
+  }
   if (at === 'done') return {
     ...status('review'),
     station: { station: 'col43', name: 'Done' },
@@ -109,8 +121,22 @@ const TRAIL = {
 
 type Calls = { tool: string; args: Record<string, unknown> }[]
 
+/** #58, the second story a confirm_stories created: at Build, or waiting on this person with a question. */
+function status58(asks: boolean): Record<string, unknown> {
+  const s = status('build')
+  return {
+    ...s,
+    story: { story: '7LmP', reference: '#58', title: 'Refund email' },
+    events: [],
+    last_event: null,
+    ...(asks
+      ? { run: { run: 821, state: 'waiting_for_person', where: 'here' }, waiting: { on: 'person', run: 821, on_you: true, question: 'Send the refund email from billing@ or support@?' } }
+      : { run: { run: 821, state: 'with_outside_agent', where: 'here' }, waiting: { on: 'runner', run: 821, on_you: true, claimed: false } }),
+  }
+}
+
 /** The engine beneath the plugin: a connected codebook server answering from the fixtures above. */
-function engine(on: On, at: { now: At }) {
+function engine(on: On, at: { now: At; asks58?: boolean }) {
   const calls: Calls = []
   const prompts: string[] = []
   const filled: string[] = []
@@ -154,7 +180,9 @@ function engine(on: On, at: { now: At }) {
         : tool === 'factory_board'
           ? BOARD
           : tool === 'story_status'
-            ? status(at.now)
+            ? args.story === '7LmP'
+              ? status58(at.asks58 === true)
+              : status(at.now)
             : tool === 'approve_station'
               ? { decided: 'approved', run: 812, next: 'Review approved; the story moves on.' }
               : tool === 'list_factories'
@@ -170,7 +198,7 @@ function engine(on: On, at: { now: At }) {
   on('mcp.call', (_, e) => {
     calls.push({ tool: e.tool, args: e.args })
     const data = answer(e.tool, e.args)
-    const isError = 'error' in data
+    const isError = typeof data === 'object' && data !== null && 'error' in data
     return { value: { content: [{ type: 'text', text: JSON.stringify(data) }], structuredContent: data, isError } }
   })
   return { calls, prompts, filled, logged, clock }
@@ -396,14 +424,60 @@ test('a story done with a pull request nobody will merge says so in the chat and
   await ui.unmount()
 })
 
-test('confirming stories follows the first one created', async ($, on) => {
-  engine(on, { now: 'build' })
+test('confirming stories follows every story created: the pane shows the first, and a question on another wakes the session', async ($, on) => {
+  const at: { now: At; asks58?: boolean } = { now: 'build' }
+  const { prompts, clock } = engine(on, at)
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await $.tool.call({ tool: 'mcp__plugin_codebook_codebook__confirm_stories', proposal: 'wo7', run_location: 'here' } as never)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   expect(await ui.find({ type: 'Text', text: /PAYMENTS FACTORY · #57/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /1 more created/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /also following #58/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^#58 Refund email$/ })).toBeDefined()
   await ui.unmount()
+  await clock.advance(5000)
+  expect(prompts.length).toBe(0)
+  // Only #58 starts waiting on this person (found live: only created[0] ever woke the session).
+  at.asks58 = true
+  await clock.advance(5000)
+  expect(prompts).toEqual([
+    'CodeBook: #58 has a question for you at Build: "Send the refund email from billing@ or support@?". Use the codebook:factory-manager skill: ask me this here, with its likely answers, then call answer_question with my words. Never call approve_station in place of an answer.',
+  ])
+  await clock.advance(5000)
+  expect(prompts.length).toBe(1)
+})
+
+test('an agent\'s request_person wakes the session with the question\'s text, once, and the pane offers Answer', async ($, on) => {
+  const at: { now: At } = { now: 'build' }
+  const { prompts, logged, filled, calls, clock } = engine(on, at)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await claudeStarts($)
+  at.now = 'asks'
+  await clock.advance(5000)
+  expect(prompts).toEqual([
+    `CodeBook: #57 has a question for you at Build: "${ASKED}". Use the codebook:factory-manager skill: ask me this here, with its likely answers, then call answer_question with my words. Never call approve_station in place of an answer.`,
+  ])
+  expect(logged).toContain(`CodeBook: #57 asks you: "${ASKED}"`)
+  await clock.advance(5000)
+  expect(prompts.length).toBe(1)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ type: 'Text', text: ASKED })).toBeDefined()
+  await ui.press({ key: 'answer' })
+  expect(filled.at(-1)).toBe('Answer #57: ')
+  await ui.unmount()
+  // The plugin never answers, approves or sends back by itself.
+  expect(calls.find(one => ['answer_question', 'approve_station', 'send_back'].includes(one.tool))).toBeUndefined()
+})
+
+test("a manager's question (ask_person, an escalation) wakes the session with its text and likely answers", async ($, on) => {
+  const at: { now: At } = { now: 'build' }
+  const { prompts, clock } = engine(on, at)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await claudeStarts($)
+  at.now = 'escalated'
+  await clock.advance(5000)
+  expect(prompts).toEqual([
+    'CodeBook: #57 has a question for you at Build: "Which payment providers are in scope?" (likely answers: Stripe only / Stripe and PayPal). Use the codebook:factory-manager skill: ask me this here, with its likely answers, then call answer_question with my words. Never call approve_station in place of an answer.',
+  ])
 })
 
 test("auto mode's refusal of the pane's own read says which calls to allow", async ($, on) => {

@@ -99,7 +99,12 @@ person confirms; never create stories any other way. Put the proposal's referenc
 **Planning or review stations** that produce text: write it as the station asks and record it with `run_artifact`.
 
 **When only a person can decide** (unclear requirement, a choice the brief leaves open): `request_person { run, fence,
-summary }` with the question. The run waits for the person; stop there and say so.
+summary }` with the question, stated fully in `summary` so it reads on its own (what you found, the question, its
+likely answers): it is a question to a person, not a request for approval. The run waits; the manager asks the person
+in the chat and the run comes back to a worker with the answer. Stop there and say so.
+
+**Answers already given**: when the brief carries `answers` (`[{ question, answer, by, at }]`), they are the person's
+answers to earlier questions on this run. Use them and do not ask those again.
 
 ### Test what matters, once
 
