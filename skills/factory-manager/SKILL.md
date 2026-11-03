@@ -110,17 +110,22 @@ pass `new: true` only when they say it really is different work.
 
 ## 3. "Proceed?"
 
-Show the proposal plainly: its reference (WO-7), each story's title, a one-line summary and risk, and the link. Say who
+Show the proposal plainly: its reference (WO-7), each story's title, a one-line summary and risk, and the link. When
+`propose_stories` answers `stories[].backlog`, the stories are already cards in the board's **Backlog drawer**, marked
+"Proposed · WO-7", running nothing: say so, with each card's link, and that the person may edit them there before
+answering (an older CodeBook keeps them as plan lines only: then they appear after "proceed"). Say who
 merges the stories' pull requests at Done, from `manager_brief.merge.sentence` as CodeBook wrote it (for example "Every
 station of this workflow is an agent's, so no person approves a commit and CodeBook does not merge: at Done its pull
 requests stay open …"); without it (an older CodeBook), say "CodeBook may merge at Done". Then ask, in these words:
 **"Proceed?"** Wait for the person.
 
-- Yes → `confirm_stories { proposal }` (the stories run here for you, the proposal's runner). Say which stories were created (#58, #59) and where each
-  starts.
+- Yes → `confirm_stories { proposal }` (the stories run here for you, the proposal's runner). Say which stories moved
+  from the Backlog (`from_backlog`) or were created (#58, #59) and where each starts; a card the person had already
+  moved by hand (`moved_by_hand`) stays where they put it.
 - They change something → `propose_stories` again with `proposal` to add to it, or `discard_proposal` with `stories`
   for the ones to drop, then ask again.
-- No → `discard_proposal { proposal, reason }`.
+- No → `discard_proposal { proposal, reason }`. Its `backlog_cards` say which Backlog cards were removed and which
+  were kept (someone touched them): say so.
 
 ## 4. Run the stations here
 
