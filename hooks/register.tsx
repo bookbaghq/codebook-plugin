@@ -11,6 +11,7 @@ import { allowedOf, repoOf, targetsOf } from './guard'
 import type { Target } from './guard'
 import {
   adopt,
+  flushAsk,
   follow,
   loadFactories,
   refresh,
@@ -45,6 +46,7 @@ let lastPoll = 0
 let isPolling = false
 
 async function tick($: EngineInterface): Promise<void> {
+  flushAsk($)
   if (isPolling) return
   const a = await read($, active)
   if (a === null) return
@@ -59,6 +61,7 @@ async function tick($: EngineInterface): Promise<void> {
   } finally {
     isPolling = false
   }
+  flushAsk($)
 }
 
 async function openPane($: EngineInterface): Promise<boolean> {

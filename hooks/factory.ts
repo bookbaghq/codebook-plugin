@@ -203,6 +203,46 @@ function agentOf(e: WireEvent): string | null {
   return agent.role ? `${agent.name} (${agent.role})` : agent.name
 }
 
+/**
+ * A station that waits on this person gets asked in the chat. A line in the transcript starts no turn, so with Claude
+ * idle a story sat at Human review for 81 minutes until the person went to app.codebook.work and dragged it to Done
+ * (found live, 2 Nov 2026). Once per waiting run, a prompt wakes the session; the manager skill then shows the work and
+ * asks "Approve, or send back?", and only the person's answer approves.
+ */
+export function waitingPrompt(reference: string, station: string | null, on: string | null): string {
+  const at = station ? ` at ${station}` : ''
+  const what = on === 'review' ? 'a review' : 'approval'
+  return (
+    `CodeBook: ${reference} is waiting for your ${what}${at}. Use the codebook:factory-manager skill: show me what to ` +
+    `look at (what was done, QA's verdict, the pull request) and what approving does, then ask me to approve or send ` +
+    `it back. Call approve_station or send_back only after I answer.`
+  )
+}
+
+// The ask waits here until the next timer tick sends it: a refresh also runs inside the tool.call hook of
+// Claude's own CodeBook calls, where submitting would wait on the turn that hook holds.
+let pendingAsk: string | null = null
+
+async function askWhenWaiting(
+  $: EngineInterface,
+  before: CodebookStory | null,
+  next: CodebookStory,
+  reference: string,
+  station: string | null,
+): Promise<void> {
+  if (!next.waitingOnYou || (next.waitingOn !== 'person' && next.waitingOn !== 'review')) return
+  if (before?.waitingOnYou && before.waitingRun === next.waitingRun) return
+  pendingAsk = waitingPrompt(reference, station, next.waitingOn)
+}
+
+/** Sends the queued ask, if any: from the poll timer (every second), never from inside a tool call. */
+export function flushAsk($: EngineInterface): void {
+  if (pendingAsk === null) return
+  const text = pendingAsk
+  pendingAsk = null
+  void $.prompt.submit({ text })
+}
+
 /** The chat line for an event of the followed story (G5b's who/where), or null for one not worth a line. */
 export function narration(e: WireEvent, reference: string): string | null {
   const who = agentOf(e)
@@ -312,6 +352,7 @@ export async function refresh($: EngineInterface): Promise<void> {
     }
     if (next.leftForPerson && !before.leftForPerson) $.ui.log(`CodeBook: ${s.story.reference} is done, but ${next.leftForPerson}`)
   }
+  await askWhenWaiting($, before, next, s.story.reference, s.station?.name ?? null)
   if (before === null || (s.last_event ?? null) !== (before.lastEvent ?? null)) await loadTrail($, s.story.story)
   if (s.events.length > 0) {
     const rows: CodebookEvent[] = s.events.map(e => ({

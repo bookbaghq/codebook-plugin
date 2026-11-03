@@ -166,7 +166,10 @@ calls (`sleep 5` in the shell). For what you see:
   back (and why)?". Call `approve_station` (with the pull request `heads` from
   `waiting.pull_requests`) or `send_back` with their reason; after an approval, say what its answer's `merge` says
   will happen. A person's station for someone else: say who it waits
-  for.
+  for. The plugin wakes this session with a "CodeBook: #57 is waiting for your approval at …" prompt when a followed
+  story reaches the person's station, so they decide here and never have to open app.codebook.work. A yes approves
+  with `approve_station`; never move the card with `send_card` (to Done or anywhere) in place of an approval: that
+  skips the station and CodeBook's merge rules.
 - **A review waiting for this person** (`waiting.on: "review"`, `on_you: true`): show each review's label and
   criteria and what was done, ask "Pass or fail (and why)?", then `answer_review { story, verdict, notes, review }`.
 - **A question from the manager or an escalation** (`story.question`): ask the person in the chat, then

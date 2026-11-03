@@ -452,3 +452,22 @@ test('the factory is read from the leading words that name one, in any case, quo
   expect(splitRun(['we', 'have', 'too', 'many'], names, 'Vibeforce')).toEqual({ factory: 'Vibeforce', title: 'we have too many' })
   expect(splitRun(['we', 'have', 'too', 'many'], names, null)).toBeNull()
 })
+
+test('a station that starts waiting on this person wakes the session to ask, once per run (found live: 81 minutes at Human review, nobody asked)', async ($, on) => {
+  const at: { now: At } = { now: 'build' }
+  const { prompts, calls, clock } = engine(on, at)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await claudeStarts($)
+  await clock.advance(5000)
+  expect(prompts.length).toBe(0)
+  at.now = 'review'
+  await clock.advance(5000)
+  expect(prompts).toEqual([
+    'CodeBook: #57 is waiting for your approval at Review. Use the codebook:factory-manager skill: show me what to look at (what was done, QA\'s verdict, the pull request) and what approving does, then ask me to approve or send it back. Call approve_station or send_back only after I answer.',
+  ])
+  await clock.advance(5000)
+  await clock.advance(5000)
+  expect(prompts.length).toBe(1)
+  // Asking is not deciding: the plugin itself never approves.
+  expect(calls.find(one => one.tool === 'approve_station' || one.tool === 'send_back')).toBeUndefined()
+})
