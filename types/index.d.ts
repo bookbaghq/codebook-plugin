@@ -95,6 +95,15 @@ export type CodebookWatch = {
 /** A CodeBook run this session holds, and the repositories its brief lets it change (`owner/name`). */
 export type CodebookClaim = { run: number; repos: string[] }
 
+/** A repository's checkout on this computer, as CodeBook last answered it (`you.local_code`, a claim's `local`). */
+export type CodebookCheckout = {
+  /** `owner/name`. */
+  repository: string
+  /** The folder the code is in (`~/…` or absolute), or null when the person has not set one. */
+  checkoutPath: string | null
+  mode: 'existing' | 'clone_into' | null
+}
+
 /** The connector as the pane last found it. */
 export type CodebookLink =
   | { state: 'idle' }
@@ -116,6 +125,7 @@ declare module 'claude-code' {
       sendingBack: boolean
       notice: string | null
       claims: Shaped<CodebookClaim[]>
+      checkouts: Shaped<CodebookCheckout[]>
       trail: Shaped<CodebookTrail | null>
       watched: Shaped<CodebookWatch[]>
     }

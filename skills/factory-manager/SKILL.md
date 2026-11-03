@@ -1,6 +1,6 @@
 ---
 name: factory-manager
-description: Act as a CodeBook factory's manager in this session for work that runs here. Use when the person asks to run, start or build something in a CodeBook factory "here" (or /factory run puts that request in the prompt), or to manage a Run here story. Has the factory's story writer research, ask and write the stories (adding one with the person's yes), asks "proceed?", then runs every station here with sub-agents, asks the person their questions and stations in the chat, and narrates.
+description: Act as a CodeBook factory's manager in this session for work that runs here. Use when the person asks to run, start or build something in a CodeBook factory "here" (or /factory run puts that request in the prompt), or to manage a Run here story. First makes sure each repository's code is on this computer (its checkout folder, git connected), then has the factory's story writer research, ask and write the stories (adding one with the person's yes), asks "proceed?", then runs every station here with sub-agents, asks the person their questions and stations in the chat, and narrates.
 ---
 
 # CodeBook factory manager (Run here)
@@ -39,13 +39,39 @@ here stories alone. You talk to CodeBook only through the `codebook` connector's
 2. Take `manager.system` as your role and `rules` as binding. `manager.agent` is the manager you stand in for (for
    example "Harper"); speak as "Harper (manager), here".
 3. If `you.may_run_here` is false, say why (`run_here_refusal`) and offer to run it in CodeBook's cloud instead
-   (`start_story` with `run_location: "cloud"`); stop here.
+   (`start_story` with `run_location: "cloud"`); stop here. Else do step 0 below before anything else.
 4. Note the `author` station (who writes stories), the `stations` (who works each, `kind` — `agent`, `qa`, `crew` —
    `runs`, `writes_code`, `model`, and a crew's `crew`) and the `repositories`. Mention open `proposals` if the request
    may already be there.
 5. **At the start of each turn of factory work, call `needs_you { factory }`.** Ask each waiting question in the chat
    with its text (one at a time, with its likely answers) and answer it with `answer_question` in the person's words;
    show each waiting approval or review as in section 4. Never `approve_station` in place of an answer.
+
+## Step 0: the code on this computer
+
+Before any research or station (once a session, and again when a check fails), the code must be on this computer and
+git connected. This setup is not factory work: no story, but each change (saving a folder, cloning, adding a remote)
+needs the person's yes. For each of `manager_brief.you.local_code.repositories`, one line each ("payments:
+~/code/payments, connected."):
+1. **No `checkout_path`**: if this session's folder is a checkout of it (its `origin` is the same owner/name as
+   `clone_url` or `html_url`, ssh or https, with or without `.git`), ask "Use <folder> for <name>?". Else ask for the
+   folder of an existing checkout, or a folder to clone it into (for example `~/code`). Save it with
+   `set_local_checkout { factory, repository, path, mode }` (`existing` or `clone_into`); use the `checkout_path` it
+   answers. Quote every path and address in a command (`"<checkout_path>"`, `"<clone_url>"`); `~` is the home folder
+   and is not expanded inside quotes, so write a `~/…` path as `"$HOME/…"`.
+2. **Check it**: the folder exists; `git -C "<checkout_path>" rev-parse --show-toplevel` works; `git -C
+   "<checkout_path>" remote get-url origin` names that repository; `git -C "<checkout_path>" ls-remote origin HEAD`
+   works (git is connected); then `git -C "<checkout_path>" fetch origin`.
+3. **Missing** (or empty) → "Clone <clone_url> into <checkout_path>?"; on yes `git clone "<clone_url>" "<checkout_path>"`,
+   and check again. **Not a git repository, or another `origin`** → say what is there and ask: another folder, or
+   add the remote (`git -C "<checkout_path>" remote add origin "<clone_url>"`, only when it has no `origin`). **`ls-remote` refused** →
+   say what git said; the person signs in to git or `gh` themselves. Never delete, move or overwrite a folder or
+   remote.
+
+No `you.local_code` (an older CodeBook): this session's folder is the checkout, checked the same way. From here on
+**`checkout_path` is where the code is**, not wherever this session was opened: research, workers and worktrees use it
+(`git -C "<checkout_path>"`, `cd "<checkout_path>"`), and worktrees go next to it, `"<checkout_path>-<n>"` (the story's
+number).
 
 ## 2. From request to stories: the story writer first
 
@@ -62,7 +88,8 @@ here stories alone. You talk to CodeBook only through the `codebook` connector's
 **The factory has a story writer** (`author` is set; a crew's `leader` when it is a crew):
 1. Say "Sarah (Business analyst) will look into it and write the stories." Fetch her skill
    (`manager_brief { factory, agent: "Sarah" }`) and spawn ONE sub-agent (general purpose, the model per section 4)
-   with that skill as its instructions, the person's words, the factory's repositories and board, and this task:
+   with that skill as its instructions, the person's words, the factory's repositories with their `checkout_path`
+   (it reads there, `git -C "<checkout_path>" …`), the board, and this task:
    research read only, then return either the questions the stories need, or 1–6 small stories (title, description
    with acceptance criteria that can be checked, risk low / medium / high). It changes nothing and cannot talk to the
    person: its questions come back to you.
@@ -105,20 +132,17 @@ user stories", and offer: "I write the stories myself this time, or we add a bus
      model }`: a sensible default for a BA is Sonnet (`anthropic::` and the newest Sonnet the factory offers); say which.
   5. `manager_brief` again: `author` is now that station; spawn it as above.
   The first of these changes may open a Bookbag sign-in asking for one more permission ("Change your factories'
-  agents and stations", `you.manage_scope` false): tell the person, and retry the call after they allow it. If it is
-  refused again for that permission after they signed in (or they cannot find /mcp: the desktop app has no /mcp
-  terminal), the stored sign-in is an older one without it. Give them these two commands to run in a terminal, one
-  after the other; the second opens the Bookbag sign-in in their browser, asking for all of CodeBook's permissions:
+  agents and stations", `you.manage_scope` false): tell the person, and retry after they allow it. Refused again
+  after they signed in (or no /mcp in the desktop app): the stored sign-in is older. Give them, to run in a terminal
+  one after the other (the second opens the sign-in in their browser; in the desktop app `claude` is the app's own
+  copy, `~/Library/Application Support/Claude/claude-code/<version>/…/claude.app/Contents/MacOS/claude`):
   ```bash
   claude mcp logout plugin:codebook:codebook
   ```
   ```bash
   claude mcp login plugin:codebook:codebook
   ```
-  In the desktop app, `claude` is the app's own copy when none is on the PATH
-  (`~/Library/Application Support/Claude/claude-code/<version>/…/claude.app/Contents/MacOS/claude`). Once they have
-  allowed it, retry the call. A `FORBIDDEN` means they may not change this factory: stop the walk and offer to write
-  the stories yourself.
+  Then retry. A `FORBIDDEN` means they may not change this factory: stop and offer to write the stories yourself.
 
 `propose_stories` leaves out stories that are already on the factory (`already_there`): tell the person which, and
 pass `new: true` only when they say it really is different work.
@@ -149,7 +173,8 @@ calls (`sleep 5` in the shell). For what you see:
 
 - **An agent station waits for this runner** (`waiting.on: "runner"`, `on_you: true`, not claimed): spawn one
   `codebook:factory-worker` sub-agent for that run (`subagent_type: "codebook:factory-worker"`), telling it the run
-  number, the story, the station and the agent's name. Say: "Alex (Developer) is working #58 at Build, spawned here."
+  number, the story, the station, the agent's name and the `checkout_path` from step 0. Say: "Alex (Developer) is
+  working #58 at Build, spawned here."
   - **The model.** When the station's `model.wanted` (in `manager_brief.stations`) is an Anthropic model, pass its
     alias (`haiku`, `sonnet`, `opus` or `fable`) as `model`. Otherwise, by what the station does: a station that writes
     code (`writes_code` true, or a crew member who may change code) runs on the session's own model (leave `model`
@@ -158,9 +183,10 @@ calls (`sleep 5` in the shell). For what you see:
     <model> instead of <wanted>" (or `story_comment` it yourself). When the person names a model, use theirs.
   - **Stories in parallel.** Check every Run here story you follow, not only the first: when several have a run
     waiting for this runner, spawn their workers together, in ONE message (they run side by side), at most three at
-    a time. Each code worker works in its own git worktree, so they never share a checkout. One story's stations
-    still go one after another; one agent may work several stories at once (each is its own run). Never leave
-    `model` out for a station that does not write code: the worker's default is the session's model. Say which ones started: "Alex is on #26 and Ben is on #28, side by side."
+    a time. Each code worker works in its own git worktree next to `checkout_path`, so they never share a checkout.
+    One story's stations still go one after another; one agent may work several stories at once (each is its own
+    run). Never leave `model` out for a station that does not write code: the worker's default is the session's
+    model. Say which ones started: "Alex is on #26 and Ben is on #28, side by side."
 - **A QA station** (`kind: "qa"`, or a run whose brief has `run_here.testing`): the same. Its brief carries
   CodeBook's "Test it here" skill, so the worker runs the repository's tests and the station's checks here and posts
   the evidence; say "Maya (QA) is testing #58 here."
@@ -169,9 +195,9 @@ calls (`sleep 5` in the shell). For what you see:
   draft pull request:
   1. `claim_work { run }` yourself. The brief has no `agent`; it has `run_here.crew` (`name`, `instructions`,
      `limits.max_parallel` / `max_tasks`, `leader`, `reviewer`, `members`, `how`). Follow its `how` and keep
-     `heartbeat_work { run, fence }` going (every `lease.heartbeat_every_seconds`) while the crew works. Check the
-     checkout as a worker would (the remote is one of `run_here.repositories`, nothing uncommitted), then make the
-     branch `card_reference.branch` from the up-to-date default branch. The run's `run_here.may_change_code` is the
+     `heartbeat_work { run, fence }` going (every `lease.heartbeat_every_seconds`) while the crew works. Check
+     `checkout_path` as in step 0, then make the branch `card_reference.branch` from the up-to-date default branch in
+     a worktree `<checkout_path>-<n>`, where the members work. The run's `run_here.may_change_code` is the
      leader's: when it is false, no member changes code (say `why_not`).
   2. Split the story into at most `max_tasks` parts by the members' `focus`. For each, fetch the member's skill
      (`skill.fetch`, a `manager_brief { factory, agent }` call) and spawn a `codebook:factory-worker` sub-agent in
