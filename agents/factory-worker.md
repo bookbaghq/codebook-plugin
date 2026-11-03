@@ -52,7 +52,8 @@ no story; FORBIDDEN: another person's run), say so and stop.
 - `git remote get-url origin` must be one of `brief.run_here.repositories`. If not, change nothing and report
   **blocked**: "This checkout is <origin>; the station works in <repositories>. Open Claude Code in one of them and
   run it again."
-- `git status --porcelain`: if the person has uncommitted changes, do not touch them; report **blocked** saying so.
+- `git status --porcelain`: the person's own uncommitted changes stay theirs. You work in your own worktree (step 3),
+  so they do not stop you; never stash, commit or discard them.
 
 ## 3. Do the work, and say what you are doing on the card
 
@@ -61,12 +62,18 @@ the person's Claude): when you start ("Starting: …"), at a real decision or fi
 five notes per run, never a stream.
 
 **Code stations** (`may_change_code` true):
-1. From the default branch, up to date (`git fetch origin`), make the branch `card_reference.branch` (else
-   `codebook/<reference>-<short slug>`).
+1. Work in **your own git worktree**, never in the person's checkout: other stories' workers may be running beside
+   you. From the default branch, up to date (`git fetch origin`), make the branch `card_reference.branch` (else
+   `codebook/<reference>-<short slug>`) in a worktree next to the checkout, named by the repository and the story's
+   number without "#": `git worktree add ../vibeforce-app-26 -b <branch> origin/<default_branch>`. When that worktree
+   is already there (the story came back), reuse it if it is clean and on its branch; if the branch exists without a
+   worktree, `git worktree add ../<name> <branch>`; a worktree with someone's uncommitted changes is not yours: use
+   `../<name>-<run>` instead. Leave it in place: QA tests there.
 2. Do exactly what the station and the story ask, nothing else. Small and readable; follow the repository's own
    conventions (README, CLAUDE.md, AGENTS.md, CONTRIBUTING).
-3. Run the repository's tests (and linter or type check when it has them). Fix what you broke; name tests that were
-   already failing instead of hiding them. Keep each command you ran for the report: the command line, its exit code,
+3. Test with a budget (see "Test what matters, once" below): the tests that cover what you changed while you work,
+   then the repository's full suite (and linter or type check when it has them) **once** at the end. Fix what you
+   broke; name tests that were already failing instead of hiding them. Keep each command you ran for the report: the command line, its exit code,
    the passed / failed / skipped counts when the runner prints them, how long it took, the commit, and the last lines
    of its output.
 4. Commit with a message naming the story reference. Push the branch and open a **draft** pull request with
@@ -77,7 +84,9 @@ five notes per run, never a stream.
 
 Never merge, mark a pull request ready, push to a default branch or force-push.
 
-**QA stations** (`brief.run_here.testing` present): follow the "Test it here" skill. Run the repository's own tests
+**QA stations** (`brief.run_here.testing` present): follow the "Test it here" skill, in the developer's worktree for
+the pull request's branch when it is there and clean (else your own: `git worktree add ../<repository>-<reference>
+<branch>`). Run the repository's own tests
 here (its documented command; `testing.commands` are hints), check each of `testing.evaluators` and the story's
 acceptance criteria, and when a browser tool is available and `testing.browser.addresses` are listed, open them and
 check the story there. Record `run_artifact { kind: "test_report", title, content, commands }` with the commands,
@@ -91,6 +100,23 @@ person confirms; never create stories any other way. Put the proposal's referenc
 
 **When only a person can decide** (unclear requirement, a choice the brief leaves open): `request_person { run, fence,
 summary }` with the question. The run waits for the person; stop there and say so.
+
+### Test what matters, once
+
+A run here is on the person's plan and they are waiting: most of a run's minutes are tests. Spend them where they
+find something.
+- These rules hold unless the station's own agent skill asks for more testing: then the station wins.
+- **Code stations:** run the tests for what you changed as you go, the full suite once per run, after your last
+  change (if that run finds something you then fix, run the failing tests again, not the whole suite). A test that fails
+  on the default branch too: show that once (or cite an earlier run of this story that already did) and move on; do
+  not re-run the default branch's whole suite each time. Repeat a flaky test only when fixing it is the job, and then
+  three runs in a row are enough. Leave browser sweeps to QA.
+- **QA stations:** test the change and the story's acceptance criteria, and the full suite once per run (the code
+  changed since the last QA run, so a comeback runs it once too). When the story comes
+  back after a fix, check the fix and the earlier findings, not the whole sweep again: say in your verdict what you
+  did not re-run and why. A check that needs something this computer does not have (a key, a service): say exactly
+  what, and check everything else.
+- Never stop a run to wait for something only a person can provide: report it.
 
 ## 4. Keep the lease alive
 

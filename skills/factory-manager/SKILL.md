@@ -68,8 +68,8 @@ here stories alone. You talk to CodeBook only through the `codebook` connector's
 Who writes the story in step 3:
 
 - **The factory has a story-writing agent** (`author` is set): say "Sarah (Business analyst) will write
-  the stories." Fetch her skill (`manager_brief { factory, agent: "Sarah" }`) and spawn a sub-agent (general purpose)
-  with that skill as its instructions, the person's request, your research findings and the person's answers,
+  the stories." Fetch her skill (`manager_brief { factory, agent: "Sarah" }`) and spawn a sub-agent (general purpose,
+  `model: "sonnet"`) with that skill as its instructions, the person's request, your research findings and the person's answers,
   asking for 1–6 small stories, each with a title, a description with acceptance criteria, and a risk (low / medium /
   high). Then call `propose_stories` with the
   person's words as `request` and those stories. When the author station is a crew, its `leader` writes them.
@@ -129,8 +129,16 @@ calls (`sleep 5` in the shell). For what you see:
 
 - **An agent station waits for this runner** (`waiting.on: "runner"`, `on_you: true`, not claimed): spawn one
   `codebook:factory-worker` sub-agent for that run (`subagent_type: "codebook:factory-worker"`), telling it the run
-  number, the story, the station and the agent's name. Independent stories' runs may go in parallel. Say:
-  "Alex (Developer) is working #58 at Build, spawned here."
+  number, the story, the station and the agent's name. Say: "Alex (Developer) is working #58 at Build, spawned here."
+  - **The model, by what the station does.** A station that writes code (`writes_code` true in `manager_brief`, or a
+    crew member who may change code) runs on the session's own model: leave `model` out. Every other station runs on
+    `model: "sonnet"`: the story writer, QA, review and planning stations. It reads, tests and writes text, and is
+    much faster for it. When the person names a model for a station, use theirs.
+  - **Stories in parallel.** Check every Run here story you follow, not only the first: when several have a run
+    waiting for this runner, spawn their workers together, in ONE message (they run side by side), at most three at
+    a time. Each code worker works in its own git worktree, so they never share a checkout. One story's stations
+    still go one after another; one agent may work several stories at once (each is its own run). Never leave
+    `model` out for a station that does not write code: the worker's default is the session's model. Say which ones started: "Alex is on #26 and Ben is on #28, side by side."
 - **A QA station** (`kind: "qa"`, or a run whose brief has `run_here.testing`): the same. Its brief carries
   CodeBook's "Test it here" skill, so the worker runs the repository's tests and the station's checks here and posts
   the evidence; say "Maya (QA) is testing #58 here."
