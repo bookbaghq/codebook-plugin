@@ -137,6 +137,12 @@ On the board, Claude can also move and edit any card (`move_card`, `update_card`
 (`ask_person`), and set a station's model (`set_station_model`, after your yes). It deletes a card (`delete_card`)
 only after "proceed?", and CodeBook refuses unless the card's exact title is given.
 
+**Models.** Each station's agent runs on the Claude model CodeBook picks for it: the station's own when it is a Claude
+model, otherwise Sonnet (or this session's model for a station that writes code). A station that asks for another
+provider's model (GPT-5, say) can be kept in CodeBook's cloud on that model, for your stories only (`set_station_cloud`,
+after your yes, or Factory settings › Your computer); the rest of the story still runs here. When a run here used
+another model than the station asks for, CodeBook notes it on the story.
+
 **Run in CodeBook**: CodeBook's own agents run the stations on its servers, as from the website. The pane still follows
 the story and you still approve your stations here. Nothing runs on your computer unless you press **Work it here**.
 
