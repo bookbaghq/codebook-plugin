@@ -3,6 +3,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import { allowedOf, repoOf, targetsOf } from '../hooks/guard'
+import { checkoutsOf } from '../hooks/local'
 
 const OWN = 'mcp__plugin_codebook_codebook__'
 
@@ -94,4 +95,96 @@ test('while a run is held, a push outside its repositories is refused and one in
   await $.tool.call({ tool: OWN + 'complete_work', run: 811, fence: 1, outcome: 'pass', summary: 'ok' } as never)
   await $.tool.call({ tool: 'Bash', command: 'git push fork main' } as never)
   expect(ran.length).toBe(4)
+})
+
+test('a command is read in its own folder: cd, pushd, git -C (relative to a cd), --git-dir, gh -R or GH_REPO', async () => {
+  expect(targetsOf('cd ~/code && git -C sandbox-57 push -u origin codebook/57-x')).toEqual([{ kind: 'push', cwd: '~/code/sandbox-57', remote: 'origin' }])
+  expect(targetsOf('pushd /work/a && git push')).toEqual([{ kind: 'push', cwd: '/work/a', remote: 'origin' }])
+  expect(targetsOf('git --git-dir=/work/b/.git push')).toEqual([{ kind: 'push', cwd: '/work/b/.git', remote: 'origin' }])
+  expect(targetsOf('git push --repo=https://github.com/someone/elsewhere.git main')).toEqual([{ kind: 'push', cwd: null, remote: 'https://github.com/someone/elsewhere.git' }])
+  expect(targetsOf('command /usr/bin/git push fork')).toEqual([{ kind: 'push', cwd: null, remote: 'fork' }])
+  expect(targetsOf('{ cd /work/c; git push; }')).toEqual([{ kind: 'push', cwd: '/work/c', remote: 'origin' }])
+  expect(targetsOf('gh pr create --draft -Racme/payments')).toEqual([{ kind: 'pr', cwd: null, repo: 'acme/payments' }])
+  expect(targetsOf('GH_REPO=acme/payments gh pr create --draft')).toEqual([{ kind: 'pr', cwd: null, repo: 'acme/payments' }])
+  expect(targetsOf('export GH_REPO=acme/payments && gh pr create')).toEqual([{ kind: 'pr', cwd: null, repo: 'acme/payments' }])
+  // A subshell's cd does not outlive it, and popd goes back to a folder the guard cannot know: refused, not guessed.
+  expect(targetsOf('(cd /work/other && git push)')).toBeNull()
+  expect(targetsOf('pushd /work/a && popd && git push')).toBeNull()
+})
+
+/** The factory's checkout (and its worktrees) is not the session's folder: each folder has its own origin. */
+function inFolders(on: On) {
+  const ran: string[] = []
+  mock.store(on)
+  on('session.cwd', () => ({ value: '/work/session' }))
+  on('env.get', () => ({ value: '/Users/me' }))
+  on('process.run', (_, e) => {
+    const dir = e.argv[2] ?? ''
+    const url = /^\/Users\/me\/code\/sandbox(-\d+)?$/.test(dir) ? 'git@github.com:bookbaghq/codebook-plugin-sandbox.git' : 'https://github.com/someone/elsewhere.git'
+    const top = e.argv[3] === 'rev-parse'
+    return { value: { exitCode: 0, stdout: `${top ? dir : url}\n`, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  on('tool.call', (_, e) => {
+    const tool = String(e.tool)
+    if (tool === 'Bash') {
+      ran.push(String((e as { command?: unknown }).command))
+      return { result: { stdout: '', stderr: '', interrupted: false } as never }
+    }
+    const repository = { name: 'bookbaghq/codebook-plugin-sandbox', local: { path: '~/code', mode: 'clone_into', checkout_path: '~/code/sandbox' } }
+    const data = { run: 811, where: 'here', lease: { fence: 1 }, brief: { run_here: { repository } } }
+    return { result: { structuredContent: data } as never, text: JSON.stringify(data) }
+  })
+  return ran
+}
+
+test('pushes from the factory checkout or its worktrees go through; other folders and repositories are refused', async ($, on) => {
+  const ran = inFolders(on)
+  await $.tool.call({ tool: OWN + 'claim_work', run: 811 } as never)
+
+  await $.tool.call({ tool: 'Bash', command: 'git -C ~/code/sandbox push -u origin codebook/57-refunds' } as never)
+  await $.tool.call({ tool: 'Bash', command: 'git -C /Users/me/code/sandbox-57 push' } as never)
+  await $.tool.call({ tool: 'Bash', command: 'cd ~/code/sandbox-57 && gh pr create --draft --title "SD-57"' } as never)
+  expect(ran.length).toBe(3)
+
+  const other = await $.tool.call({ tool: 'Bash', command: 'cd /Users/me/code/other && git push' } as never)
+  expect(String(other.deny ?? other.text)).toContain('someone/elsewhere')
+  const session = await $.tool.call({ tool: 'Bash', command: 'git push' } as never)
+  expect(String(session.deny ?? session.text)).toContain('someone/elsewhere')
+  const pr = await $.tool.call({ tool: 'Bash', command: 'cd ~/code/sandbox && gh pr create --draft --repo other/repo' } as never)
+  expect(String(pr.deny ?? pr.text)).toContain('other/repo')
+  expect(ran.length).toBe(3)
+})
+
+test('/factory status shows where each repository is on this computer, checked now', async ($, on) => {
+  inFolders(on)
+  on('command.register', () => ({ value: { command: 'factory' } }))
+  await $.tool.call({ tool: OWN + 'claim_work', run: 811 } as never)
+  const typed = { command: 'factory', args: 'status', origin: { kind: 'composer' as const }, presentation: { isFullscreen: true, columns: 160 } }
+  const shown = await $.command.run(typed as never)
+  const text = String((shown as { text?: string }).text)
+  expect(text).toContain('No story is followed')
+  expect(text).toContain('bookbaghq/codebook-plugin-sandbox: ~/code/sandbox — checked now: the code is there, origin matches')
+})
+
+test('local_code answers are read for each repository, and an older CodeBook names none', async () => {
+  const brief = {
+    repositories: [{ name: 'acme/payments' }],
+    you: {
+      local_code: {
+        run_here_by_default: true,
+        repositories: [
+          { repository: 'r1', name: 'payments', clone_url: 'https://github.com/acme/payments.git', html_url: 'https://github.com/acme/payments', default_branch: 'main', path: '/Users/me/code/payments', mode: 'existing', checkout_path: '/Users/me/code/payments' },
+          { repository: 'r2', name: 'site', clone_url: 'git@github.com:acme/site.git', html_url: 'https://github.com/acme/site', default_branch: 'main', path: null, mode: null, checkout_path: null },
+        ],
+      },
+    },
+  }
+  expect(checkoutsOf('manager_brief', brief)).toEqual([
+    { repository: 'acme/payments', checkoutPath: '/Users/me/code/payments', mode: 'existing' },
+    { repository: 'acme/site', checkoutPath: null, mode: null },
+  ])
+  expect(checkoutsOf('set_local_checkout', brief.you.local_code)).toHaveLength(2)
+  expect(checkoutsOf('manager_brief', { repositories: [{ name: 'acme/payments' }] })).toBeNull()
+  expect(checkoutsOf('claim_work', { brief: { run_here: { repository: { name: 'acme/payments' } } } })).toBeNull()
+  expect(checkoutsOf('claim_work', { brief: { run_here: { repository: { name: 'acme/payments', local: null } } } })).toEqual([{ repository: 'acme/payments', checkoutPath: null, mode: null }])
 })

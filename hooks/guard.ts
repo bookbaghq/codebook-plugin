@@ -33,6 +33,9 @@ export function allowedOf(brief: unknown): string[] {
 
 const OPTIONS_WITH_VALUE = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace'])
 
+/** Words that run the command after them (`command git push`, `env X=1 git push`): read past them. */
+const RUNNERS = new Set(['command', 'builtin', 'env', 'exec', 'nohup', 'time', 'export'])
+
 const HEREDOC = /(?<!<)<<(?!<)(-?)\s*(?:'([^'\n]+)'|"([^"\n]+)"|\\([A-Za-z_][A-Za-z0-9_]*)|([A-Za-z_][A-Za-z0-9_]*))/g
 
 /**
@@ -62,10 +65,33 @@ export function withoutHeredocs(command: string): string {
   return out.join('\n').replace(/\$\(\s*cat\s+<<-?\s*(?:'[^'\n]+'|"[^"\n]+"|\\[A-Za-z_][A-Za-z0-9_]*)\s*\n\s*\)/g, 'BODY')
 }
 
+/** `to` as seen from `from` (a `cd`, a `git -C`): absolute and `~` paths stand alone; null is the session's folder. */
+function joined(from: string | null, to: string): string {
+  return to.startsWith('/') || to.startsWith('~') || from === null ? to : `${from}/${to}`
+}
+
+/** A program name without its folder: `/usr/bin/git` is `git`. */
+function program(word: string | undefined): string {
+  return (word ?? '').replace(/^.*\//, '')
+}
+
+/** The repository `gh` is pointed at by `-R`/`--repo` (any spelling), else null. */
+function ghRepoOf(argv: string[]): string | null {
+  for (let at = 0; at < argv.length; at++) {
+    const word = argv[at] ?? ''
+    if (word === '-R' || word === '--repo') return argv[at + 1] ?? null
+    if (word.startsWith('--repo=')) return word.slice('--repo='.length)
+    if (/^-R.+/.test(word)) return word.slice(2).replace(/^=/, '')
+  }
+  return null
+}
+
 /**
- * The pushes and pull requests a shell command would make. Commands joined by `&&`, `||`, `;`, `|` or new lines are
- * read one by one, following `cd`; here-documents' bodies are text (withoutHeredocs). `null` when the command does something the guard cannot read with confidence (a
- * push inside `$(...)`, `eval`, `sh -c`), so the caller refuses rather than guesses.
+ * The pushes and pull requests a shell command would make, each with the folder it runs in: commands joined by `&&`,
+ * `||`, `;`, `|` or new lines are read one by one, following `cd`/`pushd`, `git -C <dir>` and `--git-dir`, and `gh`'s
+ * `-R`/`--repo` (or `GH_REPO`); here-documents' bodies are text (withoutHeredocs). `null` when the command does
+ * something the guard cannot read with confidence (a push inside `$(...)` or a `( … )` subshell, `eval`, `sh -c`,
+ * a push after `popd`), so the caller refuses rather than guesses.
  */
 export function targetsOf(full: string): Target[] | null {
   const command = withoutHeredocs(full)
@@ -73,33 +99,51 @@ export function targetsOf(full: string): Target[] | null {
   if (/\$\(|`|\beval\b|\b(?:ba|z)?sh\s+-c\b/.test(command)) return null
   const targets: Target[] = []
   let cwd: string | null = null
+  let isLost = false
+  let ghRepo: string | null = null
   for (const part of command.split(/&&|\|\||;|\||\n/)) {
     const argv = words(part.trim())
-    while (argv.length > 0 && /^[A-Za-z_][A-Za-z0-9_]*=/.test(argv[0] ?? '')) argv.shift()
-    if (argv[0] === 'cd') {
-      const to = argv[1] ?? '~'
-      cwd = to.startsWith('/') || to.startsWith('~') || cwd === null ? to : `${cwd}/${to}`
+    if ((argv[0] ?? '').startsWith('(')) return null
+    if (argv[0] === '{') argv.shift()
+    if (argv.at(-1) === '}') argv.pop()
+    let inlineGhRepo: string | null = null
+    while (argv.length > 0 && (RUNNERS.has(argv[0] ?? '') || /^[A-Za-z_][A-Za-z0-9_]*=/.test(argv[0] ?? ''))) {
+      const word = argv.shift() ?? ''
+      if (word.startsWith('GH_REPO=')) inlineGhRepo = word.slice('GH_REPO='.length)
+      if (word === 'export' && (argv[0] ?? '').startsWith('GH_REPO=')) ghRepo = (argv.shift() ?? '').slice('GH_REPO='.length)
+    }
+    const name = program(argv[0])
+    if (argv.length === 0 && inlineGhRepo !== null) ghRepo = inlineGhRepo
+    if (name === 'cd' || name === 'pushd') {
+      cwd = joined(cwd, argv[1] ?? '~')
       continue
     }
-    if (argv[0] === 'git') {
+    if (name === 'popd') {
+      isLost = true
+      continue
+    }
+    if (name === 'git') {
       let at = 1
       let here = cwd
       while (at < argv.length && (argv[at] ?? '').startsWith('-')) {
         const option = argv[at] ?? ''
-        if (option === '-C') here = argv[at + 1] ?? here
+        if (option === '-C' || option === '--git-dir') here = joined(here, argv[at + 1] ?? '.')
+        if (option.startsWith('--git-dir=')) here = joined(here, option.slice('--git-dir='.length))
         at += OPTIONS_WITH_VALUE.has(option) ? 2 : 1
       }
       if (argv[at] !== 'push') continue
+      if (isLost) return null
       const rest = argv.slice(at + 1)
-      const remote = rest.find(word => !word.startsWith('-')) ?? 'origin'
+      const flag = rest.indexOf('--repo')
+      const inline = rest.find(word => word.startsWith('--repo='))
+      const named = flag >= 0 ? rest[flag + 1] : inline?.slice('--repo='.length)
+      const remote = named ?? rest.find(word => !word.startsWith('-')) ?? 'origin'
       targets.push({ kind: 'push', cwd: here, remote })
       continue
     }
-    if (argv[0] === 'gh' && argv[1] === 'pr' && argv[2] === 'create') {
-      const flag = argv.findIndex(word => word === '--repo' || word === '-R')
-      const inline = argv.find(word => word.startsWith('--repo='))
-      const repo = flag >= 0 ? (argv[flag + 1] ?? null) : inline ? inline.slice('--repo='.length) : null
-      targets.push({ kind: 'pr', cwd, repo })
+    if (name === 'gh' && argv[1] === 'pr' && argv[2] === 'create') {
+      if (isLost) return null
+      targets.push({ kind: 'pr', cwd, repo: ghRepoOf(argv) ?? inlineGhRepo ?? ghRepo })
     }
   }
   return targets

@@ -2,7 +2,7 @@
 
 Run your [CodeBook](https://app.codebook.work) factories from Claude Code. Start a story, watch its stations move in a
 **Factory pane** beside the chat, approve or send back the stations that wait for you, and let the agent stations
-**run here**, in your checkout, with your own Claude plan. app.codebook.work shows the same story moving, live.
+**run here**, in your own checkout on your computer, with your own Claude plan. app.codebook.work shows the same story moving, live.
 
 <img src=".claude-plugin/icon.png" alt="CodeBook" width="160">
 
@@ -52,7 +52,7 @@ do what you can do on app.codebook.work.
 | --- | --- |
 | `/factory` | Opens the Factory pane. Pick a factory and type what it should make. |
 | `/factory run Payments "Let customers refund a payment"` | Starts a story in the Payments factory and follows it in the pane. Add `--here` or `--cloud` to choose for this story. |
-| `/factory status` | Where the story is, station by station. |
+| `/factory status` | Where the story is, station by station, and where each repository's code is on this computer (checked as you ask). |
 | `/factory list` | The factories you can see. |
 | `/factory follow #57 Payments` | Follows a story that is already on the board. |
 | `/factory here` / `/factory cloud` | Where agent stations run: for the next stories, and for the followed story too (while none of its runs is being worked). The pane's two picture buttons do the same. |
@@ -75,7 +75,7 @@ factory's **manager** (the `factory-manager` skill) and works by CodeBook's rule
    nothing until you say yes.
 3. **Every station runs here.** For each agent station Claude spawns a **factory-worker** sub-agent that becomes that
    station's agent (its own skill from CodeBook), claims the run, writes its notes and artifacts on the card, works in
-   this checkout, runs the tests, and opens a **draft** pull request with your `git` and `gh`. QA stations run the
+   the factory's checkout on your computer (in its own worktree beside it), runs the tests, and opens a **draft** pull request with your `git` and `gh`. QA stations run the
    repository's tests here with CodeBook's "Test it here" skill. A crew's members each get a sub-agent.
 4. **Your stations and questions are asked in the chat**: approve or send back a review, answer a question from an
    agent or the manager. Claude checks what waits on you (`needs_you`) at the start of each turn, asks each question
@@ -91,7 +91,30 @@ it asks you, and the pane says so under Approve. A factory whose policy keeps wo
 
 **Only the factory's repositories change.** While a CodeBook run is held in the session, the plugin refuses any
 `git push` or `gh pr create` that reaches a repository the run's brief does not list (and CodeBook refuses to link a
-pull request from anywhere else). Open Claude Code in the repository the factory works on.
+pull request from anywhere else). The guard reads each command in its own folder (`git -C <folder>`, `cd <folder> &&`,
+`gh … --repo`), so pushes from your checkout and its worktrees go through and anything else is refused.
+
+### Code on your computer
+
+Run here works on your own copy of each of the factory's repositories, wherever you keep it; the session can be opened
+anywhere. In the factory's settings on app.codebook.work, **Your computer** holds, for each repository, the folder
+of your existing checkout ("This folder already has the code") or a folder to clone it into ("Clone it into this
+folder", for example `~/code`). Only you see it, and nothing secret is stored.
+
+Before any research or station, the manager checks each repository (step 0 of the skill): the folder is there, it is a
+git checkout whose `origin` is that repository, and git can reach it (`git ls-remote`), then fetches. If no folder is
+set, it offers this session's folder when that is a checkout of the repository, or asks you for one and saves it for
+you. A missing folder: it offers to `git clone` it there, and clones only on your yes. A folder that is not a git
+checkout, or has another `origin`: it says so and asks what to do. It never deletes, moves or overwrites a folder.
+Setting this up is not factory work, so it needs no story, only your yes.
+
+Each worker checks the same before it works and reports **blocked**, with what to fix, when the folder is missing or
+wrong; it never falls back to the session's folder. Code stations work in a worktree next to the checkout,
+`<checkout>-<story number>` (for example `~/code/payments-58`), which QA then tests. With an older CodeBook that has no
+**Your computer** setting, the session's folder is the checkout, as before.
+
+Claude chat and ChatGPT cannot reach your computer: stations that change code run here in Claude Code, or in
+CodeBook's cloud.
 
 ### What the manager does with a new issue
 
@@ -157,8 +180,8 @@ through your prompt box and your permission mode.
 | Path | What it is |
 | --- | --- |
 | `.mcp.json` | The CodeBook connector (`https://app.codebook.work/mcp`), with no credentials. |
-| `hooks/` | The Factory pane, `/factory` and the repository guard (a Claude Code hooks module): `register.tsx`, `pane.tsx`, `factory.ts`, `connector.ts`, `guard.ts`, and `art.ts` (the illustrations, small WebP). |
-| `skills/factory-manager/` | The manager skill Run here follows: stories, "proceed?", stations, people, narration. |
+| `hooks/` | The Factory pane, `/factory` and the repository guard (a Claude Code hooks module): `register.tsx`, `pane.tsx`, `factory.ts`, `connector.ts`, `guard.ts`, `local.ts` (the checkouts `/factory status` shows), and `art.ts` (the illustrations, small WebP). |
+| `skills/factory-manager/` | The manager skill Run here follows: the code on your computer, stories, "proceed?", stations, people, narration. |
 | `agents/factory-worker.md` | The sub-agent that works one station run here as that station's agent. |
 | `agents/benchmark-worker.md` | The sub-agent that answers one benchmark run here, as the model the manager chose, for CodeBook's judge to grade. |
 | `types/index.d.ts` | The pane's state contract. |

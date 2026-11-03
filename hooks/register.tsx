@@ -5,10 +5,11 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { CodebookActive, CodebookClaim, CodebookLink, CodebookMode, CodebookStory, CodebookWatch } from '../types'
+import type { CodebookActive, CodebookCheckout, CodebookClaim, CodebookLink, CodebookMode, CodebookStory, CodebookWatch } from '../types'
 import { call, words } from './connector'
 import { allowedOf, repoOf, targetsOf } from './guard'
 import type { Target } from './guard'
+import { checkoutLines, checkoutsOf, mergeCheckouts } from './local'
 import {
   adopt,
   flushAsk,
@@ -40,6 +41,7 @@ const link = atom({ plugin: 'codebook', key: 'link' } as const, { state: 'idle' 
 })
 const watched = atom({ plugin: 'codebook', key: 'watched' } as const, [] as CodebookWatch[], { shape: 'watched-1' })
 const claims = atom({ plugin: 'codebook', key: 'claims' } as const, [] as CodebookClaim[], { shape: 'claims-1' })
+const checkouts = atom({ plugin: 'codebook', key: 'checkouts' } as const, [] as CodebookCheckout[], { shape: 'checkouts-1' })
 
 const POLL_MS = 4000
 const QUIET_POLL_MS = 30000
@@ -77,7 +79,7 @@ async function openPane($: EngineInterface): Promise<boolean> {
 const HELP = [
   '/factory — open the Factory pane (pick a factory, follow a story)',
   '/factory run <factory> "<story title>" [--here | --cloud] — start a story and follow it',
-  '/factory status — where the followed story is',
+  "/factory status — where the followed story is, and where each repository's code is on this computer",
   '/factory list — the factories you can see',
   '/factory follow <story> [<factory>] — follow a story already on the board (#57 needs the factory)',
   '/factory here | cloud — where agent stations of the next story run',
@@ -85,6 +87,13 @@ const HELP = [
 ].join('\n')
 
 async function statusText($: EngineInterface): Promise<{ text: string; context?: string[] }> {
+  const known = await read($, checkouts)
+  const code = known.length > 0 ? ['The code on this computer:', ...(await checkoutLines($, known))].join('\n') : ''
+  const followed = await storyText($)
+  return { ...followed, text: [followed.text, code].filter(Boolean).join('\n\n') }
+}
+
+async function storyText($: EngineInterface): Promise<{ text: string; context?: string[] }> {
   const a = await read($, active)
   if (a === null) return { text: 'No story is followed. Start one with /factory run <factory> "<title>".' }
   await refresh($)
@@ -128,7 +137,11 @@ const OWN_READS = new Set(
   ),
 )
 
-/** The repository a push or pull request reaches, as `owner/name`, from the remote's address in that checkout. */
+/**
+ * The repository a push or pull request reaches, as `owner/name`: `gh`'s own `--repo`, a remote given as an address,
+ * else the remote's address in the folder the command runs in (its `cd` or `git -C`, such as the factory's checkout or
+ * one of its worktrees; the session's folder only when the command names none).
+ */
 async function reaches($: EngineInterface, target: Target): Promise<string | null> {
   if (target.kind === 'pr' && target.repo) return repoOf(target.repo)
   const remote = target.kind === 'push' ? target.remote : 'origin'
@@ -167,9 +180,13 @@ export const register: Register = on => {
   on('tool.call', async ($, e, next) => {
     const ran = await next(e)
     const tool = String(e.tool)
-    if (!tool.startsWith(OWN_TOOLS) || OWN_READS.has(tool) || ran.deny !== undefined || ran.isError) return ran
+    if (!tool.startsWith(OWN_TOOLS) || ran.deny !== undefined || ran.isError) return ran
     const name = tool.slice(OWN_TOOLS.length)
     const data = payloadOf(ran) as { run?: number; brief?: unknown; recorded?: boolean } | null
+    // Where each repository's code is on this computer, for /factory status.
+    const local = checkoutsOf(name, data)
+    if (local !== null) await update($, checkouts, list => mergeCheckouts(list, local))
+    if (OWN_READS.has(tool)) return ran
     // The guard's list: a claim brings its brief's repositories, a report ends the claim.
     if (name === 'claim_work' && typeof data?.run === 'number') {
       const claim: CodebookClaim = { run: data.run, repos: allowedOf(data.brief) }
@@ -191,7 +208,7 @@ export const register: Register = on => {
     const allowed = [...new Set(held.flatMap(one => one.repos))]
     const targets = targetsOf(String(e.command ?? ''))
     if (targets === null) {
-      return { deny: `CodeBook: this command pushes in a way the repository guard cannot read (a subshell, eval or sh -c). While CodeBook run ${held.map(one => one.run).join(', ')} is worked here, write the git push or gh pr create plainly.` }
+      return { deny: `CodeBook: this command pushes in a way the repository guard cannot read (a subshell, eval, sh -c or popd). While CodeBook run ${held.map(one => one.run).join(', ')} is worked here, write the git push or gh pr create plainly, with its folder (git -C <checkout> push, or cd <checkout> && gh pr create).` }
     }
     for (const target of targets) {
       const repo = await reaches($, target)
@@ -320,7 +337,7 @@ export const register: Register = on => {
       const moved = await setMode($, lower)
       const next =
         lower === 'here'
-          ? 'Agent stations of the stories you start run here, with your Claude, in this checkout.'
+          ? "Agent stations of the stories you start run here, with your Claude, in the factory's checkout on this computer (Factory settings → Your computer)."
           : "Agent stations of the stories you start run in CodeBook's cloud."
       return { text: moved ? `${next}\n${moved}` : next }
     }
