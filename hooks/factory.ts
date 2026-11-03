@@ -13,13 +13,14 @@ import type {
   CodebookStation,
   CodebookStory,
   CodebookTrail,
+  CodebookWatch,
 } from '../types'
 import { call } from './connector'
 
 // Change a tag when that value's fields change: it declines what an earlier version stored.
 export const mode = atom({ plugin: 'codebook', key: 'mode' } as const, 'here' as CodebookMode)
 export const active = atom({ plugin: 'codebook', key: 'active' } as const, null, { shape: 'active-1' })
-export const story = atom({ plugin: 'codebook', key: 'story' } as const, null, { shape: 'story-3' })
+export const story = atom({ plugin: 'codebook', key: 'story' } as const, null, { shape: 'story-4' })
 export const events = atom({ plugin: 'codebook', key: 'events' } as const, [], { shape: 'events-1' })
 export const factories = atom({ plugin: 'codebook', key: 'factories' } as const, null, { shape: 'factories-1' })
 export const picked = atom({ plugin: 'codebook', key: 'picked' } as const, null, { shape: 'factories-1' })
@@ -30,9 +31,12 @@ export const busy = atom({ plugin: 'codebook', key: 'busy' } as const, null as s
 export const sendingBack = atom({ plugin: 'codebook', key: 'sendingBack' } as const, false)
 export const trail = atom({ plugin: 'codebook', key: 'trail' } as const, null as CodebookTrail | null, { shape: 'trail-1' })
 export const notice = atom({ plugin: 'codebook', key: 'notice' } as const, null as string | null)
+/** The other stories a confirm_stories created (or the one followed before): polled only for what waits on you. */
+export const watched = atom({ plugin: 'codebook', key: 'watched' } as const, [] as CodebookWatch[], { shape: 'watched-1' })
 
 export const STORE_ACTIVE = 'active-1'
 export const STORE_MODE = 'mode'
+export const STORE_WATCHED = 'watched-1'
 
 // Wire shapes of the connector (docs/MCP-CONNECTOR.md in codebook-app), as far as the pane reads them.
 type Worker = { type?: string; name?: string; person?: { name?: string; is_you?: boolean } | null }
@@ -63,6 +67,11 @@ type WireEvent = {
   } | null
   where?: 'here' | 'cloud' | 'outside' | null
 }
+/** A question as CodeBook sends it: its text, or an object carrying the text (and maybe likely answers). */
+type WireQuestion =
+  | string
+  | { text?: string; question?: string; choices?: string[] | null; on_you?: boolean; run?: number | null }
+  | null
 type Lease = { fence: number; expires_at?: string; expired?: boolean }
 type RunLocation = {
   where: 'here' | 'cloud'
@@ -90,7 +99,11 @@ export type Status = {
         lease?: Lease | null
         pull_requests?: { pull_request_id: number; head_sha: string; number?: number; html_url?: string }[]
         on_approve?: { merge?: string; sentence?: string } | null
+        /** A request_person wait: the agent's question (phase 1 contract item 6). */
+        question?: WireQuestion
       }
+  /** A question for a person on the story (ask_person, an escalation): phase 1 contract items 4 and 6. */
+  question?: WireQuestion
   done?: { needs_person?: boolean; sentence?: string } | null
   stations: StatusStation[]
   events: WireEvent[]
@@ -206,11 +219,24 @@ function agentOf(e: WireEvent): string | null {
 /**
  * A station that waits on this person gets asked in the chat. A line in the transcript starts no turn, so with Claude
  * idle a story sat at Human review for 81 minutes until the person went to app.codebook.work and dragged it to Done
- * (found live, 2 Nov 2026). Once per waiting run, a prompt wakes the session; the manager skill then shows the work and
- * asks "Approve, or send back?", and only the person's answer approves.
+ * (found live, 2 Nov 2026). Once per waiting run (or question), a prompt wakes the session; the manager skill then
+ * shows the work and asks "Approve, or send back?", or asks the question, and only the person's answer decides.
  */
-export function waitingPrompt(reference: string, station: string | null, on: string | null): string {
+export function waitingPrompt(
+  reference: string,
+  station: string | null,
+  on: string | null,
+  question: { text: string; choices: string[] } | null = null,
+): string {
   const at = station ? ` at ${station}` : ''
+  if (question !== null) {
+    const likely = question.choices.length > 0 ? ` (likely answers: ${question.choices.join(' / ')})` : ''
+    return (
+      `CodeBook: ${reference} has a question for you${at}: "${question.text}"${likely}. Use the ` +
+      `codebook:factory-manager skill: ask me this here, with its likely answers, then call answer_question with my ` +
+      `words. Never call approve_station in place of an answer.`
+    )
+  }
   const what = on === 'review' ? 'a review' : 'approval'
   return (
     `CodeBook: ${reference} is waiting for your ${what}${at}. Use the codebook:factory-manager skill: show me what to ` +
@@ -219,27 +245,53 @@ export function waitingPrompt(reference: string, station: string | null, on: str
   )
 }
 
-// The ask waits here until the next timer tick sends it: a refresh also runs inside the tool.call hook of
-// Claude's own CodeBook calls, where submitting would wait on the turn that hook holds.
-let pendingAsk: string | null = null
-
-async function askWhenWaiting(
-  $: EngineInterface,
-  before: CodebookStory | null,
-  next: CodebookStory,
-  reference: string,
-  station: string | null,
-): Promise<void> {
-  if (!next.waitingOnYou || (next.waitingOn !== 'person' && next.waitingOn !== 'review')) return
-  if (before?.waitingOnYou && before.waitingRun === next.waitingRun) return
-  pendingAsk = waitingPrompt(reference, station, next.waitingOn)
+/** A question's text and likely answers, from a string or an object carrying it; null when there is none. */
+function questionOf(q: WireQuestion | undefined): { text: string; choices: string[]; onYou: boolean } | null {
+  if (q == null) return null
+  if (typeof q === 'string') return q.trim() ? { text: q.trim(), choices: [], onYou: true } : null
+  const text = (q.text ?? q.question ?? '').trim()
+  if (!text) return null
+  const choices = Array.isArray(q.choices) ? q.choices.filter(c => typeof c === 'string' && c.trim() !== '') : []
+  return { text, choices, onYou: q.on_you !== false }
 }
 
-/** Sends the queued ask, if any: from the poll timer (every second), never from inside a tool call. */
+/**
+ * What on this story waits for this person: one key (asked once per key), the prompt that asks it, and the question's
+ * text when it is one. A question (a request_person wait's `waiting.question`, or `question` from ask_person or an
+ * escalation) comes before an approval or a review. Null when nothing waits on this person.
+ */
+export function waitOf(s: Status): { key: string; prompt: string; question: string | null } | null {
+  const w = s.waiting
+  const station = s.station?.name ?? null
+  const asked = questionOf(w?.question)
+  const fromWait = asked !== null && w?.on_you === true ? asked : null
+  const found = fromWait ?? questionOf(s.question)
+  const q = found !== null && found.onYou ? found : null
+  if (q !== null) {
+    return {
+      key: `question|${w?.run ?? ''}|${q.text}`,
+      prompt: waitingPrompt(s.story.reference, station, w?.on ?? null, q),
+      question: q.text,
+    }
+  }
+  if (!w || w.on_you !== true || (w.on !== 'person' && w.on !== 'review')) return null
+  return { key: `${w.on}|${w.run}`, prompt: waitingPrompt(s.story.reference, station, w.on), question: null }
+}
+
+// Asks wait here until the next timer tick sends them: a refresh also runs inside the tool.call hook of Claude's own
+// CodeBook calls, where submitting would wait on the turn that hook holds. Never submit from a tool.call hook.
+let pendingAsks: string[] = []
+
+function askOnce(beforeKey: string | null, wait: { key: string; prompt: string } | null): void {
+  if (wait === null || wait.key === beforeKey) return
+  if (!pendingAsks.includes(wait.prompt)) pendingAsks.push(wait.prompt)
+}
+
+/** Sends the queued asks, if any, as one prompt: from the poll timer (every second), never from inside a tool call. */
 export function flushAsk($: EngineInterface): void {
-  if (pendingAsk === null) return
-  const text = pendingAsk
-  pendingAsk = null
+  if (pendingAsks.length === 0) return
+  const text = pendingAsks.join('\n\n')
+  pendingAsks = []
   void $.prompt.submit({ text })
 }
 
@@ -318,6 +370,7 @@ export async function refresh($: EngineInterface): Promise<void> {
     }
   })
   const w = s.waiting
+  const wait = waitOf(s)
   const next: CodebookStory = {
     stations,
     finished: s.finished,
@@ -339,6 +392,8 @@ export async function refresh($: EngineInterface): Promise<void> {
     })),
     onApprove: typeof w?.on_approve?.sentence === 'string' ? w.on_approve.sentence : null,
     leftForPerson: s.done?.needs_person === true && typeof s.done.sentence === 'string' ? s.done.sentence : null,
+    question: wait?.question ?? null,
+    waitKey: wait?.key ?? null,
     lastEvent: s.last_event ?? before?.lastEvent ?? null,
     checkedAt: await $.clock.now(),
   }
@@ -351,8 +406,11 @@ export async function refresh($: EngineInterface): Promise<void> {
       if (line) $.ui.log(`CodeBook: ${line}`)
     }
     if (next.leftForPerson && !before.leftForPerson) $.ui.log(`CodeBook: ${s.story.reference} is done, but ${next.leftForPerson}`)
+    if (next.question !== null && next.waitKey !== before.waitKey) {
+      $.ui.log(`CodeBook: ${s.story.reference} asks you: "${next.question}"`)
+    }
   }
-  await askWhenWaiting($, before, next, s.story.reference, s.station?.name ?? null)
+  askOnce(before?.waitKey ?? null, wait)
   if (before === null || (s.last_event ?? null) !== (before.lastEvent ?? null)) await loadTrail($, s.story.story)
   if (s.events.length > 0) {
     const rows: CodebookEvent[] = s.events.map(e => ({
@@ -378,6 +436,44 @@ export async function refresh($: EngineInterface): Promise<void> {
     url: s.url ?? a.url,
   }
   if (JSON.stringify(known) !== JSON.stringify(a)) await update($, active, () => known)
+}
+
+/**
+ * Polls the other stories this session follows (every story a confirm_stories created, not only the one the pane
+ * shows) and queues the ask for whatever starts waiting on this person there. A finished story stops being polled.
+ */
+export async function refreshWatched($: EngineInterface): Promise<void> {
+  const list = await read($, watched)
+  if (list.length === 0) return
+  const kept: CodebookWatch[] = []
+  for (const one of list) {
+    const got = await call<Status>($, 'story_status', { story: one.story, limit: 1 })
+    if (!got.ok) {
+      kept.push(one)
+      continue
+    }
+    const s = got.data
+    const wait = waitOf(s)
+    askOnce(one.waitKey, wait)
+    if (s.finished !== null) continue
+    kept.push({ ...one, reference: s.story.reference || one.reference, waitKey: wait?.key ?? null, question: wait?.question ?? null })
+  }
+  // Keep a story the person or Claude added while this poll ran.
+  const next = await update($, watched, now => [
+    ...kept.filter(k => now.some(n => n.story === k.story)),
+    ...now.filter(n => !list.some(l => l.story === n.story)),
+  ])
+  await $.store.set(STORE_WATCHED, next)
+}
+
+/** Offers the person's answer to the question waiting on the followed story: "Answer #57: " in their prompt box. */
+export async function answer($: EngineInterface): Promise<void> {
+  const a = await read($, active)
+  if (a === null) return
+  const filled = await $.prompt.fill({ text: `Answer ${a.reference}: `, mode: 'replace' })
+  await update($, notice, () =>
+    filled.isFilled ? 'Type your answer after "Answer" in your prompt box and press Enter.' : `Answer in the chat: "Answer ${a.reference}: …"`,
+  )
 }
 
 type Trail = {
@@ -417,6 +513,8 @@ export async function follow($: EngineInterface, a: CodebookActive): Promise<voi
 
 export async function unfollow($: EngineInterface): Promise<void> {
   board = null
+  await update($, watched, () => [])
+  await $.store.delete(STORE_WATCHED)
   await update($, active, () => null)
   await update($, story, () => null)
   await update($, events, () => [])
@@ -520,10 +618,19 @@ export async function adopt($: EngineInterface, tool: string, data: unknown): Pr
     return
   }
   if (tool === 'confirm_stories') {
-    const created = (data as { created?: { story: string; reference: string; title: string; url?: string }[] } | null)?.created ?? []
+    type Created = { story: string; reference: string; title: string; url?: string }
+    const created = (data as { created?: Created[] } | null)?.created ?? []
     const first = created[0]
     if (first) {
       const a = await read($, active)
+      const s = await read($, story)
+      // Every story created is followed: the pane shows the first; the rest (and a story the pane showed before, still
+      // moving) are polled for whatever waits on this person.
+      const others: CodebookWatch[] = created.slice(1).map(c => ({ story: c.story, reference: c.reference, title: c.title, url: c.url ?? null, waitKey: null, question: null }))
+      if (a !== null && a.story !== first.story && !created.some(c => c.story === a.story) && s?.finished == null) {
+        others.push({ story: a.story, reference: a.reference, title: a.title, url: a.url, waitKey: s?.waitKey ?? null, question: s?.question ?? null })
+      }
+      const isNew = a === null || a.story !== first.story
       await follow($, {
         story: first.story,
         factory: '',
@@ -533,9 +640,12 @@ export async function adopt($: EngineInterface, tool: string, data: unknown): Pr
         title: first.title,
         url: first.url ?? null,
       })
-      if (a === null || a.story !== first.story) {
+      const list = await update($, watched, now => [...now.filter(n => n.story !== first.story && !others.some(o => o.story === n.story)), ...others])
+      await $.store.set(STORE_WATCHED, list)
+      if (isNew) {
+        const also = list.map(one => one.reference)
         await update($, notice, () =>
-          created.length > 1 ? `Following ${first.reference}; ${created.length - 1} more created.` : `Following ${first.reference}.`,
+          also.length > 0 ? `Following ${first.reference}; also following ${also.join(', ')} for anything that needs you.` : `Following ${first.reference}.`,
         )
       }
       return

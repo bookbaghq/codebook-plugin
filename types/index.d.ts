@@ -48,6 +48,10 @@ export type CodebookStory = {
   onApprove: string | null
   /** At Done: what CodeBook says a person still has to merge (story_status.done.sentence), when someone must. */
   leftForPerson?: string | null
+  /** A question waiting on this person (a request_person wait's, or the story's from ask_person or an escalation). */
+  question: string | null
+  /** What waits on this person, as one key: the session is woken once per key. */
+  waitKey: string | null
   lastEvent: number | null
   checkedAt: number
 }
@@ -78,6 +82,16 @@ export type CodebookTrail = {
   artifacts: number
 }
 
+/** Another story this session follows (from the same confirm_stories): polled only for what waits on this person. */
+export type CodebookWatch = {
+  story: string
+  reference: string
+  title: string
+  url: string | null
+  waitKey: string | null
+  question: string | null
+}
+
 /** A CodeBook run this session holds, and the repositories its brief lets it change (`owner/name`). */
 export type CodebookClaim = { run: number; repos: string[] }
 
@@ -103,6 +117,7 @@ declare module 'claude-code' {
       notice: string | null
       claims: Shaped<CodebookClaim[]>
       trail: Shaped<CodebookTrail | null>
+      watched: Shaped<CodebookWatch[]>
     }
   }
 }

@@ -60,25 +60,26 @@ do what you can do on app.codebook.work.
 
 The pane shows the story's stations as cards. A station that waits for you shows **Approve** and **Send back**
 (with the pull request to look at); both do exactly what the buttons on app.codebook.work do, once you send the
-request they put in your prompt box.
+request they put in your prompt box. A question for you (from an agent or the manager) shows its text and **Answer**,
+which puts "Answer #57: " in your prompt box for your words. When "proceed?" creates several stories, the pane shows
+the first and the plugin follows them all: whatever waits on you in any of them wakes the chat with the question or
+the approval.
 
 ## The two run modes
 
 **Run here** (the default): the whole factory runs in your Claude Code session, on your Claude plan. Claude becomes the
 factory's **manager** (the `factory-manager` skill) and works by CodeBook's rules:
 
-1. **No story, no work.** Your request becomes stories first. The factory's story-writing agent (for example its
-   business analyst) writes them here. If the factory has none and you may change it, Claude offers to add one: an
-   agent your workspace already has, one from the marketplace (your organization's section first), or a new one it
-   writes and publishes to your organization's section only. Each change is asked first, and the first one asks
-   Bookbag for one more permission ("Change your factories' agents and stations").
+1. **No story, no work.** Your request becomes stories first, written by the factory's story writer (see below).
 2. **"Proceed?"** Claude shows the proposed stories, with a link that opens them on app.codebook.work, and creates
    nothing until you say yes.
 3. **Every station runs here.** For each agent station Claude spawns a **factory-worker** sub-agent that becomes that
    station's agent (its own skill from CodeBook), claims the run, writes its notes and artifacts on the card, works in
    this checkout, runs the tests, and opens a **draft** pull request with your `git` and `gh`. QA stations run the
    repository's tests here with CodeBook's "Test it here" skill. A crew's members each get a sub-agent.
-4. **Your stations are asked in the chat**: approve or send back a review, answer a question from the manager.
+4. **Your stations and questions are asked in the chat**: approve or send back a review, answer a question from an
+   agent or the manager. Claude checks what waits on you (`needs_you`) at the start of each turn, asks each question
+   with its text, and posts your words with `answer_question`; it never approves in place of an answer.
 5. **You see it move**: the chat says what moved, who is working, when an agent is spawned and when a pull request
    opens; the Factory pane shows the stations and what is on the card.
 6. **Done** means the card holds every comment (signed "Agent (role) via your Claude Code"), every run (marked "own
@@ -91,6 +92,24 @@ it asks you, and the pane says so under Approve. A factory whose policy keeps wo
 **Only the factory's repositories change.** While a CodeBook run is held in the session, the plugin refuses any
 `git push` or `gh pr create` that reaches a repository the run's brief does not list (and CodeBook refuses to link a
 pull request from anywhere else). Open Claude Code in the repository the factory works on.
+
+### What the manager does with a new issue
+
+1. **The story writer goes first.** Claude sends the factory's story writer (its business analyst) to look into the
+   issue as a sub-agent, with that agent's own skill. It only reads. Its questions come back to Claude, which asks you
+   one at a time in the chat, with the likely answers, and passes your answers back. Then it writes the stories.
+2. **No story writer?** Claude says so plainly and offers: it writes the stories itself this time, or you add one. To
+   add one it looks at the agents your organization already has, then the marketplace (asking "OK to use …?"), then
+   writes a new one; then it installs it, adds its station first in the flow and sets its model (Sonnet by default).
+   Each change is asked first, and the first one asks Bookbag for one more permission ("Change your factories' agents
+   and stations").
+3. **A story writer that cannot research** writes research stories first; Claude adds a Research agent the same way,
+   whose findings go on its card, and the story writer reads them to write the stories that fix the issue.
+4. **"Proceed?"**, then the stations, as above.
+
+On the board, Claude can also move and edit any card (`move_card`, `update_card`), ask you something on a card
+(`ask_person`), and set a station's model (`set_station_model`, after your yes). It deletes a card (`delete_card`)
+only after "proceed?", and CodeBook refuses unless the card's exact title is given.
 
 **Run in CodeBook**: CodeBook's own agents run the stations on its servers, as from the website. The pane still follows
 the story and you still approve your stations here. Nothing runs on your computer unless you press **Work it here**.
