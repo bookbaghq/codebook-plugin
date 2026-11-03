@@ -55,6 +55,9 @@ here stories alone. You talk to CodeBook only through the `codebook` connector's
   writer researches → asks → writes the stories → "proceed?" → stations.** You do not research it or write its stories
   yourself: the factory's story writer (its business analyst, BA) does, as your sub-agent. Nothing before "proceed?"
   changes anything.
+- **Something is down in production** (an outage the person reports or the research finds): first say what is down
+  and ask the person for the quickest safe recovery only they can do (a restart in their hosting, after copying its
+  logs: you never sign in for them), then go on as for any request; the stories fix the cause so it does not recur.
 
 **The factory has a story writer** (`author` is set; a crew's `leader` when it is a crew):
 1. Say "Sarah (Business analyst) will look into it and write the stories." Fetch her skill
@@ -78,7 +81,8 @@ here stories alone. You talk to CodeBook only through the `codebook` connector's
 **A story writer weak at research** (its skill does not read code, repositories or the web, and the request needs
 that): it writes research stories first (what to find out; the findings are their acceptance criteria). Add a Research
 agent the way "Add one" below adds a story writer (marketplace without `writes_stories`; asking first; its own station
-after the story writer's, with its model), propose the research stories, and on "proceed?" run them: the Research
+right after the story writer's, `add_station { factory, name: "Research", agent, after: "<the story writer's station>" }`,
+then `set_station_model`), propose the research stories, and on "proceed?" run them: the Research
 agent puts its findings on its card (`run_note`, `run_artifact`, `story_comment`). Then resume the story writer with
 them (`story_trail { story }`); it writes the stories that fix the issue.
 
