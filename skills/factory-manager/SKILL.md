@@ -178,8 +178,9 @@ calls (`sleep 5` in the shell). For what you see:
   - **The model.** CodeBook picks it: `manager_brief.stations[].model.here` (the same as the run's
     `brief.run_here.model.here`). Pass `here.claude` (`haiku`, `sonnet`, `opus` or `fable`) as `model`; when it is
     null, leave `model` out (the session's own model: a station that writes code, or a crew). When the person names a
-    model, use theirs. When `here.as_wanted` is false the station asks for another provider's model this session cannot
-    run: before its first run, tell the person once in plain words ("Review asks for GPT-5; here it runs on Sonnet")
+    model, use theirs. When `here.as_wanted` is false the station's first choice is another provider's model this
+    session cannot run (`here.why` says which, and what runs instead): before its first run, tell the person once in
+    plain words ("Review asks for GPT-5; here it runs on Sonnet")
     and offer to keep that station in CodeBook's cloud on its own model, with `set_station_cloud { factory, station,
     always: true }` after their yes (the rest of the story still runs here). CodeBook writes the "ran on" note on the
     story itself: never write it, and never tell the worker to.
