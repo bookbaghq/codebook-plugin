@@ -92,7 +92,10 @@ it asks you, and the pane says so under Approve. A factory whose policy keeps wo
 **Only the factory's repositories change.** While a CodeBook run is held in the session, the plugin refuses any
 `git push` or `gh pr create` that reaches a repository the run's brief does not list (and CodeBook refuses to link a
 pull request from anywhere else). The guard reads each command in its own folder (`git -C <folder>`, `cd <folder> &&`,
-`gh … --repo`), so pushes from your checkout and its worktrees go through and anything else is refused.
+`gh … --repo`), so pushes from your checkout and its worktrees go through and anything else is refused. A push it cannot
+attribute with confidence (through a wrapper such as `timeout` or `xargs`, a subshell, a shell or script, git
+configuration or a remote changed in the same command, or a `gh api` write to pull requests) is refused too, with the
+plain `git -C <checkout> push <remote> <branch>` or `gh pr create --repo <owner/name>` to run instead.
 
 ### Code on your computer
 

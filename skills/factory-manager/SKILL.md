@@ -57,19 +57,21 @@ needs the person's yes. For each of `manager_brief.you.local_code.repositories`,
    `clone_url` or `html_url`, ssh or https, with or without `.git`), ask "Use <folder> for <name>?". Else ask for the
    folder of an existing checkout, or a folder to clone it into (for example `~/code`). Save it with
    `set_local_checkout { factory, repository, path, mode }` (`existing` or `clone_into`); use the `checkout_path` it
-   answers (`~` is the home folder: write `"$HOME/…"` when the path needs quotes).
-2. **Check it**: the folder exists; `git -C <checkout_path> rev-parse --show-toplevel` works; `git -C <checkout_path>
-   remote get-url origin` names that repository; `git -C <checkout_path> ls-remote origin HEAD` works (git is
-   connected); then `git -C <checkout_path> fetch origin`.
-3. **Missing** (or empty) → "Clone <clone_url> into <checkout_path>?"; on yes `git clone <clone_url> <checkout_path>`,
+   answers. Quote every path and address in a command (`"<checkout_path>"`, `"<clone_url>"`); `~` is the home folder
+   and is not expanded inside quotes, so write a `~/…` path as `"$HOME/…"`.
+2. **Check it**: the folder exists; `git -C "<checkout_path>" rev-parse --show-toplevel` works; `git -C
+   "<checkout_path>" remote get-url origin` names that repository; `git -C "<checkout_path>" ls-remote origin HEAD`
+   works (git is connected); then `git -C "<checkout_path>" fetch origin`.
+3. **Missing** (or empty) → "Clone <clone_url> into <checkout_path>?"; on yes `git clone "<clone_url>" "<checkout_path>"`,
    and check again. **Not a git repository, or another `origin`** → say what is there and ask: another folder, or
-   add the remote (`git -C … remote add origin <clone_url>`, only when it has no `origin`). **`ls-remote` refused** →
+   add the remote (`git -C "<checkout_path>" remote add origin "<clone_url>"`, only when it has no `origin`). **`ls-remote` refused** →
    say what git said; the person signs in to git or `gh` themselves. Never delete, move or overwrite a folder or
    remote.
 
 No `you.local_code` (an older CodeBook): this session's folder is the checkout, checked the same way. From here on
 **`checkout_path` is where the code is**, not wherever this session was opened: research, workers and worktrees use it
-(`git -C <checkout_path>`, `cd`), and worktrees go next to it, `<checkout_path>-<n>` (the story's number).
+(`git -C "<checkout_path>"`, `cd "<checkout_path>"`), and worktrees go next to it, `"<checkout_path>-<n>"` (the story's
+number).
 
 ## 2. From request to stories: the story writer first
 
@@ -87,7 +89,7 @@ No `you.local_code` (an older CodeBook): this session's folder is the checkout, 
 1. Say "Sarah (Business analyst) will look into it and write the stories." Fetch her skill
    (`manager_brief { factory, agent: "Sarah" }`) and spawn ONE sub-agent (general purpose, the model per section 4)
    with that skill as its instructions, the person's words, the factory's repositories with their `checkout_path`
-   (it reads there, `git -C <checkout_path> …`), the board, and this task:
+   (it reads there, `git -C "<checkout_path>" …`), the board, and this task:
    research read only, then return either the questions the stories need, or 1–6 small stories (title, description
    with acceptance criteria that can be checked, risk low / medium / high). It changes nothing and cannot talk to the
    person: its questions come back to you.

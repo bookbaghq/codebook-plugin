@@ -51,11 +51,12 @@ no story; FORBIDDEN: another person's run), say so and stop.
 ## 2. Check you are in the right place
 
 The code is in `checkout_path`, from `run_here.repository.local` (or the `local` of the repository the station works
-on, in `run_here.repositories`); the manager may also tell you. `cd` into it (`~` is the home folder) and check:
-- the folder exists and `git -C <checkout_path> rev-parse --show-toplevel` succeeds;
-- `git -C <checkout_path> remote get-url origin` is that repository (the same owner/name, ssh or https, with or
+on, in `run_here.repositories`); the manager may also tell you. Quote it in every command (`"<checkout_path>"`); `~`
+is the home folder and is not expanded inside quotes, so write a `~/…` path as `"$HOME/…"`. `cd` into it and check:
+- the folder exists and `git -C "<checkout_path>" rev-parse --show-toplevel` succeeds;
+- `git -C "<checkout_path>" remote get-url origin` is that repository (the same owner/name, ssh or https, with or
   without `.git`);
-- `git -C <checkout_path> ls-remote origin HEAD` works (git is connected).
+- `git -C "<checkout_path>" ls-remote origin HEAD` works (git is connected).
 
 If `local` is null or a check fails, change nothing and report **blocked** with what to fix, for example "payments has
 no folder on this computer yet: set it in the factory's settings (Your computer), or the manager sets it up",
@@ -75,13 +76,15 @@ five notes per run, never a stream.
 
 **Code stations** (`may_change_code` true):
 1. Work in **your own git worktree**, never in the person's checkout: other stories' workers may be running beside
-   you. From the default branch, up to date (`git -C <checkout_path> fetch origin`), make the branch `card_reference.branch` (else
-   `codebook/<reference>-<short slug>`) in a worktree next to the checkout, `<checkout_path>-<n>` with the story's number
-   without "#": `git -C <checkout_path> worktree add <checkout_path>-26 -b <branch> origin/<default_branch>`. When that
-   worktree is already there (the story came back), reuse it if it is clean and on its branch; if the branch exists
-   without a worktree, `git -C <checkout_path> worktree add <checkout_path>-26 <branch>`; a worktree with someone's
-   uncommitted changes is not yours: use `<checkout_path>-26-<run>` instead. Work, commit and push from inside it (`cd`
-   there, or `git -C`). Leave it in place: QA tests there.
+   you. From the default branch, up to date (`git -C "<checkout_path>" fetch origin`), make the branch
+   `card_reference.branch` (else `codebook/<reference>-<short slug>`) in a worktree next to the checkout,
+   `<checkout_path>-<n>` with the story's number without "#": `git -C "<checkout_path>" worktree add
+   "<checkout_path>-26" -b <branch> origin/<default_branch>`. When that worktree is already there (the story came
+   back), reuse it if it is clean and on its branch; if the branch exists without a worktree, `git -C
+   "<checkout_path>" worktree add "<checkout_path>-26" <branch>`; a worktree with someone's uncommitted changes is not
+   yours: use `<checkout_path>-26-<run>` instead. Work, commit and push from inside it (`cd "<checkout_path>-26"`, or
+   `git -C "<checkout_path>-26"`), plainly: one `git push -u origin <branch>`, not through a wrapper (`timeout`,
+   `xargs`), a subshell or a script, which the repository guard refuses. Leave it in place: QA tests there.
 2. Do exactly what the station and the story ask, nothing else. Small and readable; follow the repository's own
    conventions (README, CLAUDE.md, AGENTS.md, CONTRIBUTING).
 3. Test with a budget (see "Test what matters, once" below): the tests that cover what you changed while you work,
@@ -98,8 +101,8 @@ five notes per run, never a stream.
 Never merge, mark a pull request ready, push to a default branch or force-push.
 
 **QA stations** (`brief.run_here.testing` present): follow the "Test it here" skill, in the developer's worktree for
-the pull request's branch (`<checkout_path>-<n>`) when it is there and clean (else your own: `git -C <checkout_path>
-worktree add <checkout_path>-<n>-qa <branch>`). Run the repository's own tests
+the pull request's branch (`<checkout_path>-<n>`) when it is there and clean (else your own: `git -C "<checkout_path>"
+worktree add "<checkout_path>-<n>-qa" <branch>`). Run the repository's own tests
 here (its documented command; `testing.commands` are hints), check each of `testing.evaluators` and the story's
 acceptance criteria, and when a browser tool is available and `testing.browser.addresses` are listed, open them and
 check the story there. Record `run_artifact { kind: "test_report", title, content, commands }` with the commands,

@@ -49,7 +49,8 @@ export function checkoutsOf(tool: string, data: unknown): CodebookCheckout[] | n
     return code.repositories.map(repo => one(repo, undefined)).filter((c): c is CodebookCheckout => c !== null)
   }
   const here = d?.brief?.run_here
-  const listed = here?.repository ? [here.repository] : Array.isArray(here?.repositories) ? here.repositories : []
+  // All of `repositories` (G5b) when the brief lists them, else the one `repository` (G2).
+  const listed = Array.isArray(here?.repositories) && here.repositories.length > 0 ? here.repositories : here?.repository ? [here.repository] : []
   const found = listed.filter(repo => repo && 'local' in repo).map(repo => one(repo, repo.local))
   return found.length > 0 ? found.filter((c): c is CodebookCheckout => c !== null) : null
 }
