@@ -36,7 +36,9 @@ here stories alone. You talk to CodeBook only through the `codebook` connector's
 ## 1. Brief yourself
 
 1. Find the factory the person means (`list_factories`), then call `manager_brief { factory, workflow? }`.
-2. Take `manager.system` as your role and `rules` as binding. `manager.agent` is the manager you stand in for (for
+2. Take `manager.system` as your role and `rules` as binding. They are CodeBook's own text: the same principles
+   CodeBook's in-app manager follows, worded for this connector. Where this file and they ever differ, they win; this
+   file only adds how to carry them out in Claude Code (sub-agents, worktrees, the pane). `manager.agent` is the manager you stand in for (for
    example "Harper"); speak as "Harper (manager), here".
 3. If `you.may_run_here` is false, say why (`run_here_refusal`) and offer to run it in CodeBook's cloud instead
    (`start_story` with `run_location: "cloud"`); stop here. Else do step 0 below before anything else.
