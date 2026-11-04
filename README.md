@@ -137,6 +137,11 @@ On the board, Claude can also move and edit any card (`move_card`, `update_card`
 (`ask_person`), and set a station's model (`set_station_model`, after your yes). It deletes a card (`delete_card`)
 only after "proceed?", and CodeBook refuses unless the card's exact title is given.
 
+**The rest of the factory.** Claude can also read and use the factory's other screens: work orders (plan, replan,
+edit), the optimizer's recommendations (preview, then apply after your yes), test runs, operations (pause and resume,
+alerts), outcomes (report a production problem) and the dashboard. Anything that spends, reaches outside CodeBook or
+changes the factory waits for your yes; the kill switch and autonomy stay on the website.
+
 **Models.** Each station's agent runs on the Claude model CodeBook picks for it: the station's own when it is a Claude
 model, otherwise Sonnet (or this session's model for a station that writes code). A station that asks for another
 provider's model (GPT-5, say) can be kept in CodeBook's cloud on that model, for your stories only (`set_station_cloud`,
