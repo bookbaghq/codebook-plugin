@@ -7,8 +7,8 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { CodebookActive, CodebookCheckout, CodebookClaim, CodebookLink, CodebookMode, CodebookStory, CodebookWatch } from '../types'
 import { call, words } from './connector'
-import { allowedOf, HOME_PREFIX, repoOf, targetsOf } from './guard'
-import type { Target } from './guard'
+import { allowedOf, readCommand } from './guard'
+import { checkOne, reaches, shellEnv } from './resolve'
 import { checkoutLines, checkoutsOf, mergeCheckouts } from './local'
 import {
   adopt,
@@ -137,25 +137,6 @@ const OWN_READS = new Set(
   ),
 )
 
-/**
- * The repositories a push or pull request reaches, as `owner/name` (null for one the guard cannot tell): `gh`'s own
- * `--repo`, a remote given as an address, else every push address of the remote in the folder the command runs in (its
- * `cd` or `git -C`, such as the factory's checkout or one of its worktrees; the session's folder only when the command
- * names none). `~`, `$HOME` and `${HOME}` at the start of that folder are the home folder.
- */
-async function reaches($: EngineInterface, target: Target): Promise<Array<string | null>> {
-  if (target.kind === 'pr' && target.repo) return [repoOf(target.repo)]
-  const remote = target.kind === 'push' ? target.remote : 'origin'
-  const direct = repoOf(remote)
-  if (direct !== null && remote.includes('/')) return [direct]
-  const base = await $.session.cwd()
-  const home = (await $.env.get('HOME')) ?? ''
-  const dir = target.cwd === null ? base : target.cwd.replace(HOME_PREFIX, home).replace(/^(?!\/)/, `${base}/`)
-  const got = await $.process.run(['git', '-C', dir, 'remote', 'get-url', '--push', '--all', remote])
-  const urls = got.exitCode === 0 ? got.stdout.split('\n').filter(line => line.trim() !== '') : []
-  return urls.length > 0 ? urls.map(url => repoOf(url)) : [null]
-}
-
 /** A connector result as a tool call answers it: the structured payload, else its text as JSON. */
 function payloadOf(ran: { result?: unknown; text?: string }): unknown {
   const structured = (ran.result as { structuredContent?: unknown } | undefined)?.structuredContent
@@ -208,15 +189,25 @@ export const register: Register = on => {
     const held = await read($, claims)
     if (held.length === 0) return next(e)
     const allowed = [...new Set(held.flatMap(one => one.repos))]
-    const targets = targetsOf(String(e.command ?? ''))
+    const reading = readCommand(String(e.command ?? ''))
     const runs = held.map(one => one.run).join(', ')
-    if (targets === null) {
+    if (reading === null) {
       return { deny: `CodeBook: the repository guard cannot tell where this command pushes or opens a pull request, so it was not run while CodeBook run ${runs} is worked here. Run the push on its own, plainly: git -C <checkout> push <remote> <branch>, and open the pull request with gh pr create --repo <owner/name>.` }
     }
+    // What may push without saying so: an alias, an extension, a script, a make target (resolve.ts reads each one).
+    for (const check of reading.checks) {
+      const refused = await checkOne($, check)
+      if (refused) return { deny: `CodeBook: the repository guard did not run this while CodeBook run ${runs} is worked here: ${refused.deny}` }
+    }
+    const targets = reading.targets
+    // The session shell's GH_REPO and GIT_* values, read only when something pushes or opens a pull request.
+    const env = targets.length > 0 ? await shellEnv($) : new Map<string, string>()
     for (const target of targets) {
-      for (const repo of await reaches($, target)) {
+      const found = await reaches($, target, env)
+      if (!Array.isArray(found)) return { deny: `CodeBook: the repository guard did not run this while CodeBook run ${runs} is worked here: ${found.deny}` }
+      for (const repo of found) {
         if (repo !== null && allowed.includes(repo)) continue
-        const what = target.kind === 'push' ? `git push to ${target.remote}` : 'gh pr create'
+        const what = target.kind === 'push' ? `git push to ${target.remote ?? 'the branch\'s default remote'}` : 'gh pr create'
         const where = repo ?? 'a repository the guard could not tell'
         const may = allowed.length > 0 ? allowed.join(', ') : 'no repository (its brief names none)'
         return { deny: `CodeBook: ${what} reaches ${where}. While CodeBook run ${runs} is worked here, the factory allows ${may}.` }

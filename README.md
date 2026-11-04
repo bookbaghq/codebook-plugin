@@ -97,6 +97,13 @@ attribute with confidence (through a wrapper such as `timeout` or `xargs`, a sub
 configuration or a remote changed in the same command, or a `gh api` write to pull requests) is refused too, with the
 plain `git -C <checkout> push <remote> <branch>` or `gh pr create --repo <owner/name>` to run instead.
 
+Where a command does not say where it goes, the guard asks git and gh as they would decide: a plain `git push` goes to
+the branch's push remote (`pushRemote`, `remote.pushDefault`, its tracking remote, then `origin`); an address is
+rewritten by `pushInsteadOf` / `insteadOf` first; `gh pr create` without `--repo` goes to `GH_REPO`, the
+`gh repo set-default` repository or the only remote (with several remotes and no default it is refused). A git or gh
+alias that pushes, a gh extension, and a script, `npm run` script or Makefile that pushes are refused while a run is
+held, and so is a push when your shell sets `GIT_DIR`, `GIT_WORK_TREE` or `GIT_CONFIG_*`.
+
 ### Code on your computer
 
 Run here works on your own copy of each of the factory's repositories, wherever you keep it; the session can be opened
@@ -194,7 +201,7 @@ through your prompt box and your permission mode.
 | Path | What it is |
 | --- | --- |
 | `.mcp.json` | The CodeBook connector (`https://app.codebook.work/mcp`), with no credentials. |
-| `hooks/` | The Factory pane, `/factory` and the repository guard (a Claude Code hooks module): `register.tsx`, `pane.tsx`, `factory.ts`, `connector.ts`, `guard.ts`, `local.ts` (the checkouts `/factory status` shows), and `art.ts` (the illustrations, small WebP). |
+| `hooks/` | The Factory pane, `/factory` and the repository guard (a Claude Code hooks module): `register.tsx`, `pane.tsx`, `factory.ts`, `connector.ts`, `guard.ts`, `resolve.ts` (what git and gh decide for a push), `local.ts` (the checkouts `/factory status` shows), and `art.ts` (the illustrations, small WebP). |
 | `skills/factory-manager/` | The manager skill Run here follows: the code on your computer, stories, "proceed?", stations, people, narration. |
 | `agents/factory-worker.md` | The sub-agent that works one station run here as that station's agent. |
 | `agents/benchmark-worker.md` | The sub-agent that answers one benchmark run here, as the model the manager chose, for CodeBook's judge to grade. |

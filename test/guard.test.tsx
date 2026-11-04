@@ -24,7 +24,7 @@ test('commands are read for their pushes and pull requests', async () => {
   expect(targetsOf('npm test')).toEqual([])
   expect(targetsOf('git push -u origin codebook/57-refunds')).toEqual([{ kind: 'push', cwd: null, remote: 'origin' }])
   expect(targetsOf('cd ../other && git push fork main')).toEqual([{ kind: 'push', cwd: '../other', remote: 'fork' }])
-  expect(targetsOf('git -C /tmp/x push')).toEqual([{ kind: 'push', cwd: '/tmp/x', remote: 'origin' }])
+  expect(targetsOf('git -C /tmp/x push')).toEqual([{ kind: 'push', cwd: '/tmp/x', remote: null }])
   expect(targetsOf('gh pr create --draft --repo acme/payments --title x')).toEqual([{ kind: 'pr', cwd: null, repo: 'acme/payments' }])
   expect(targetsOf('git add -A && git commit -m "x" && gh pr create --draft')).toEqual([{ kind: 'pr', cwd: null, repo: null }])
   expect(targetsOf('sh -c "git push other"')).toBeNull()
@@ -48,34 +48,88 @@ test('a here-document body is text, not commands (found live: a PR description w
   expect(targetsOf('cat > a.md <<EOF\ngit push other\nEOF\ngit push origin')).toEqual([{ kind: 'push', cwd: null, remote: 'origin' }])
 })
 
-function engine(on: On) {
+/** A folder's git as the fake answers it: its remotes (fetch and push addresses), configuration and branch. */
+type Repo = { remotes: Record<string, { fetch: string[]; push?: string[] }>; config?: Record<string, string>; branch?: string | null }
+/** The world the guard looks into: folders, the session shell's variables, files, gh's aliases and extensions. */
+type World = {
+  cwd: string
+  repoOf: (dir: string) => Repo | null
+  shellEnv?: Record<string, string>
+  files?: Record<string, string>
+  ghAliases?: string
+  ghExtensions?: string
+}
+const out = (stdout: string, exitCode = 0) => ({ value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
+
+/** process.run as git, gh, head and the shell answer it in `w`. */
+function answer(w: World, argv: string[]) {
+  if (argv[0] === 'git' && argv[1] === '-C') {
+    const repo = w.repoOf(argv[2] ?? '')
+    const rest = argv.slice(3)
+    if (!repo) return out('', 128)
+    const [a, b, c, d] = rest
+    if (a === 'remote' && b === undefined) return out(Object.keys(repo.remotes).join('\n'))
+    if (a === 'remote' && b === 'get-url') {
+      const name = rest.at(-1) ?? ''
+      const one = repo.remotes[name]
+      if (!one) return out('', 2)
+      return out(`${(c === '--push' ? (one.push ?? one.fetch) : one.fetch).join('\n')}\n`)
+    }
+    if (a === 'symbolic-ref') return repo.branch ? out(`${repo.branch}\n`) : out('', 1)
+    if (a === 'rev-parse') return out(`${argv[2]}\n`)
+    if (a === 'config' && b === '--get') {
+      const value = repo.config?.[String(c).toLowerCase()]
+      return value === undefined ? out('', 1) : out(`${value}\n`)
+    }
+    if (a === 'config' && b === '--get-regexp') {
+      const re = new RegExp(String(c), 'i')
+      const hits = Object.entries(repo.config ?? {}).filter(([key]) => re.test(key)).map(([key, value]) => `${key} ${value}`)
+      return hits.length ? out(`${hits.join('\n')}\n`) : out('', 1)
+    }
+    void d
+    return out('', 1)
+  }
+  if (argv[1] === '-ic') return out(Object.entries(w.shellEnv ?? {}).map(([k, v]) => `${k}=${v}`).join('\n') + '\n')
+  if (argv[0] === 'gh' && argv[1] === 'alias') return out(w.ghAliases ?? '')
+  if (argv[0] === 'gh' && argv[1] === 'extension') return out(w.ghExtensions ?? '')
+  if (argv[0] === 'head') {
+    const text = w.files?.[argv.at(-1) ?? '']
+    return text === undefined ? out('', 1) : out(text)
+  }
+  return out('', 1)
+}
+
+/** The world, a held claim's brief for `repo`, and the commands that ran. */
+function world(on: On, w: World, repo = 'bookbaghq/codebook-plugin-sandbox', local: unknown = null) {
   const ran: string[] = []
   mock.store(on)
-  on('session.cwd', () => ({ value: '/work/sandbox' }))
-  on('env.get', () => ({ value: '/Users/me' }))
-  on('process.run', (_, e) => {
-    const remote = e.argv.at(-1)
-    const url =
-      remote === 'origin'
-        ? 'git@github.com:bookbaghq/codebook-plugin-sandbox.git'
-        : remote === 'mirror'
-          ? 'https://github.com/someone/elsewhere.git\ngit@github.com:bookbaghq/codebook-plugin-sandbox.git'
-          : 'https://github.com/someone/elsewhere.git'
-    return { value: { exitCode: 0, stdout: `${url}\n`, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
-  })
+  on('session.cwd', () => ({ value: w.cwd }))
+  on('env.get', (_, e) => ({ value: (e as { name?: string }).name === 'HOME' ? '/Users/me' : (e as { name?: string }).name === 'SHELL' ? '/bin/zsh' : undefined }) as never)
+  on('process.run', (_, e) => answer(w, e.argv) as never)
   on('tool.call', (_, e) => {
     const tool = String(e.tool)
     if (tool === 'Bash') {
       ran.push(String((e as { command?: unknown }).command))
       return { result: { stdout: '', stderr: '', interrupted: false } as never }
     }
-    const data =
-      tool === OWN + 'claim_work'
-        ? { run: 811, where: 'here', lease: { fence: 1 }, brief: { run_here: { repository: { name: 'bookbaghq/codebook-plugin-sandbox' } } } }
-        : { recorded: true, run: 811 }
+    const repository = local ? { name: repo, local } : { name: repo }
+    const data = tool === OWN + 'claim_work' ? { run: 811, where: 'here', lease: { fence: 1 }, brief: { run_here: { repository } } } : { recorded: true, run: 811 }
     return { result: { structuredContent: data } as never, text: JSON.stringify(data) }
   })
   return ran
+}
+
+const SANDBOX = 'git@github.com:bookbaghq/codebook-plugin-sandbox.git'
+const ELSEWHERE = 'https://github.com/someone/elsewhere.git'
+
+function engine(on: On) {
+  // The session's folder: origin is the sandbox, mirror pushes to two places, any other remote is elsewhere.
+  const any = new Proxy({ origin: { fetch: [SANDBOX] }, mirror: { fetch: [SANDBOX], push: [ELSEWHERE, SANDBOX] } } as Repo['remotes'], {
+    get: (all, name: string) => (name in all ? all[name] : { fetch: [ELSEWHERE] }),
+  })
+  // Two remotes: gh's default for this folder is origin (`gh repo set-default`), as a fork's checkout has it.
+  const repo: Repo = { remotes: any, branch: 'codebook/57-refunds', config: { 'remote.origin.gh-resolved': 'base' } }
+  return world(on, { cwd: '/work/sandbox', repoOf: () => ({ ...repo, remotes: any }) })
 }
 
 test('while a run is held, a push outside its repositories is refused and one inside goes through', async ($, on) => {
@@ -104,11 +158,11 @@ test('while a run is held, a push outside its repositories is refused and one in
 
 test('a command is read in its own folder: cd, pushd, git -C (relative to a cd), --git-dir, gh -R or GH_REPO', async () => {
   expect(targetsOf('cd ~/code && git -C sandbox-57 push -u origin codebook/57-x')).toEqual([{ kind: 'push', cwd: '~/code/sandbox-57', remote: 'origin' }])
-  expect(targetsOf('pushd /work/a && git push')).toEqual([{ kind: 'push', cwd: '/work/a', remote: 'origin' }])
-  expect(targetsOf('git --git-dir=/work/b/.git push')).toEqual([{ kind: 'push', cwd: '/work/b/.git', remote: 'origin' }])
+  expect(targetsOf('pushd /work/a && git push')).toEqual([{ kind: 'push', cwd: '/work/a', remote: null }])
+  expect(targetsOf('git --git-dir=/work/b/.git push')).toEqual([{ kind: 'push', cwd: '/work/b/.git', remote: null }])
   expect(targetsOf('git push --repo=https://github.com/someone/elsewhere.git')).toEqual([{ kind: 'push', cwd: null, remote: 'https://github.com/someone/elsewhere.git' }])
   expect(targetsOf('command /usr/bin/git push fork')).toEqual([{ kind: 'push', cwd: null, remote: 'fork' }])
-  expect(targetsOf('{ cd /work/c; git push; }')).toEqual([{ kind: 'push', cwd: '/work/c', remote: 'origin' }])
+  expect(targetsOf('{ cd /work/c; git push; }')).toEqual([{ kind: 'push', cwd: '/work/c', remote: null }])
   expect(targetsOf('gh pr create --draft -Racme/payments')).toEqual([{ kind: 'pr', cwd: null, repo: 'acme/payments' }])
   expect(targetsOf('GH_REPO=acme/payments gh pr create --draft')).toEqual([{ kind: 'pr', cwd: null, repo: 'acme/payments' }])
   expect(targetsOf('export GH_REPO=acme/payments && gh pr create')).toEqual([{ kind: 'pr', cwd: null, repo: 'acme/payments' }])
@@ -119,27 +173,9 @@ test('a command is read in its own folder: cd, pushd, git -C (relative to a cd),
 
 /** The factory's checkout (and its worktrees) is not the session's folder: each folder has its own origin. */
 function inFolders(on: On, folder = 'sandbox', repo = 'bookbaghq/codebook-plugin-sandbox') {
-  const ran: string[] = []
-  mock.store(on)
-  on('session.cwd', () => ({ value: '/work/session' }))
-  on('env.get', () => ({ value: '/Users/me' }))
-  on('process.run', (_, e) => {
-    const dir = e.argv[2] ?? ''
-    const url = new RegExp(`^/Users/me/code/${folder}(-\\d+)?$`).test(dir) ? `git@github.com:${repo}.git` : 'https://github.com/someone/elsewhere.git'
-    const top = e.argv[3] === 'rev-parse'
-    return { value: { exitCode: 0, stdout: `${top ? dir : url}\n`, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
-  })
-  on('tool.call', (_, e) => {
-    const tool = String(e.tool)
-    if (tool === 'Bash') {
-      ran.push(String((e as { command?: unknown }).command))
-      return { result: { stdout: '', stderr: '', interrupted: false } as never }
-    }
-    const repository = { name: repo, local: { path: '~/code', mode: 'clone_into', checkout_path: `~/code/${folder}` } }
-    const data = { run: 811, where: 'here', lease: { fence: 1 }, brief: { run_here: { repository } } }
-    return { result: { structuredContent: data } as never, text: JSON.stringify(data) }
-  })
-  return ran
+  const own = new RegExp(`^/Users/me/code/${folder}(-\\d+)?$`)
+  return world(on, { cwd: '/work/session', repoOf: (dir) => ({ remotes: { origin: { fetch: [own.test(dir) ? `git@github.com:${repo}.git` : ELSEWHERE] } }, branch: 'main' }) }, repo,
+    { path: '~/code', mode: 'clone_into', checkout_path: `~/code/${folder}` })
 }
 
 test('pushes from the factory checkout or its worktrees go through; other folders and repositories are refused', async ($, on) => {
@@ -320,7 +356,7 @@ test('"$HOME" and ${HOME} at the start of a folder are the home folder, quoted o
   const ran = inFolders(on, 'payments', 'acme/payments')
   await $.tool.call({ tool: OWN + 'claim_work', run: 811 } as never)
   expect(targetsOf('cd "$HOME/code/payments" && git push -u origin b')).toEqual([{ kind: 'push', cwd: '$HOME/code/payments', remote: 'origin' }])
-  expect(targetsOf('cd "$HOME/code" && git -C payments-26 push')).toEqual([{ kind: 'push', cwd: '$HOME/code/payments-26', remote: 'origin' }])
+  expect(targetsOf('cd "$HOME/code" && git -C payments-26 push')).toEqual([{ kind: 'push', cwd: '$HOME/code/payments-26', remote: null }])
   await $.tool.call({ tool: 'Bash', command: 'cd "$HOME/code/payments" && git push -u origin b' } as never)
   await $.tool.call({ tool: 'Bash', command: 'git -C "$HOME/code/payments-26" push' } as never)
   await $.tool.call({ tool: 'Bash', command: 'git -C ${HOME}/code/payments-26 push origin b' } as never)
@@ -355,4 +391,133 @@ test('a claim with both repository and repositories reads all of repositories', 
     { repository: 'acme/a', checkoutPath: null, mode: null },
   ])
   expect(allowedOf(brief)).toEqual(['acme/a', 'acme/b'])
+})
+
+// ── The gaps closed in 0.13.0: what git and gh decide, aliases, scripts, the session's shell ────────────────────────
+
+const SAND = 'bookbaghq/codebook-plugin-sandbox'
+/** A held claim on the sandbox, in a folder set up as `repo` says; returns the commands that ran and a runner. */
+async function held($: { tool: { call: (e: never) => Promise<{ deny?: string; text?: string }> } }, on: On, repo: Repo, more: Partial<World> = {}) {
+  const ran = world(on, { cwd: '/work/sandbox', repoOf: () => repo, ...more })
+  await $.tool.call({ tool: OWN + 'claim_work', run: 811 } as never)
+  const bash = async (command: string) => String((await $.tool.call({ tool: 'Bash', command } as never)).deny ?? '')
+  return { ran, bash }
+}
+
+test('a plain git push goes where git sends it: pushRemote, then pushDefault, then the branch\'s remote, then origin', async ($, on) => {
+  const remotes = { origin: { fetch: [SANDBOX] }, fork: { fetch: [ELSEWHERE] } }
+  {
+    const { ran, bash } = await held($, on, { remotes, branch: 'b', config: { 'branch.b.pushremote': 'fork', 'remote.pushdefault': 'origin', 'branch.b.remote': 'origin' } })
+    expect(await bash('git push')).toContain('someone/elsewhere')
+    expect(await bash('git push origin b')).toBe('')
+    expect(ran).toEqual(['git push origin b'])
+  }
+})
+
+test('pushDefault and the branch\'s own remote count when there is no pushRemote; a configured address is read too', async ($, on) => {
+  const remotes = { origin: { fetch: [SANDBOX] }, fork: { fetch: [ELSEWHERE] } }
+  const a = await held($, on, { remotes, branch: 'b', config: { 'remote.pushdefault': 'fork' } })
+  expect(await a.bash('git push')).toContain('someone/elsewhere')
+})
+
+test('the branch\'s remote, then origin', async ($, on) => {
+  const remotes = { origin: { fetch: [SANDBOX] }, fork: { fetch: [ELSEWHERE] } }
+  const a = await held($, on, { remotes, branch: 'b', config: { 'branch.b.remote': 'fork' } })
+  expect(await a.bash('git push')).toContain('someone/elsewhere')
+})
+
+test('with nothing configured, origin; on a detached HEAD too', async ($, on) => {
+  const a = await held($, on, { remotes: { origin: { fetch: [SANDBOX] } }, branch: null })
+  expect(await a.bash('git push')).toBe('')
+  expect(a.ran).toEqual(['git push'])
+})
+
+test('a push straight to an address is rewritten as git rewrites it: pushInsteadOf, else insteadOf', async ($, on) => {
+  const config = { 'url.https://github.com/someone/elsewhere.pushinsteadof': 'https://github.com/bookbaghq/codebook-plugin-sandbox' }
+  const a = await held($, on, { remotes: { origin: { fetch: [SANDBOX] } }, branch: 'b', config })
+  expect(await a.bash('git push https://github.com/bookbaghq/codebook-plugin-sandbox.git b')).toContain('someone/elsewhere')
+  expect(a.ran).toEqual([])
+})
+
+test('insteadOf applies when no pushInsteadOf does, and an address with no rule is read as it is', async ($, on) => {
+  const config = { 'url.git@github.com:someone/.insteadof': 'gh:' }
+  const a = await held($, on, { remotes: { origin: { fetch: [SANDBOX] } }, branch: 'b', config })
+  expect(await a.bash('git push gh:elsewhere.git b')).toContain('someone/elsewhere')
+  expect(await a.bash('git push git@github.com:bookbaghq/codebook-plugin-sandbox.git b')).toBe('')
+  expect(a.ran.length).toBe(1)
+})
+
+test('gh pr create without --repo goes where gh sends it: the default repository, else the only remote; several and no default are refused', async ($, on) => {
+  const two = { origin: { fetch: [SANDBOX] }, upstream: { fetch: [ELSEWHERE] } }
+  {
+    const a = await held($, on, { remotes: two, branch: 'b' })
+    expect(await a.bash('gh pr create --draft')).toContain('2 remotes (origin, upstream) and no default')
+    expect(await a.bash(`gh pr create --draft --repo ${SAND}`)).toBe('')
+  }
+})
+
+test('gh repo set-default on the fork\'s upstream sends the pull request there: refused', async ($, on) => {
+  const two = { origin: { fetch: [SANDBOX] }, upstream: { fetch: [ELSEWHERE] } }
+  const a = await held($, on, { remotes: two, branch: 'b', config: { 'remote.upstream.gh-resolved': 'base' } })
+  expect(await a.bash('gh pr create --draft')).toContain('someone/elsewhere')
+})
+
+test('gh repo set-default on origin, or a single remote, goes through', async ($, on) => {
+  const two = { origin: { fetch: [SANDBOX] }, upstream: { fetch: [ELSEWHERE] } }
+  const a = await held($, on, { remotes: two, branch: 'b', config: { 'remote.origin.gh-resolved': 'base' } })
+  expect(await a.bash('gh pr create --draft')).toBe('')
+  expect(a.ran).toEqual(['gh pr create --draft'])
+})
+
+test('the session shell\'s GH_REPO counts as gh\'s, and its GIT_DIR or GIT_CONFIG_* refuses a push', async ($, on) => {
+  const a = await held($, on, { remotes: { origin: { fetch: [SANDBOX] } }, branch: 'b' }, { shellEnv: { GH_REPO: 'someone/elsewhere', GIT_DIR: '/elsewhere/.git' } })
+  expect(await a.bash('gh pr create --draft')).toContain('someone/elsewhere')
+  expect(await a.bash('git push origin b')).toContain('GIT_DIR')
+  // The command's own --repo still wins over the shell's GH_REPO.
+  expect(await a.bash(`gh pr create --repo ${SAND}`)).toBe('')
+  expect(a.ran.length).toBe(1)
+})
+
+test('git aliases are looked up: one that pushes or runs a shell is refused, any other runs', async ($, on) => {
+  const config = { 'alias.p': 'push', 'alias.ship': '!git push fork', 'alias.lg': 'log --oneline' }
+  const a = await held($, on, { remotes: { origin: { fetch: [SANDBOX] } }, branch: 'b', config })
+  expect(await a.bash('git p')).toContain('git p is an alias for "push"')
+  expect(await a.bash('git ship')).toContain('alias')
+  expect(await a.bash('git lg -3')).toBe('')
+  expect(a.ran).toEqual(['git lg -3'])
+})
+
+test('gh aliases and extensions: an alias that opens a pull request or calls the API is refused, an extension is refused, others run', async ($, on) => {
+  const a = await held($, on, { remotes: { origin: { fetch: [SANDBOX] } }, branch: 'b' }, {
+    ghAliases: 'prc:\tpr create --repo someone/elsewhere\nco:\tpr checkout\n',
+    ghExtensions: 'gh dash\tdlvhdr/gh-dash\tv4.0.0\n',
+  })
+  expect(await a.bash('gh prc')).toContain('gh prc is an alias for "pr create --repo someone/elsewhere"')
+  expect(await a.bash('gh dash')).toContain('gh extension')
+  expect(await a.bash('gh co 12')).toBe('')
+  expect(a.ran).toEqual(['gh co 12'])
+})
+
+test('scripts are read: a file, an npm script (and what it runs), a Makefile; one that pushes is refused', async ($, on) => {
+  const files = {
+    '/work/sandbox/deploy.sh': '#!/bin/sh\nnpm run build\ngit push fork main\n',
+    '/work/sandbox/scripts/build.sh': '#!/bin/sh\nnode build.mjs\n',
+    '/work/sandbox/package.json': JSON.stringify({ scripts: { test: 'node test.mjs', release: 'npm run tag && npm run ship', tag: 'git tag v1', ship: 'git push --tags fork' } }),
+    '/work/sandbox/Makefile': 'release:\n\tgit push origin main\n',
+  }
+  const a = await held($, on, { remotes: { origin: { fetch: [SANDBOX] } }, branch: 'b' }, { files })
+  expect(await a.bash('./deploy.sh')).toContain('./deploy.sh pushes')
+  expect(await a.bash('bash deploy.sh')).toContain('deploy.sh pushes')
+  expect(await a.bash('npm run release')).toContain('"release" script')
+  expect(await a.bash('make release')).toContain('Makefile')
+  expect(await a.bash('bash scripts/build.sh')).toBe('')
+  expect(await a.bash('npm test')).toBe('')
+  expect(a.ran).toEqual(['bash scripts/build.sh', 'npm test'])
+})
+
+test('with no CodeBook run held, nothing is looked up and everything runs', async ($, on) => {
+  const ran = world(on, { cwd: '/work/sandbox', repoOf: () => ({ remotes: { origin: { fetch: [ELSEWHERE] } }, config: { 'alias.p': 'push' } }) })
+  await $.tool.call({ tool: 'Bash', command: 'git p' } as never)
+  await $.tool.call({ tool: 'Bash', command: 'git push' } as never)
+  expect(ran).toEqual(['git p', 'git push'])
 })

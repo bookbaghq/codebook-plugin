@@ -3,10 +3,29 @@
 // pull requests it would make and name the repository each one reaches; register.tsx decides. What they cannot read
 // with confidence they answer `null`, and the guard refuses rather than guesses.
 
-/** One push or pull request a command would make, and how to find the repository it reaches. */
+/**
+ * One push or pull request a command would make, and how to find the repository it reaches. A push's `remote` is null
+ * when the command names none: git then picks it from the branch's configuration (resolve.ts reads it as git does).
+ */
 export type Target =
-  | { kind: 'push'; cwd: string | null; remote: string }
+  | { kind: 'push'; cwd: string | null; remote: string | null }
   | { kind: 'pr'; cwd: string | null; repo: string | null }
+
+/**
+ * Something in a command that may push without saying so, for resolve.ts to look into before the command runs: a git
+ * subcommand that is not git's own (an alias, `git p` = `push`), a gh command that is not gh's own (an alias or an
+ * extension), a script file, an npm / pnpm / yarn / bun script, or a make target. `isLost` when the folder it runs in
+ * cannot be told (after a `cd` that may not have happened, or `popd`).
+ */
+export type Check =
+  | { kind: 'git-alias'; cwd: string | null; name: string; isLost: boolean }
+  | { kind: 'gh'; name: string }
+  | { kind: 'file'; cwd: string | null; path: string; isLost: boolean }
+  | { kind: 'npm'; cwd: string | null; name: string; isLost: boolean }
+  | { kind: 'make'; cwd: string | null; target: string | null; isLost: boolean }
+
+/** A command as the guard reads it: the pushes and pull requests it names, and what else to look into. */
+export type Reading = { targets: Target[]; checks: Check[] }
 
 /** `github.com/owner/name` from any spelling of a GitHub remote (https, ssh, scp-like, with or without .git). */
 export function repoOf(remote: string): string | null {
@@ -35,6 +54,24 @@ export function allowedOf(brief: unknown): string[] {
  * read at all (`git log`, `npm test`); one with any of them is read word by word, and what cannot be read is refused.
  */
 const PUSH_LIKE = /\bpush|send-pack|\bpr\s+(?:create|new)\b|\bpulls\b|createpullrequest|\bmutation\b|\bgh\b[^\n]*\bapi\b|set-url|\bremote\.|\burl\.|insteadof|\bGIT_\w+/i
+
+/** Whether text (a command, an alias's expansion, a script's body) might push or open a pull request. */
+export function isPushLike(text: string): boolean {
+  return PUSH_LIKE.test(text)
+}
+
+/** gh's own top-level commands: any other word is an alias or an extension, whose expansion resolve.ts reads. */
+const GH_BUILTIN = new Set(
+  ('agent-task alias api attestation auth browse cache co codespace completion config copilot extension gist gpg-key help ' +
+    'issue label org pr preview project release repo ruleset run search secret ssh-key status variable version workflow').split(' '),
+)
+
+/** Programs that run a script file given as their first word (`bash deploy.sh`, `node release.mjs`). */
+const SCRIPT_RUNNERS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'fish', 'source', '.', 'python', 'python3', 'node', 'perl', 'ruby', 'deno', 'tsx', 'ts-node'])
+
+/** Package managers whose scripts are read from package.json, and the words that run one. */
+const PACKAGE_MANAGERS = new Set(['npm', 'pnpm', 'yarn', 'bun'])
+const NPM_SHORTHANDS = new Set(['test', 't', 'start', 'stop', 'restart'])
 
 /** The home folder at the start of a path: `~`, `$HOME` or `${HOME}` (register.tsx expands them). */
 export const HOME_PREFIX = /^(?:~|\$HOME|\$\{HOME\})(?=\/|$)/
@@ -294,11 +331,11 @@ function program(word: string | undefined): string {
 }
 
 /** A `GIT_*` variable that can change where a push goes (`GIT_DIR`, `GIT_CONFIG_*`, …). */
-function isRiskyGitVar(name: string): boolean {
+export function isRiskyGitVar(name: string): boolean {
   return name.startsWith('GIT_') && !HARMLESS_GIT_VARS.test(name)
 }
 
-type GitRead = { push?: { cwd: string | null; remote: string }; isUnreadable?: boolean; changesRemotes?: boolean }
+type GitRead = { push?: { cwd: string | null; remote: string | null }; isUnreadable?: boolean; changesRemotes?: boolean; alias?: { cwd: string | null; name: string } }
 
 /** One `git …` command: its push (folder and repository), or that it changes remotes, or that it cannot be read. */
 function readGit(argv: string[], cwd: string | null): GitRead {
@@ -334,8 +371,9 @@ function readGit(argv: string[], cwd: string | null): GitRead {
       positional = word
       break
     }
-    // The repository on the command line wins over --repo (`git push --repo=<a> <b>` pushes to <b>).
-    return { push: { cwd: here, remote: positional ?? repoFlag ?? 'origin' } }
+    // The repository on the command line wins over --repo (`git push --repo=<a> <b>` pushes to <b>). None named: git's
+    // own choice from the branch's configuration (pushRemote, pushDefault, the branch's remote, origin), read later.
+    return { push: { cwd: here, remote: positional ?? repoFlag ?? null } }
   }
   if (sub === 'send-pack') return { isUnreadable: true }
   if (sub === 'remote' && ['add', 'set-url', 'rename', 'remove', 'rm'].includes(rest[0] ?? '')) return { changesRemotes: true }
@@ -346,6 +384,8 @@ function readGit(argv: string[], cwd: string | null): GitRead {
   // An alias, or a subcommand that runs others (`git submodule foreach git push`, `git rebase -x "git push …"`).
   const runsOthers = !GIT_PLAIN.has(sub) || sub === 'rebase'
   if (runsOthers && rest.some(word => /\bpush\b|send-pack/.test(word))) return { isUnreadable: true }
+  // Not one of git's own: perhaps an alias (`git p` for `push`), whose expansion is read before the command runs.
+  if (sub !== '' && !GIT_PLAIN.has(sub)) return { alias: { cwd: here, name: sub } }
   return {}
 }
 
@@ -353,7 +393,7 @@ function readGit(argv: string[], cwd: string | null): GitRead {
 const GH_PR_VALUES = new Set(['-t', '--title', '-b', '--body', '-F', '--body-file', '-B', '--base', '-H', '--head', '-a', '--assignee', '-l', '--label', '-m', '--milestone', '-p', '--project', '-r', '--reviewer', '-T', '--template', '--recover', '-R', '--repo'])
 const GH_API_VALUES = new Set(['-X', '--method', '-f', '--raw-field', '-F', '--field', '-H', '--header', '--input', '-q', '--jq', '-t', '--template', '--hostname', '--cache', '-p', '--preview', '-R', '--repo'])
 
-type GhRead = { pr?: { repo: string | null }; isUnreadable?: boolean }
+type GhRead = { pr?: { repo: string | null }; isUnreadable?: boolean; other?: string }
 
 /** One `gh …` command: the pull request it opens (with its `-R`/`--repo`), or that it writes where the guard cannot read. */
 function readGh(argv: string[]): GhRead {
@@ -391,7 +431,37 @@ function readGh(argv: string[]): GhRead {
     return isWrite && reachesCode ? { isUnreadable: true } : {}
   }
   if (command === 'repo' && sub === 'create' && argv.includes('--push')) return { isUnreadable: true }
+  // Not one of gh's own commands: an alias or an extension, looked into before the command runs.
+  if (command !== '' && !GH_BUILTIN.has(command)) return { other: command }
   return {}
+}
+
+/** A script a simple command runs, if any: a file it executes, an npm-like script, or a make target. */
+function scriptOf(argv: string[], cwd: string | null, isLost: boolean): Check | null {
+  const name = program(argv[0])
+  const first = argv[0] ?? ''
+  if (first.includes('/') && !['git', 'gh'].includes(name)) return { kind: 'file', cwd, path: first, isLost }
+  if (SCRIPT_RUNNERS.has(name)) {
+    const args = argv.slice(1)
+    if (args.some(word => word === '-c' || word === '-e' || word === '--eval' || word === '-p')) return null
+    const file = args.find(word => !word.startsWith('-'))
+    return file ? { kind: 'file', cwd, path: file, isLost } : null
+  }
+  if (PACKAGE_MANAGERS.has(name)) {
+    const args = argv.slice(1).filter(word => !word.startsWith('-'))
+    const [verb = '', next = ''] = args
+    if (verb === 'run' || verb === 'run-script') return next ? { kind: 'npm', cwd, name: next, isLost } : null
+    if (name === 'npm') return NPM_SHORTHANDS.has(verb) ? { kind: 'npm', cwd, name: verb === 't' ? 'test' : verb, isLost } : null
+    // pnpm, yarn and bun run a package script by its bare name too (`pnpm deploy`, `yarn release`).
+    return verb && !['install', 'i', 'add', 'remove', 'exec', 'dlx', 'x', 'create', 'init', 'why', 'list', 'ls', 'outdated', 'audit', 'info'].includes(verb)
+      ? { kind: 'npm', cwd, name: verb, isLost }
+      : null
+  }
+  if (name === 'make' || name === 'gmake') {
+    const target = argv.slice(1).find(word => !word.startsWith('-') && !word.includes('=')) ?? null
+    return { kind: 'make', cwd, target, isLost }
+  }
+  return null
 }
 
 /**
@@ -405,19 +475,30 @@ function readGh(argv: string[]): GhRead {
  * after `popd` or after a `cd` that may not have happened. The caller refuses rather than guesses.
  */
 export function targetsOf(full: string): Target[] | null {
-  if (!PUSH_LIKE.test(full)) return []
-  const { text: command, isRun } = stripHeredocs(full)
-  if (isRun || /\$\(|`|<\(|>\(/.test(command)) return null
-  const simple = simpleCommands(command)
-  if (simple === null) return null
+  return readCommand(full)?.targets ?? null
+}
+
+/**
+ * The command as the guard reads it (targetsOf's rules), plus what may push without saying so (`checks`, for
+ * resolve.ts). A command with nothing push-like in it is never refused here: what cannot be read in it only ends the
+ * reading, with the checks found so far.
+ */
+export function readCommand(full: string): Reading | null {
+  const pushLike = PUSH_LIKE.test(full)
+  const checks: Check[] = []
   const targets: Target[] = []
+  const unreadable = (): Reading | null => (pushLike ? null : { targets: [], checks })
+  const { text: command, isRun } = stripHeredocs(full)
+  if (pushLike && (isRun || /\$\(|`|<\(|>\(/.test(command))) return null
+  const simple = simpleCommands(command)
+  if (simple === null) return unreadable()
   let cwd: string | null = null
   let isLost = false
   let isTainted = false
   let ghRepo: string | null = null
   let depth = 0
   for (const one of simple) {
-    if (one.hasParen) return null
+    if (one.hasParen) return unreadable()
     const { argv, keywords, assigns, exports } = commandWords(one.words)
     for (const word of keywords) {
       if (['if', 'while', 'until', 'for', 'select', 'case'].includes(word)) depth++
@@ -443,31 +524,35 @@ export function targetsOf(full: string): Target[] | null {
     }
     if (name === 'git') {
       const read = readGit(argv, cwd)
-      if (read.isUnreadable) return null
+      if (read.isUnreadable) return unreadable()
       if (read.changesRemotes) isTainted = true
+      if (read.alias) checks.push({ kind: 'git-alias', ...read.alias, isLost })
       if (read.push) {
-        if (isLost) return null
+        if (isLost) return unreadable()
         targets.push({ kind: 'push', ...read.push })
       }
       continue
     }
     if (name === 'gh') {
       const read = readGh(argv)
-      if (read.isUnreadable) return null
+      if (read.isUnreadable) return unreadable()
+      if (read.other) checks.push({ kind: 'gh', name: read.other })
       if (read.pr) {
-        if (isLost) return null
+        if (isLost) return unreadable()
         targets.push({ kind: 'pr', cwd, repo: read.pr.repo ?? prefixGhRepo ?? ghRepo })
       }
       continue
     }
     if (INERT.has(name)) continue
+    const script = scriptOf(argv, cwd, isLost)
+    if (script) checks.push(script)
     // A shell or interpreter running push-like text, or reading it from a pipe.
     const runsText = name === 'eval' || name === 'source' || name === '.' || one.before === '|' || one.words.some(word => PUSH_LIKE.test(word))
-    if (INTERPRETERS.has(name) && runsText) return null
+    if (INTERPRETERS.has(name) && runsText) return unreadable()
     // A wrapper around git or gh (`timeout 60 git push`, `xargs git push`, `nice`, `sudo`, `env -u X git push`).
-    if (argv.slice(1).some(word => ['git', 'gh'].includes(program(word))) && argv.some(word => PUSH_LIKE.test(word))) return null
+    if (argv.slice(1).some(word => ['git', 'gh'].includes(program(word))) && argv.some(word => PUSH_LIKE.test(word))) return unreadable()
   }
   // A remote, git's configuration or a GIT_* variable changed in the same command: the push may not go where it reads.
   if (isTainted && targets.length > 0) return null
-  return targets
+  return { targets, checks }
 }
