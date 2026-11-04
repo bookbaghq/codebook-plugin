@@ -1,7 +1,7 @@
 {
   "name": "codebook",
   "displayName": "CodeBook",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "Run CodeBook factories from Claude Code: the CodeBook connector, a live Factory pane beside the chat, /factory, a factory-worker agent that works run-here stations in your checkout, and a benchmark-worker that answers benchmarks here.",
   "author": {
     "name": "Bookbag",
