@@ -2,8 +2,9 @@ import { expect, mock, test } from 'claude-code/testing'
 
 import type { On } from 'claude-code'
 
-import { allowedOf, repoOf, targetsOf } from '../hooks/guard'
+import { allowedOf, readCommand, repoOf, targetsOf } from '../hooks/guard'
 import { checkoutsOf } from '../hooks/local'
+import { forgetShell } from '../hooks/resolve'
 
 const OWN = 'mcp__plugin_codebook_codebook__'
 
@@ -55,6 +56,9 @@ type World = {
   cwd: string
   repoOf: (dir: string) => Repo | null
   shellEnv?: Record<string, string>
+  shellAliases?: Record<string, string>
+  shellFunctions?: Record<string, string>
+  shellFails?: boolean
   files?: Record<string, string>
   ghAliases?: string
   ghExtensions?: string
@@ -76,6 +80,7 @@ function answer(w: World, argv: string[]) {
       return out(`${(c === '--push' ? (one.push ?? one.fetch) : one.fetch).join('\n')}\n`)
     }
     if (a === 'symbolic-ref') return repo.branch ? out(`${repo.branch}\n`) : out('', 1)
+    if (a === 'rev-parse' && b === '--git-path') return out(`.git/${c}\n`)
     if (a === 'rev-parse') return out(`${argv[2]}\n`)
     if (a === 'config' && b === '--get') {
       const value = repo.config?.[String(c).toLowerCase()]
@@ -89,9 +94,24 @@ function answer(w: World, argv: string[]) {
     void d
     return out('', 1)
   }
-  if (argv[1] === '-ic') return out(Object.entries(w.shellEnv ?? {}).map(([k, v]) => `${k}=${v}`).join('\n') + '\n')
+  // The shell probe, run under perl's alarm: its variables, aliases and function names; a function's body.
+  if (argv[0] === 'perl') {
+    const script = argv.at(-1) ?? ''
+    const fn = /^(?:whence -f|declare -f) (\S+)$/.exec(script)
+    if (fn) return w.shellFunctions?.[fn[1] ?? ''] === undefined ? out('', 1) : out(w.shellFunctions[fn[1] ?? ''] ?? '')
+    if (w.shellFails) return out('', 142)
+    const env = Object.entries(w.shellEnv ?? {}).map(([k, v]) => `@env ${k}=${v}`)
+    const aliases = Object.entries(w.shellAliases ?? {}).map(([k, v]) => `@alias ${k}='${v}'`)
+    const fns = Object.keys(w.shellFunctions ?? {}).map(k => `@fn ${k}`)
+    return out([...env, ...aliases, ...fns].join('\n') + '\n')
+  }
   if (argv[0] === 'gh' && argv[1] === 'alias') return out(w.ghAliases ?? '')
   if (argv[0] === 'gh' && argv[1] === 'extension') return out(w.ghExtensions ?? '')
+  if (argv[0] === 'ls') {
+    const dir = `${argv.at(-1) ?? ''}/`
+    const names = Object.keys(w.files ?? {}).filter(path => path.startsWith(dir) && !path.slice(dir.length).includes('/')).map(path => path.slice(dir.length))
+    return names.length ? out(`${names.join('\n')}\n`) : out('', 1)
+  }
   if (argv[0] === 'head') {
     const text = w.files?.[argv.at(-1) ?? '']
     return text === undefined ? out('', 1) : out(text)
@@ -102,6 +122,7 @@ function answer(w: World, argv: string[]) {
 /** The world, a held claim's brief for `repo`, and the commands that ran. */
 function world(on: On, w: World, repo = 'bookbaghq/codebook-plugin-sandbox', local: unknown = null) {
   const ran: string[] = []
+  forgetShell()
   mock.store(on)
   on('session.cwd', () => ({ value: w.cwd }))
   on('env.get', (_, e) => ({ value: (e as { name?: string }).name === 'HOME' ? '/Users/me' : (e as { name?: string }).name === 'SHELL' ? '/bin/zsh' : undefined }) as never)
@@ -253,7 +274,7 @@ test('GH_REPO counts only exported or set before that gh', async () => {
   expect(targetsOf('GH_REPO=acme/payments && gh pr create')).toEqual([{ kind: 'pr', cwd: null, repo: null }])
   expect(targetsOf('GH_REPO=acme/payments gh pr create')).toEqual([{ kind: 'pr', cwd: null, repo: 'acme/payments' }])
   expect(targetsOf('export GH_REPO=acme/payments; gh pr create')).toEqual([{ kind: 'pr', cwd: null, repo: 'acme/payments' }])
-  expect(targetsOf('export GH_REPO=acme/payments; unset GH_REPO; gh pr create')).toEqual([{ kind: 'pr', cwd: null, repo: null }])
+  expect(targetsOf('export GH_REPO=acme/payments; unset GH_REPO; gh pr create')).toEqual([{ kind: 'pr', cwd: null, repo: null, ghRepoUnset: true }])
   expect(targetsOf('GH_REPO=acme/payments gh pr create --repo other/x')).toEqual([{ kind: 'pr', cwd: null, repo: 'other/x' }])
   // A value that looks like -R in a title is the title's.
   expect(targetsOf('gh pr create --title -Rother/x --repo acme/payments')).toEqual([{ kind: 'pr', cwd: null, repo: 'acme/payments' }])
@@ -513,6 +534,73 @@ test('scripts are read: a file, an npm script (and what it runs), a Makefile; on
   expect(await a.bash('bash scripts/build.sh')).toBe('')
   expect(await a.bash('npm test')).toBe('')
   expect(a.ran).toEqual(['bash scripts/build.sh', 'npm test'])
+})
+
+test('git alias chains are followed: an alias of an alias that pushes is refused', async ($, on) => {
+  const a = await held($, on, { remotes: { origin: { fetch: [SANDBOX] } }, branch: 'b', config: { 'alias.p': 'q', 'alias.q': 'push fork', 'alias.s': 'st', 'alias.st': 'status' } })
+  expect(await a.bash('git p')).toContain('alias')
+  expect(await a.bash('git s')).toBe('')
+  expect(a.ran).toEqual(['git s'])
+})
+
+test('the person\'s shell aliases and functions that run git or gh are refused', async ($, on) => {
+  const a = await held($, on, { remotes: { origin: { fetch: [SANDBOX] } }, branch: 'b' }, { shellAliases: { gp: 'git push fork', ll: 'ls -la' }, shellFunctions: { ship: 'ship () {\n\tgit push "$@"\n}', greet: 'greet () {\n\techo hi\n}', sync: 'sync () {\n\tcommand git -C "$DIR" fetch\n}' } })
+  expect(await a.bash('gp')).toContain('shell alias')
+  expect(await a.bash('ship main')).toContain('shell function')
+  expect(await a.bash('ll')).toBe('')
+  expect(await a.bash('greet')).toBe('')
+  expect(await a.bash('sync')).toBe('')
+})
+
+test('a shell that does not answer in time refuses a push, and only a push', async ($, on) => {
+  const b = await held($, on, { remotes: { origin: { fetch: [SANDBOX] } }, branch: 'b' }, { shellFails: true })
+  expect(await b.bash('git push origin b')).toContain("could not read this session's shell")
+  expect(await b.bash('git status')).toBe('')
+})
+
+test('a hook that pushes is refused with any git command', async ($, on) => {
+  const files = {
+    '/work/sandbox/.git/hooks/post-commit': '#!/bin/sh\ngit push fork HEAD\n',
+    '/work/sandbox/.git/hooks/pre-push.sample': '#!/bin/sh\ngit push elsewhere\n',
+  }
+  const a = await held($, on, { remotes: { origin: { fetch: [SANDBOX] } }, branch: 'b' }, { files })
+  expect(await a.bash('git commit -m x')).toContain('post-commit hook')
+})
+
+test('sample hooks and hooks that do not push are left alone', async ($, on) => {
+  const quiet = { '/work/sandbox/.git/hooks/pre-commit': '#!/bin/sh\nnpm run lint\n', '/work/sandbox/.git/hooks/pre-push.sample': '#!/bin/sh\ngit push elsewhere\n' }
+  const b = await held($, on, { remotes: { origin: { fetch: [SANDBOX] } }, branch: 'b' }, { files: quiet })
+  expect(await b.bash('git commit -m x')).toBe('')
+})
+
+test('scripts: no false alarms for array pushes, pushd or docker push; a script the command writes first is refused', async ($, on) => {
+  const files = {
+    '/work/sandbox/build.js': 'const out = []\nout.push(1)\n',
+    '/work/sandbox/tidy.sh': '#!/bin/sh\npushd lib && ls && popd\n',
+    '/work/sandbox/ship.sh': '#!/bin/sh\ndocker push registry/app:1\n',
+    '/work/sandbox/sneak.sh': '#!/bin/sh\ngit "pu"sh fork\n',
+    '/work/sandbox/package.json': JSON.stringify({ scripts: { preversion: 'git push fork', postinstall: 'node setup.js' } }),
+    '/work/sandbox/sub/ci.mk': 'all:\n\tgit push fork\n',
+  }
+  const a = await held($, on, { remotes: { origin: { fetch: [SANDBOX] } }, branch: 'b' }, { files })
+  expect(await a.bash('node build.js')).toBe('')
+  expect(await a.bash('bash tidy.sh')).toBe('')
+  expect(await a.bash('sh ship.sh')).toBe('')
+  expect(await a.bash('sh sneak.sh')).toContain('sneak.sh pushes')
+  expect(await a.bash('npm version patch')).toContain('"version" scripts')
+  expect(await a.bash('npm install')).toBe('')
+  expect(await a.bash('make -C sub -f ci.mk')).toContain('ci.mk')
+  expect(await a.bash("printf 'git push fork' > new.sh && sh new.sh")).not.toBe('')
+})
+
+test('expansions, functions and eval around git or gh cannot be read and are refused; env is read through', async () => {
+  // env is read through: its GH_REPO is that gh's.
+  expect(readCommand('env GH_REPO=x/y gh pr create')?.targets).toEqual([{ kind: 'pr', cwd: null, repo: 'x/y' }])
+  expect(readCommand('x=push; git $x fork')).toBeNull()
+  expect(readCommand('f() { git "$@"; }; f push fork')).toBeNull()
+  expect(readCommand('eval "git push fork"')).toBeNull()
+  expect(readCommand('ls -la')).not.toBeNull()
+  expect(readCommand('docker push registry/app:1')?.targets ?? null).toEqual([])
 })
 
 test('with no CodeBook run held, nothing is looked up and everything runs', async ($, on) => {

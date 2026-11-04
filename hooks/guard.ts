@@ -9,7 +9,7 @@
  */
 export type Target =
   | { kind: 'push'; cwd: string | null; remote: string | null }
-  | { kind: 'pr'; cwd: string | null; repo: string | null }
+  | { kind: 'pr'; cwd: string | null; repo: string | null; ghRepoUnset?: boolean }
 
 /**
  * Something in a command that may push without saying so, for resolve.ts to look into before the command runs: a git
@@ -22,10 +22,11 @@ export type Check =
   | { kind: 'gh'; name: string }
   | { kind: 'file'; cwd: string | null; path: string; isLost: boolean }
   | { kind: 'npm'; cwd: string | null; name: string; isLost: boolean }
-  | { kind: 'make'; cwd: string | null; target: string | null; isLost: boolean }
+  | { kind: 'make'; cwd: string | null; target: string | null; isLost: boolean; file?: string | null }
+  | { kind: 'hooks'; cwd: string | null; isLost: boolean }
 
 /** A command as the guard reads it: the pushes and pull requests it names, and what else to look into. */
-export type Reading = { targets: Target[]; checks: Check[] }
+export type Reading = { targets: Target[]; checks: Check[]; programs: string[]; pushLike: boolean }
 
 /** `github.com/owner/name` from any spelling of a GitHub remote (https, ssh, scp-like, with or without .git). */
 export function repoOf(remote: string): string | null {
@@ -60,9 +61,18 @@ export function isPushLike(text: string): boolean {
   return PUSH_LIKE.test(text)
 }
 
+/**
+ * Whether a script's text (a file, a package.json script, a Makefile) pushes or opens a pull request: git or gh words
+ * on one line, not any "push" (`arr.push(`, `pushd`, `docker push` are not git pushes). resolve.ts also reads a shell
+ * script's lines as commands (readCommand), which sees through quoting such as `git "pu"sh`.
+ */
+export function scriptPushes(text: string): boolean {
+  return /\bgit\b[^\n]{0,200}?\b(?:push|send-pack)\b|\bgh\b[^\n]{0,200}?\b(?:pr\s+(?:create|new)|api\b|repo\s+create\b[^\n]*--push)|createpullrequest|api\.github\.com[^\n]*\/(?:pulls|git\/refs|merges)|\bhub\s+(?:push|pull-request)\b/i.test(text)
+}
+
 /** gh's own top-level commands: any other word is an alias or an extension, whose expansion resolve.ts reads. */
 const GH_BUILTIN = new Set(
-  ('agent-task alias api attestation auth browse cache co codespace completion config copilot extension gist gpg-key help ' +
+  ('agent-task alias api attestation auth browse cache codespace completion config copilot extension gist gpg-key help ' +
     'issue label org pr preview project release repo ruleset run search secret ssh-key status variable version workflow').split(' '),
 )
 
@@ -325,6 +335,16 @@ function joined(from: string | null, to: string): string {
   return to.startsWith('/') || HOME_PREFIX.test(to) || from === null ? to : `${from}/${to}`
 }
 
+/** The command word of a git or gh line: the first word after the program and its own options (and their values). */
+function firstWordOf(argv: string[]): string | null {
+  for (let at = 1; at < argv.length; at++) {
+    const word = argv[at] ?? ''
+    if (GIT_OPTIONS_WITH_VALUE.has(word) || word === '-R' || word === '--repo') at++
+    else if (!word.startsWith('-')) return word
+  }
+  return null
+}
+
 /** A program name without its folder: `/usr/bin/git` is `git`. */
 function program(word: string | undefined): string {
   return (word ?? '').replace(/^.*\//, '')
@@ -441,6 +461,12 @@ function scriptOf(argv: string[], cwd: string | null, isLost: boolean): Check | 
   const name = program(argv[0])
   const first = argv[0] ?? ''
   if (first.includes('/') && !['git', 'gh'].includes(name)) return { kind: 'file', cwd, path: first, isLost }
+  // `deno run x.ts`, `bun run x.ts`, `npx tsx x.ts`, `pnpm dlx tsx x.ts`, `bunx tsx x.ts`: the file after the runner.
+  if (['deno', 'npx', 'bunx'].includes(name) || (name === 'pnpm' && argv[1] === 'dlx') || (name === 'bun' && /\.(?:[cm]?[jt]sx?)$/.test(argv[2] ?? ''))) {
+    const file = argv.slice(1).find(word => /\.(?:[cm]?[jt]sx?|sh|py|rb|pl)$/.test(word))
+    if (file) return { kind: 'file', cwd, path: file, isLost }
+    if (name !== 'bun') return null
+  }
   if (SCRIPT_RUNNERS.has(name)) {
     const args = argv.slice(1)
     if (args.some(word => word === '-c' || word === '-e' || word === '--eval' || word === '-p')) return null
@@ -448,18 +474,41 @@ function scriptOf(argv: string[], cwd: string | null, isLost: boolean): Check | 
     return file ? { kind: 'file', cwd, path: file, isLost } : null
   }
   if (PACKAGE_MANAGERS.has(name)) {
-    const args = argv.slice(1).filter(word => !word.startsWith('-'))
-    const [verb = '', next = ''] = args
-    if (verb === 'run' || verb === 'run-script') return next ? { kind: 'npm', cwd, name: next, isLost } : null
-    if (name === 'npm') return NPM_SHORTHANDS.has(verb) ? { kind: 'npm', cwd, name: verb === 't' ? 'test' : verb, isLost } : null
+    // `npm --prefix <dir>`, `npm -C <dir>`, `pnpm -C <dir>`, `yarn --cwd <dir>`: the scripts of that folder.
+    let here = cwd
+    const rest: string[] = []
+    for (let at = 1; at < argv.length; at++) {
+      const word = argv[at] ?? ''
+      if (['--prefix', '-C', '--cwd', '--dir'].includes(word)) here = joined(here, argv[++at] ?? '.')
+      else if (/^--(?:prefix|cwd|dir)=/.test(word)) here = joined(here, word.replace(/^--\w+=/, ''))
+      else if (!word.startsWith('-')) rest.push(word)
+    }
+    const [verb = '', next = ''] = rest
+    // A workspace's or a filter's scripts live in another package.json: the guard cannot tell which.
+    if (verb === 'workspace' || verb === 'workspaces' || argv.some(word => /^--(?:filter|workspace|ws)/.test(word) || word === '-r' || word === '--recursive')) return { kind: 'npm', cwd: here, name: '*', isLost: true }
+    if (verb === 'run' || verb === 'run-script') return next ? { kind: 'npm', cwd: here, name: next, isLost } : null
+    // `npm version` runs preversion, version and postversion; installing runs the package's own lifecycle scripts.
+    if (verb === 'version') return { kind: 'npm', cwd: here, name: 'version', isLost }
+    if (['install', 'i', 'ci', 'add'].includes(verb) || verb === '') return { kind: 'npm', cwd: here, name: 'install', isLost }
+    if (name === 'npm') return NPM_SHORTHANDS.has(verb) ? { kind: 'npm', cwd: here, name: verb === 't' ? 'test' : verb, isLost } : null
     // pnpm, yarn and bun run a package script by its bare name too (`pnpm deploy`, `yarn release`).
-    return verb && !['install', 'i', 'add', 'remove', 'exec', 'dlx', 'x', 'create', 'init', 'why', 'list', 'ls', 'outdated', 'audit', 'info'].includes(verb)
-      ? { kind: 'npm', cwd, name: verb, isLost }
+    return verb && !['remove', 'exec', 'dlx', 'x', 'create', 'init', 'why', 'list', 'ls', 'outdated', 'audit', 'info'].includes(verb)
+      ? { kind: 'npm', cwd: here, name: verb, isLost }
       : null
   }
   if (name === 'make' || name === 'gmake') {
-    const target = argv.slice(1).find(word => !word.startsWith('-') && !word.includes('=')) ?? null
-    return { kind: 'make', cwd, target, isLost }
+    let here = cwd
+    let file: string | null = null
+    let target: string | null = null
+    for (let at = 1; at < argv.length; at++) {
+      const word = argv[at] ?? ''
+      if (word === '-C' || word === '--directory') here = joined(here, argv[++at] ?? '.')
+      else if (word.startsWith('--directory=')) here = joined(here, word.slice('--directory='.length))
+      else if (word === '-f' || word === '--file' || word === '--makefile') file = argv[++at] ?? null
+      else if (/^--(?:file|makefile)=/.test(word)) file = word.replace(/^--\w+=/, '')
+      else if (!word.startsWith('-') && !word.includes('=') && target === null) target = word
+    }
+    return { kind: 'make', cwd: here, target, isLost, file }
   }
   return null
 }
@@ -487,7 +536,11 @@ export function readCommand(full: string): Reading | null {
   const pushLike = PUSH_LIKE.test(full)
   const checks: Check[] = []
   const targets: Target[] = []
-  const unreadable = (): Reading | null => (pushLike ? null : { targets: [], checks })
+  // What cannot be read is refused when it pushes, or when a shell function or eval wraps git or gh: a function body
+  // (`f(){ git "$1"sh …; }; f pu`) or an eval may hide a push without saying "push".
+  const hidesGit = /(?:\b[A-Za-z_][\w-]*\s*\(\s*\)\s*\{|\bfunction\s+[A-Za-z_]|\beval\b)[\s\S]*\b(?:git|gh)\b|\b(?:git|gh)\b[\s\S]*\beval\b/.test(full)
+  const programs: string[] = []
+  const unreadable = (): Reading | null => (pushLike || hidesGit ? null : { targets: [], checks, programs, pushLike })
   const { text: command, isRun } = stripHeredocs(full)
   if (pushLike && (isRun || /\$\(|`|<\(|>\(/.test(command))) return null
   const simple = simpleCommands(command)
@@ -496,6 +549,11 @@ export function readCommand(full: string): Reading | null {
   let isLost = false
   let isTainted = false
   let ghRepo: string | null = null
+  let ghRepoUnset = false
+  let ghAliasChanged = false
+  let feedsPush = false
+  let sawGit = false
+  let gitCwd: string | null = null
   let depth = 0
   for (const one of simple) {
     if (one.hasParen) return unreadable()
@@ -510,7 +568,11 @@ export function readCommand(full: string): Reading | null {
     const prefixGhRepo = assigns.find(([name]) => name === 'GH_REPO')?.[1] ?? null
     if (argv.length === 0) continue
     const name = program(argv[0])
-    if (name === 'unset' && argv.includes('GH_REPO')) ghRepo = null
+    if (argv[0]) programs.push(argv[0])
+    if (name === 'unset' && argv.includes('GH_REPO')) {
+      ghRepo = null
+      ghRepoUnset = true
+    }
     if (name === 'cd' || name === 'pushd') {
       const to = argv.slice(1).find(word => !/^-[LPe@]+$/.test(word) && word !== '--')
       const mayNotRun = depth > 0 || one.before === '||' || one.before === '|' || one.after === '|' || one.after === '&'
@@ -522,7 +584,14 @@ export function readCommand(full: string): Reading | null {
       isLost = true
       continue
     }
+    // An expansion as the program or as git's or gh's command word (`git ${x}sh`): what runs cannot be read.
+    if (/\$/.test(argv[0] ?? '') || ((name === 'git' || name === 'gh') && /\$/.test(firstWordOf(argv) ?? ''))) return pushLike || /\b(?:git|gh)\b/.test(full) ? null : unreadable()
+    if (name !== 'git' && name !== 'gh' && !INERT.has(name) && one.words.slice(1).some(word => scriptPushes(word))) feedsPush = true
+    if (INERT.has(name) && one.words.slice(1).some(word => scriptPushes(word))) feedsPush = true
+    if (name === 'gh' && (argv[1] === 'alias' && ['set', 'import', 'delete'].includes(argv[2] ?? ''))) ghAliasChanged = true
     if (name === 'git') {
+      sawGit = true
+      gitCwd = gitCwd ?? cwd
       const read = readGit(argv, cwd)
       if (read.isUnreadable) return unreadable()
       if (read.changesRemotes) isTainted = true
@@ -539,7 +608,7 @@ export function readCommand(full: string): Reading | null {
       if (read.other) checks.push({ kind: 'gh', name: read.other })
       if (read.pr) {
         if (isLost) return unreadable()
-        targets.push({ kind: 'pr', cwd, repo: read.pr.repo ?? prefixGhRepo ?? ghRepo })
+        targets.push({ kind: 'pr', cwd, repo: read.pr.repo ?? prefixGhRepo ?? ghRepo, ...(ghRepoUnset ? { ghRepoUnset: true } : {}) })
       }
       continue
     }
@@ -550,9 +619,18 @@ export function readCommand(full: string): Reading | null {
     const runsText = name === 'eval' || name === 'source' || name === '.' || one.before === '|' || one.words.some(word => PUSH_LIKE.test(word))
     if (INTERPRETERS.has(name) && runsText) return unreadable()
     // A wrapper around git or gh (`timeout 60 git push`, `xargs git push`, `nice`, `sudo`, `env -u X git push`).
-    if (argv.slice(1).some(word => ['git', 'gh'].includes(program(word))) && argv.some(word => PUSH_LIKE.test(word))) return unreadable()
+    // Read as one line, so `pr create` (two words) is seen too.
+    if (argv.slice(1).some(word => ['git', 'gh'].includes(program(word))) && PUSH_LIKE.test(argv.join(' '))) return unreadable()
   }
-  // A remote, git's configuration or a GIT_* variable changed in the same command: the push may not go where it reads.
-  if (isTainted && targets.length > 0) return null
-  return { targets, checks }
+  // A remote, git's configuration (an alias included) or a GIT_* variable changed in the same command: the push, or the
+  // alias it then runs, may not go where it reads.
+  if (isTainted && (targets.length > 0 || checks.some(check => check.kind === 'git-alias'))) return null
+  // A gh alias set or imported in the same command, then used: it cannot be read before it exists.
+  if (ghAliasChanged && checks.some(check => check.kind === 'gh')) return null
+  // Text that pushes handed to a program that is not git push or gh pr create (`npm pkg set scripts.x="git push …"`,
+  // `echo 'git push …' > d.sh`) in a command that then runs a script: what the script will say cannot be read now.
+  if (pushLike && feedsPush && checks.some(check => check.kind === 'file' || check.kind === 'npm' || check.kind === 'make')) return null
+  // Any git command runs the repository's hooks (pre-commit, pre-push): resolve.ts reads them.
+  if (sawGit) checks.push({ kind: 'hooks', cwd: gitCwd, isLost })
+  return { targets, checks, programs, pushLike }
 }

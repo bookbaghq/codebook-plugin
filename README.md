@@ -101,8 +101,13 @@ Where a command does not say where it goes, the guard asks git and gh as they wo
 the branch's push remote (`pushRemote`, `remote.pushDefault`, its tracking remote, then `origin`); an address is
 rewritten by `pushInsteadOf` / `insteadOf` first; `gh pr create` without `--repo` goes to `GH_REPO`, the
 `gh repo set-default` repository or the only remote (with several remotes and no default it is refused). A git or gh
-alias that pushes, a gh extension, and a script, `npm run` script or Makefile that pushes are refused while a run is
-held, and so is a push when your shell sets `GIT_DIR`, `GIT_WORK_TREE` or `GIT_CONFIG_*`.
+alias that pushes (an alias of an alias too), a gh extension, and a script, `npm run` script (with its pre/post
+scripts, and the lifecycle scripts of `npm version` and `npm install`) or Makefile (`make -C` / `-f` included) that
+pushes are refused while a run is held. So are a repository hook that pushes (git runs it with any git command), a
+push with `push.recurseSubmodules` on, your own shell alias or function that runs a push, and a push when your shell
+sets `GIT_DIR`, `GIT_WORK_TREE` or `GIT_CONFIG_*`. The guard reads your shell once every ten minutes, for at most five
+seconds; if it does not answer, a push is refused until it does. Pushing from an array (`list.push(`), `pushd` and
+`docker push` are not git pushes and run.
 
 ### Code on your computer
 

@@ -8,7 +8,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { CodebookActive, CodebookCheckout, CodebookClaim, CodebookLink, CodebookMode, CodebookStory, CodebookWatch } from '../types'
 import { call, words } from './connector'
 import { allowedOf, readCommand } from './guard'
-import { checkOne, reaches, shellEnv } from './resolve'
+import { checkOne, checkShellWords, reaches, shellState } from './resolve'
 import { checkoutLines, checkoutsOf, mergeCheckouts } from './local'
 import {
   adopt,
@@ -194,14 +194,19 @@ export const register: Register = on => {
     if (reading === null) {
       return { deny: `CodeBook: the repository guard cannot tell where this command pushes or opens a pull request, so it was not run while CodeBook run ${runs} is worked here. Run the push on its own, plainly: git -C <checkout> push <remote> <branch>, and open the pull request with gh pr create --repo <owner/name>.` }
     }
-    // What may push without saying so: an alias, an extension, a script, a make target (resolve.ts reads each one).
+    const say = (why: string) => ({ deny: `CodeBook: the repository guard did not run this while CodeBook run ${runs} is worked here: ${why}` })
+    // The person's own shell aliases and functions (`gp` for `git push fork`), probed once every ten minutes.
+    const shell = await shellState($)
+    const ownWords = await checkShellWords($, reading.programs, shell)
+    if (ownWords) return say(ownWords.deny)
+    // What may push without saying so: an alias, an extension, a script, a make target, the hooks (resolve.ts).
     for (const check of reading.checks) {
-      const refused = await checkOne($, check)
-      if (refused) return { deny: `CodeBook: the repository guard did not run this while CodeBook run ${runs} is worked here: ${refused.deny}` }
+      const refused = await checkOne($, check, reading.pushLike)
+      if (refused) return say(refused.deny)
     }
     const targets = reading.targets
-    // The session shell's GH_REPO and GIT_* values, read only when something pushes or opens a pull request.
-    const env = targets.length > 0 ? await shellEnv($) : new Map<string, string>()
+    if (targets.length > 0 && !shell.ok) return say("the guard could not read this session's shell (its GH_REPO and GIT_* settings) in time, so it cannot tell where this goes. Try again; if it keeps failing, check that your shell starts without waiting for input.")
+    const env = shell.env
     for (const target of targets) {
       const found = await reaches($, target, env)
       if (!Array.isArray(found)) return { deny: `CodeBook: the repository guard did not run this while CodeBook run ${runs} is worked here: ${found.deny}` }
