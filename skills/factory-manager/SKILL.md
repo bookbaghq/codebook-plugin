@@ -180,8 +180,9 @@ requests stay open …"); without it (an older CodeBook), say "CodeBook may merg
 ## 4. Run the stations here
 
 **Following several stories.** Poll once, for all of them: `list_my_work { factory }` says which runs wait for you, and
-`factory_events { factory, after }` says what moved, about every 15 seconds (`sleep 15` in the shell). Use `story_status
-{ story, after }` for the one story you need the detail of. Polling each story every few seconds uses up the connector's
+`factory_events { factory, after }` says what moved. A sub-agent you spawned tells you when it finishes, so look when one does, or
+about every 30 seconds while nothing else wakes you (Claude Code refuses a plain foreground `sleep`; use its Monitor tool to wait).
+Use `story_status { story, after }` for the one story you need the detail of. Polling each story every few seconds uses up the connector's
 120 requests a minute per person, and a connection over it fails. For what you see:
 
 - **An agent station waits for this runner** (`waiting.on: "runner"`, `on_you: true`, not claimed): spawn one
