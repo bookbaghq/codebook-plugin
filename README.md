@@ -109,6 +109,30 @@ sets `GIT_DIR`, `GIT_WORK_TREE` or `GIT_CONFIG_*`. The guard reads your shell on
 seconds; if it does not answer, a push is refused until it does. Pushing from an array (`list.push(`), `pushd` and
 `docker push` are not git pushes and run.
 
+### One session, many agents
+
+**The session that starts a story owns it.** Only that session follows it, wakes itself when it needs you, and runs its
+agents as its own sub-agents. A new session stays silent and never becomes the manager, in any folder, unless you start
+a story there or run `/factory follow <story>` in it. A resumed session carries on with what it followed. (Before 0.14.0
+every session followed the same stories. After updating, a session that was following one needs `/factory follow <story>`
+once.)
+
+**Several cards at once.** The manager spawns one sub-agent per card, in every column: several QA agents or several
+business analysts side by side are several sub-agents of this one session. Three limits apply, and each is yours to change:
+
+- **Runs at once on your computer** (Factory settings › Your computer): 3 unless you change it, up to 16.
+- **Cards at once** at a station (the station's settings): no limit unless you set one. It holds in CodeBook's cloud too.
+- **Which agents share a station** (the station's Routing › Share the work): each new card goes to whichever has the fewest
+  runs going. Worth it when they should differ in skill or model; more runs of one agent go just as fast.
+
+Claude can change these too, after your yes (`set_parallel`). Many test suites at once slow a computer down, and tests that
+share a port or database can fail each other: lower the number if that happens.
+
+**Who is working on what.** Each code worker tells CodeBook its branch, worktree and the files it expects to change. Two
+cards touching the same files say so on both cards and in the chat, before they meet at merge; neither is stopped, because
+the list is an estimate. You decide whether one waits. If it does, its run stops, keeps its branch, and starts afresh once
+the other is merged: merge order is on the factory, not written in a story.
+
 ### Code on your computer
 
 Run here works on your own copy of each of the factory's repositories, wherever you keep it; the session can be opened
