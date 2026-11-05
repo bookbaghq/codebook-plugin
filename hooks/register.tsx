@@ -23,6 +23,7 @@ import {
   startRequest,
   STORE_MODE,
   restoreSession,
+  takePollSoon,
   unfollow,
 } from './factory'
 import type { Status } from './factory'
@@ -58,7 +59,9 @@ async function tick($: EngineInterface): Promise<void> {
   const s = await read($, story)
   const now = await $.clock.now()
   const isQuiet = (a === null || (s !== null && s.finished !== null)) && others.length === 0
-  if (now - lastPoll < (isQuiet ? QUIET_POLL_MS : POLL_MS) - 200) return
+  if (now - lastPoll < POLL_MS - 200) return
+  const isAsked = takePollSoon()
+  if (isQuiet && !isAsked && now - lastPoll < QUIET_POLL_MS - 200) return
   isPolling = true
   try {
     lastPoll = now
