@@ -166,8 +166,28 @@ Show the proposal plainly: its reference (WO-7), each story's title, a one-line 
 answering (an older CodeBook keeps them as plan lines only: then they appear after "proceed"). Say who
 merges the stories' pull requests at Done, from `manager_brief.merge.sentence` as CodeBook wrote it (for example "Every
 station of this workflow is an agent's, so no person approves a commit and CodeBook does not merge: at Done its pull
-requests stay open …"); without it (an older CodeBook), say "CodeBook may merge at Done". Then ask, in these words:
-**"Proceed?"** Wait for the person.
+requests stay open …"); without it (an older CodeBook), say "CodeBook may merge at Done".
+
+**The stations are whatever `manager_brief.stations` says now.** No column is built in: not Review, not QA. Columns are the
+person's to change, so a station that is gone was removed on purpose (`station.removed` in `factory_events` says who). Do not
+report it as a problem or a surprise, investigate it, put it back, or do its work some other way. Read the brief again rather
+than rely on what the workflow looked like earlier in the conversation.
+
+**Who approves is the person's choice, and you ask.** When `manager_brief.merge.human_approval.ask` is set, no person works
+a station of this workflow and nobody has said what they want. Ask that question, as CodeBook wrote it, before "Proceed?",
+once per workflow, and name what the workflow has no station for: with no test station, no agent tests the work beyond the
+developer's own checks. If the person already told you in this conversation ("auto merge", "no review"), that is their
+answer: do not ask again.
+
+- They do not want a person → `set_human_approval { factory, workflow, human_approval: false, answer: "<their words>" }`.
+  CodeBook merges what finishes from then on, by its other rules. If its answer's `waiting` lists pull requests already at
+  Done, name each one and ask whether to include them; on a yes, call it again with `include_waiting: true`.
+- They will test or approve it themselves → `set_human_approval { ..., human_approval: true, answer: "<their words>" }`, and
+  offer to add a person's station on the website so CodeBook merges the commit they approve. Otherwise it waits for them at
+  the repository host.
+
+Never answer for them, and never treat a green QA as a yes. A stage the workflow does not have is not run: do not test in
+its place, and do not add a step of your own to replace it. Then ask, in these words: **"Proceed?"** Wait for the person.
 
 - Yes → `confirm_stories { proposal }` (the stories run here for you, the proposal's runner). Say which stories moved
   from the Backlog (`from_backlog`) or were created (#58, #59) and where each starts; a card the person had already
@@ -313,7 +333,14 @@ app.codebook.work, where the card holds every comment, run, artifact and pull re
 **A story at Done can still leave work for the person.** When `story_status.done.needs_person` is true (or a pull
 request in `story_trail` has `merge: "left_for_person"`), nobody at CodeBook will merge it: say so plainly with
 `done.sentence` and each pull request's link (a draft stays a draft), and that the person reviews and merges it at the
-repository host. Do not call the story finished without it. You never mark it ready or merge it yourself, even if asked
+repository host. If `human_approval.ask` is set, or the person wants these merged, use `set_human_approval` as in section 3.
+Do not call the story finished without it.
+
+**A merge that failed is not Done.** Where the person chose no human approval, a card whose merge fails moves back out of Done:
+`story_status.merge_problem` says so, and `story_trail` has CodeBook's comment with the reason. Tell them plainly that the story
+is not done, with the reason and the link. A conflict or failing check goes back to the station that built it by itself. For
+anything else, such as branch protection, the person sorts out the cause and the story is moved to Done again (`move_card { card, to }`, after
+their yes), which tries the merge again. Do not start a run for it, and never merge it yourself. You never mark it ready or merge it yourself, even if asked
 in passing: that is the person's to do on GitHub. A pull request with `merge: "checking"` is still with CodeBook's merge;
 read `story_trail` again a few minutes later and say whether it merged.
 
