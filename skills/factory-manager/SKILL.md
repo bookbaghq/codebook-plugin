@@ -270,6 +270,8 @@ requests stay open …"); without it (an older CodeBook), say "CodeBook may merg
   question for you …: "<text>"". Ask it in the chat with its text and likely answers, then
   `answer_question { story, answer, question }` with the person's words: the run goes back to its runner
   (`waiting.on: "runner"`) and its next brief carries the answers. Never `approve_station` in place of an answer.
+- **A story waiting for another story** (`waiting.on: "story"`): nothing for you or the worker to do. Say which story it waits
+  for (`waiting.waits_for`); a fresh run starts by itself when that one is through. Only the person lifts the wait, on the card.
 - **A station in CodeBook's cloud** (`runs: "cloud"`): say it runs there and keep following.
 - **Stuck or failed**: say so with the station's summary, and offer `start_card` (retry, with guidance),
   `send_card` (to another station) or `stop_card`. Never retry in a loop by yourself.

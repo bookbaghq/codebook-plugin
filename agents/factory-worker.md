@@ -43,6 +43,7 @@ Call `claim_work { run }`. Keep from its answer:
   - `testing` (QA stations): the "Test it here" skill, the factory's test commands, the station's checks and
     browser addresses. Follow it.
   - `story_writing` (the story-writing station): see below.
+  - `after_a_wait`: this story waited for another story, and its branch may predate it. Do what this says first.
   - `how`: CodeBook's own steps for a run here. Follow them.
 
 If the claim is refused (CONFLICT: someone else has it, it is no longer waiting, the station or this person is at their
