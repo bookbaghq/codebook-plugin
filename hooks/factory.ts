@@ -34,9 +34,45 @@ export const notice = atom({ plugin: 'codebook', key: 'notice' } as const, null 
 /** The other stories a confirm_stories created (or the one followed before): polled only for what waits on you. */
 export const watched = atom({ plugin: 'codebook', key: 'watched' } as const, [] as CodebookWatch[], { shape: 'watched-1' })
 
-export const STORE_ACTIVE = 'active-1'
 export const STORE_MODE = 'mode'
-export const STORE_WATCHED = 'watched-1'
+/**
+ * What THIS session follows, under its own key. `$.store` is one file for the plugin, across every session and folder, so
+ * a story kept there under one shared key was followed by every session that started afterwards: each polled it, each woke
+ * itself to ask the person, each took the manager's part (found live: a session opened to remove a password spawned seven
+ * factory workers for stories it never started). A new session, and a fork, has its own id and so follows nothing until it
+ * starts a story or the person runs /factory there. A resumed session has the same id and carries on.
+ */
+export const STORE_SESSION = 'session-1:'
+/** The keys every session used to share, before 0.14.0. */
+const STORE_SHARED_BEFORE = ['active-1', 'watched-1']
+/** A session not seen for this long has gone: its key is removed by the next session to start. */
+const KEEP_SESSION_MS = 30 * 24 * 3600 * 1000
+
+type KeptSession = { at: number; active: CodebookActive | null; watched: CodebookWatch[] }
+
+/** Saves what this session follows, under its own key; nothing followed removes the key. */
+async function keep($: EngineInterface): Promise<void> {
+  const key = `${STORE_SESSION}${await $.session.id()}`
+  const a = await read($, active)
+  const list = await read($, watched)
+  if (a === null && list.length === 0) await $.store.delete(key)
+  else await $.store.set(key, { at: await $.clock.now(), active: a, watched: list } satisfies KeptSession)
+}
+
+/** At session start: what THIS session followed, if it is being resumed. Also clears the old shared keys and gone sessions. */
+export async function restoreSession($: EngineInterface): Promise<void> {
+  for (const key of STORE_SHARED_BEFORE) await $.store.delete(key)
+  const now = await $.clock.now()
+  const own = `${STORE_SESSION}${await $.session.id()}`
+  for (const key of await $.store.keys()) {
+    if (!key.startsWith(STORE_SESSION) || key === own) continue
+    const other = (await $.store.get(key)) as Partial<KeptSession> | undefined
+    if (typeof other?.at !== 'number' || now - other.at > KEEP_SESSION_MS) await $.store.delete(key)
+  }
+  const kept = (await $.store.get(own)) as Partial<KeptSession> | undefined
+  if (kept?.active && typeof kept.active.story === 'string' && (await read($, active)) === null) await update($, active, () => kept.active as CodebookActive)
+  if (Array.isArray(kept?.watched) && (await read($, watched)).length === 0) await update($, watched, () => (kept.watched as CodebookWatch[]).filter(one => typeof one?.story === 'string'))
+}
 
 // Wire shapes of the connector (docs/MCP-CONNECTOR.md in codebook-app), as far as the pane reads them.
 type Worker = { type?: string; name?: string; person?: { name?: string; is_you?: boolean } | null }
@@ -316,6 +352,8 @@ export function narration(e: WireEvent, reference: string): string | null {
       return `${e.station ?? 'The station'} is blocked on ${reference}${e.detail ? `: ${e.detail}` : '.'}`
     case 'run.claim_expired':
       return `The claim on ${reference}${at} lapsed; it is waiting again.`
+    case 'run.overlap':
+      return `${e.detail ?? `${reference} touches the same files as another card.`} Neither was stopped: a person decides whether one waits.`
     case 'pr.linked':
       return `Pull request ${e.subject ?? ''} linked to ${reference}.`.replace('  ', ' ')
     case 'human.review_requested':
@@ -441,29 +479,30 @@ export async function refresh($: EngineInterface): Promise<void> {
 /**
  * Polls the other stories this session follows (every story a confirm_stories created, not only the one the pane
  * shows) and queues the ask for whatever starts waiting on this person there. A finished story stops being polled.
+ *
+ * ONE story per tick, in turn: the connector allows 120 requests a minute per person, and its workers and the manager need
+ * most of that. Polling every followed story on every tick went over it at seven stories, and a sign-in over the limit drops
+ * the connector. A story waiting on the person is told at most (stories × the tick) later.
  */
+let nextWatched = 0
+
 export async function refreshWatched($: EngineInterface): Promise<void> {
   const list = await read($, watched)
   if (list.length === 0) return
-  const kept: CodebookWatch[] = []
-  for (const one of list) {
-    const got = await call<Status>($, 'story_status', { story: one.story, limit: 1 })
-    if (!got.ok) {
-      kept.push(one)
-      continue
-    }
-    const s = got.data
-    const wait = waitOf(s)
-    askOnce(one.waitKey, wait)
-    if (s.finished !== null) continue
-    kept.push({ ...one, reference: s.story.reference || one.reference, waitKey: wait?.key ?? null, question: wait?.question ?? null })
-  }
-  // Keep a story the person or Claude added while this poll ran.
-  const next = await update($, watched, now => [
-    ...kept.filter(k => now.some(n => n.story === k.story)),
-    ...now.filter(n => !list.some(l => l.story === n.story)),
-  ])
-  await $.store.set(STORE_WATCHED, next)
+  const one = list[nextWatched % list.length]!
+  nextWatched = (nextWatched + 1) % Math.max(1, list.length)
+  const got = await call<Status>($, 'story_status', { story: one.story, limit: 1 })
+  if (!got.ok) return
+  const s = got.data
+  const wait = waitOf(s)
+  askOnce(one.waitKey, wait)
+  // Against the list as it is now: a story the person or Claude added while this poll ran stays.
+  await update($, watched, now =>
+    s.finished !== null
+      ? now.filter(n => n.story !== one.story)
+      : now.map(n => (n.story === one.story ? { ...n, reference: s.story.reference || n.reference, waitKey: wait?.key ?? null, question: wait?.question ?? null } : n)),
+  )
+  await keep($)
 }
 
 /** Offers the person's answer to the question waiting on the followed story: "Answer #57: " in their prompt box. */
@@ -499,7 +538,7 @@ async function loadTrail($: EngineInterface, storyId: string): Promise<void> {
   await update($, trail, () => next)
 }
 
-/** Starts following a story: the pane, the timer and later sessions all read it. */
+/** Starts following a story, in this session: the pane and the timer read it, and it is kept for this session's resume. */
 export async function follow($: EngineInterface, a: CodebookActive): Promise<void> {
   board = null
   await update($, active, () => a)
@@ -507,18 +546,17 @@ export async function follow($: EngineInterface, a: CodebookActive): Promise<voi
   await update($, events, () => [])
   await update($, trail, () => null)
   await update($, sendingBack, () => false)
-  await $.store.set(STORE_ACTIVE, a)
+  await keep($)
   await refresh($)
 }
 
 export async function unfollow($: EngineInterface): Promise<void> {
   board = null
   await update($, watched, () => [])
-  await $.store.delete(STORE_WATCHED)
   await update($, active, () => null)
   await update($, story, () => null)
   await update($, events, () => [])
-  await $.store.delete(STORE_ACTIVE)
+  await keep($)
 }
 
 /** Sets where the next stories run and, when a story is followed, moves that story there too (set_run_location). */
@@ -641,7 +679,7 @@ export async function adopt($: EngineInterface, tool: string, data: unknown): Pr
         url: first.url ?? null,
       })
       const list = await update($, watched, now => [...now.filter(n => n.story !== first.story && !others.some(o => o.story === n.story)), ...others])
-      await $.store.set(STORE_WATCHED, list)
+      await keep($)
       if (isNew) {
         const also = list.map(one => one.reference)
         await update($, notice, () =>

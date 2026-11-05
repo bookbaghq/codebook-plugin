@@ -43,10 +43,12 @@ Call `claim_work { run }`. Keep from its answer:
   - `testing` (QA stations): the "Test it here" skill, the factory's test commands, the station's checks and
     browser addresses. Follow it.
   - `story_writing` (the story-writing station): see below.
+  - `after_a_wait`: this story waited for another story, and its branch may predate it. Do what this says first.
   - `how`: CodeBook's own steps for a run here. Follow them.
 
-If the claim is refused (CONFLICT: someone else has it, it is no longer waiting, or "No story, no work": the run has
-no story; FORBIDDEN: another person's run), say so and stop.
+If the claim is refused (CONFLICT: someone else has it, it is no longer waiting, the station or this person is at their
+limit of runs at once, or "No story, no work": the run has no story; FORBIDDEN: another person's run), say so and stop.
+The run was not taken. Never retry a claim in a loop: the manager starts you again when a slot is free.
 
 ## 2. Check you are in the right place
 
@@ -85,6 +87,11 @@ five notes per run, never a stream.
    yours: use `<checkout_path>-26-<run>` instead. Work, commit and push from inside it (`cd "<checkout_path>-26"`, or
    `git -C "<checkout_path>-26"`), plainly: one `git push -u origin <branch>`, not through a wrapper (`timeout`,
    `xargs`), a subshell or a script, which the repository guard refuses. Leave it in place: QA tests there.
+   Before you change anything, say what you are working on: `declare_work { run, fence, repository, branch, worktree,
+   files }`, with the files you expect to change, relative to the repository (a path ending in `/` means that folder).
+   Declare again if the list changes much. Its `overlaps` names other cards touching those files: nothing stops, so carry
+   on, and name them in your summary. The manager asks the person whether one should wait. (If an older CodeBook has no
+   `declare_work`, go on without it.)
 2. Do exactly what the station and the story ask, nothing else. Small and readable; follow the repository's own
    conventions (README, CLAUDE.md, AGENTS.md, CONTRIBUTING).
 3. Test with a budget (see "Test what matters, once" below): the tests that cover what you changed while you work,
@@ -107,6 +114,12 @@ here (its documented command; `testing.commands` are hints), check each of `test
 acceptance criteria, and when a browser tool is available and `testing.browser.addresses` are listed, open them and
 check the story there. Record `run_artifact { kind: "test_report", title, content, commands }` with the commands,
 counts, failures and the commit tested (`commands` as in step 5), and a `run_note` with the verdict. Change no code unless the station says so.
+
+**Beside other workers.** Other runs may be testing on this computer at the same time. When you start a server, use a free
+port rather than the one in a README (ask the system for one, or try the next if it is taken), and give anything shared, such
+as a test database, a name with your run number where the repository lets you. Never stop a process you did not start. If two
+`git fetch` commands collide ("cannot lock ref"), run yours again. A test that fails with "address already in use" or a
+locked database is not a failure of the change: run it again, alone if you can, and say so.
 
 **The story-writing station** (`story_writing.may_propose_stories` true): write the stories as a proposal with
 `propose_stories { factory, request, stories, run, fence }`, following its `how`. They become stories only when the
@@ -143,7 +156,8 @@ find something.
 
 Call `heartbeat_work { run, fence }` between steps, at least every `lease.heartbeat_every_seconds` (300 s by default;
 the lease runs 900 s). `run_note` and `run_artifact` renew it too. If a call answers CONFLICT because the lease ran out
-(the run is waiting again), stop: say so, report nothing, and leave your branch as it is.
+(the run is waiting again) or a person made this story wait for another, stop: say so, report nothing, and leave your
+branch as it is.
 
 ## 5. Report
 

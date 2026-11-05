@@ -32,6 +32,10 @@ here stories alone. You talk to CodeBook only through the `codebook` connector's
    repository is not this factory's: say so, and offer only that someone adds the repository to the factory on
    app.codebook.work. Never offer to do it, and never do it, in this session: it stays out of the story.
 5. **Narrate.** One short line per thing that happens, so the person always knows what is moving and who is working.
+6. **One session, one manager.** The session that started a story (or that the person ran `/factory follow` in) is its
+   manager, and only that one. It keeps the work and runs the agents as its own sub-agents, one per card. Do not take up
+   a Run here story you did not start in this session, even when `list_my_work` or `needs_you` shows it: say which
+   session-less work you see and ask whether the person wants this session to take it over (`/factory follow <story>`).
 
 ## 1. Brief yourself
 
@@ -89,8 +93,13 @@ number).
 
 **The factory has a story writer** (`author` is set; a crew's `leader` when it is a crew):
 1. Say "Sarah (Business analyst) will look into it and write the stories." Fetch her skill
-   (`manager_brief { factory, agent: "Sarah" }`) and spawn ONE sub-agent (general purpose, the model per section 4)
-   with that skill as its instructions, the person's words, the factory's repositories with their `checkout_path`
+   (`manager_brief { factory, agent: "Sarah" }`) and spawn a sub-agent (general purpose, the model per section 4). When
+   the request has parts that can be researched apart (several screens, several repositories, several separate asks), you
+   may spawn one per part, in ONE message, as many as `you.on_my_computer.limit` allows; several story writers are several
+   sub-agents, each with the skill of an agent the author's station shares (`stations[].parallel.shared_by`, else the
+   author). Then bring their questions and stories together yourself: one list of questions, one proposal, one "proceed?",
+   and say which stories touch the same files. Give each sub-agent
+   that skill as its instructions, the person's words, the factory's repositories with their `checkout_path`
    (it reads there, `git -C "<checkout_path>" …`), the board, and this task:
    research read only, then return either the questions the stories need, or 1–6 small stories (title, description
    with acceptance criteria that can be checked, risk low / medium / high). It changes nothing and cannot talk to the
@@ -170,8 +179,11 @@ requests stay open …"); without it (an older CodeBook), say "CodeBook may merg
 
 ## 4. Run the stations here
 
-Follow each story with `story_status { story, after }` (pass the last `last_event`), waiting a few seconds between
-calls (`sleep 5` in the shell). For what you see:
+**Following several stories.** Poll once, for all of them: `list_my_work { factory }` says which runs wait for you, and
+`factory_events { factory, after }` says what moved. A sub-agent you spawned tells you when it finishes, so look when one does, or
+about every 30 seconds while nothing else wakes you (Claude Code refuses a plain foreground `sleep`; use its Monitor tool to wait).
+Use `story_status { story, after }` for the one story you need the detail of. Polling each story every few seconds uses up the connector's
+120 requests a minute per person, and a connection over it fails. For what you see:
 
 - **An agent station waits for this runner** (`waiting.on: "runner"`, `on_you: true`, not claimed): spawn one
   `codebook:factory-worker` sub-agent for that run (`subagent_type: "codebook:factory-worker"`), telling it the run
@@ -190,12 +202,29 @@ calls (`sleep 5` in the shell). For what you see:
     person's stories: do not wait for it in `list_my_work` and do not spawn a worker for it; follow it with
     `story_status` and say "Review runs in CodeBook's cloud on GPT-5." `set_station_cloud { …, always: false }` (after
     a yes) lets it run here again.
-  - **Stories in parallel.** Check every Run here story you follow, not only the first: when several have a run
-    waiting for this runner, spawn their workers together, in ONE message (they run side by side), at most three at
-    a time. Each code worker works in its own git worktree next to `checkout_path`, so they never share a checkout.
-    One story's stations still go one after another; one agent may work several stories at once (each is its own
-    run). Never leave `model` out when `here.claude` names one: the worker's default is the session's model. Say
-    which ones started: "Alex is on #26 and Ben is on #28, side by side."
+  - **Stories in parallel: one sub-agent per card.** Check every Run here story you follow, not only the first: when
+    several have a run waiting for this runner, spawn their workers together, in ONE message (they run side by side).
+    Several QA or BA agents at once are several sub-agents of this session. How many: `you.on_my_computer.limit` in all
+    (the person's number; 3 unless they changed it), and at each station `stations[].parallel.cards_at_once` less its
+    `running` (null: no limit of its own). Spawn only what fits; start the next when one finishes, and say what waits:
+    "QA is at its limit of 2; #29 starts when one finishes." A claim over a limit answers CONFLICT and takes nothing, so
+    never retry it in a loop: `claim_work` is not how to find a free slot. Each run's brief names its own agent
+    (`brief.agent`), which on a shared station (`parallel.shared_by`) may differ from run to run: say who it is. Each code
+    worker works in its own git worktree next to `checkout_path`, so they never share a checkout. One story's stations
+    still go one after another; one agent may work several stories at once (each is its own run). Never leave `model`
+    out when `here.claude` names one: the worker's default is the session's model. Say which ones started: "Alex is on
+    #26 and Ben is on #28, side by side."
+  - **When more would help (an option, never a step).** When cards keep waiting at one station, you may offer it in a
+    sentence with the trade-off: a higher `set_parallel { factory, on_my_computer }`, or `set_parallel { factory, station,
+    cards_at_once }`. Or several agents sharing it, `set_parallel { factory, station, agents: ["Maya", "Priya"] }`
+    (after `install_agent` if the second is not installed), which is worth it when they should differ in skill or model;
+    more runs of the same agent go just as fast. Each only after the person's yes. A computer running many test suites
+    at once slows down, and tests that share a port or database can fail each other: if that happens, offer a lower number.
+  - **Two cards touching the same files.** Workers say what they expect to change (`declare_work`), and CodeBook compares
+    it with open pull requests. `manager_brief.working_on`, `story_status.working_on` and a `run.overlap` event say which
+    cards overlap; nothing was stopped. Tell the person which cards and files and ask: "Should #29 wait for #26 (merged
+    first), or both carry on?" On "wait", `wait_for_story { story, on, reason }`: the run stops, keeps its branch, and a
+    fresh run starts by itself once the other is through. Never decide it for them.
 - **A QA station** (`kind: "qa"`, or a run whose brief has `run_here.testing`): the same. Its brief carries
   CodeBook's "Test it here" skill, so the worker runs the repository's tests and the station's checks here and posts
   the evidence; say "Maya (QA) is testing #58 here."
@@ -242,6 +271,8 @@ calls (`sleep 5` in the shell). For what you see:
   question for you …: "<text>"". Ask it in the chat with its text and likely answers, then
   `answer_question { story, answer, question }` with the person's words: the run goes back to its runner
   (`waiting.on: "runner"`) and its next brief carries the answers. Never `approve_station` in place of an answer.
+- **A story waiting for another story** (`waiting.on: "story"`): nothing for you or the worker to do. Say which story it waits
+  for (`waiting.waits_for`); a fresh run starts by itself when that one is through. Only the person lifts the wait, on the card.
 - **A station in CodeBook's cloud** (`runs: "cloud"`): say it runs there and keep following.
 - **Stuck or failed**: say so with the station's summary, and offer `start_card` (retry, with guidance),
   `send_card` (to another station) or `stop_card`. Never retry in a loop by yourself.
@@ -343,4 +374,5 @@ person's own access: a read-only person reads and is refused changes.
 ## Limits
 
 - 30 manager writes a minute per person: on `RATE_LIMITED`, wait `retry_after_seconds` and continue.
+- 120 connector requests a minute per person, across their sessions: poll as section 4 says.
 - Never merge, mark a pull request ready, push to a default branch or force-push. Never send secrets anywhere.

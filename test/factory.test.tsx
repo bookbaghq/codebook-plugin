@@ -136,13 +136,27 @@ function status58(asks: boolean): Record<string, unknown> {
 }
 
 /** The engine beneath the plugin: a connected codebook server answering from the fixtures above. */
-function engine(on: On, at: { now: At; asks58?: boolean }) {
+function engine(on: On, at: { now: At; asks58?: boolean; session?: string; stored?: Record<string, unknown> }) {
   const calls: Calls = []
   const prompts: string[] = []
   const filled: string[] = []
   const logged: string[] = []
-  mock.store(on)
+  // $.store in memory, as mock.store keeps it, recording what is removed.
+  const kept = new Map<string, unknown>(Object.entries(at.stored ?? {}))
+  const deleted: string[] = []
+  on('store.get', (_, e) => ({ value: kept.get(e.key) }))
+  on('store.set', (_, e) => {
+    kept.set(e.key, e.value)
+    return { value: undefined }
+  })
+  on('store.delete', (_, e) => {
+    deleted.push(e.key)
+    kept.delete(e.key)
+    return { value: undefined }
+  })
+  on('store.keys', () => ({ value: [...kept.keys()] }))
   const clock = mock.clock(on, { now: 1_000_000 })
+  on('session.id', () => ({ value: at.session ?? 'session-a' }))
   on('command.register', () => ({ value: { command: 'factory' } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
@@ -201,7 +215,7 @@ function engine(on: On, at: { now: At; asks58?: boolean }) {
     const isError = typeof data === 'object' && data !== null && 'error' in data
     return { value: { content: [{ type: 'text', text: JSON.stringify(data) }], structuredContent: data, isError } }
   })
-  return { calls, prompts, filled, logged, clock }
+  return { calls, prompts, filled, logged, clock, deleted }
 }
 
 /** What the person does with the request the pane offered: sends it, and Claude starts the story. */
@@ -544,4 +558,52 @@ test('a station that starts waiting on this person wakes the session to ask, onc
   expect(prompts.length).toBe(1)
   // Asking is not deciding: the plugin itself never approves.
   expect(calls.find(one => one.tool === 'approve_station' || one.tool === 'send_back')).toBeUndefined()
+})
+
+const FOLLOWED = { story: 'st_57', factory: 'f_1', factoryName: 'Payments', workflow: null, reference: '#57', title: 'Let customers refund a payment', url: null }
+
+test('a new session follows nothing another session follows: no polling, no wake prompt, and the old shared keys are gone', async ($, on) => {
+  const other = { at: 1_000_000, active: FOLLOWED, watched: [{ ...FOLLOWED, story: 'st_58', reference: '#58', waitKey: null, question: null }] }
+  const { calls, prompts, clock, deleted } = engine(on, { now: 'review', stored: { 'session-1:session-other': other, 'active-1': FOLLOWED, 'watched-1': [other.watched[0]] } })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(20000)
+  expect(calls.filter(one => one.tool === 'story_status').length).toBe(0)
+  expect(prompts).toEqual([])
+  expect(deleted).toEqual(expect.arrayContaining(['active-1', 'watched-1']))
+  // The other session's own list is left alone, and /factory stop here does not touch it.
+  await $.command.run(typed('stop'))
+  expect(deleted).not.toContain('session-1:session-other')
+})
+
+test('a resumed session carries on with its own story and wakes itself', async ($, on) => {
+  const { calls, prompts, clock } = engine(on, { now: 'review', session: 'session-a', stored: { 'session-1:session-a': { at: 1_000_000, active: FOLLOWED, watched: [] } } })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(5000)
+  expect(calls.filter(one => one.tool === 'story_status').length).toBeGreaterThan(0)
+  expect(prompts.length).toBe(1)
+})
+
+test('a session gone for over 30 days loses its key, and /factory stop removes only its own', async ($, on) => {
+  const { clock, deleted } = engine(on, { now: 'build', session: 'session-a', stored: {
+    'session-1:session-gone': { at: 1_000_000 - 31 * 24 * 3600 * 1000, active: FOLLOWED, watched: [] },
+    'session-1:session-a': { at: 1_000_000, active: FOLLOWED, watched: [] },
+  } })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  expect(deleted).toContain('session-1:session-gone')
+  expect(deleted).not.toContain('session-1:session-a')
+  await clock.advance(1000)
+  await $.command.run(typed('stop'))
+  expect(deleted).toContain('session-1:session-a')
+})
+
+test('many followed stories are polled one per tick, so a session stays well under the connector limit', async ($, on) => {
+  const watched = ['st_a', 'st_b', 'st_c', 'st_d', 'st_e', 'st_f', 'st_g', 'st_h'].map(story => ({ ...FOLLOWED, story, reference: story, waitKey: null, question: null }))
+  const { calls, clock } = engine(on, { now: 'build', stored: { 'session-1:session-a': { at: 1_000_000, active: null, watched } } })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  for (let i = 0; i < 60; i++) await clock.advance(1000)
+  const polled = calls.filter(one => one.tool === 'story_status')
+  expect(polled.length).toBeLessThanOrEqual(16)
+  expect(polled.length).toBeGreaterThanOrEqual(8)
+  // Each gets its turn.
+  expect(new Set(polled.map(one => (one.args as { story: string }).story)).size).toBe(8)
 })

@@ -21,9 +21,8 @@ import {
   setMode,
   splitRun,
   startRequest,
-  STORE_ACTIVE,
   STORE_MODE,
-  STORE_WATCHED,
+  restoreSession,
   unfollow,
 } from './factory'
 import type { Status } from './factory'
@@ -229,14 +228,7 @@ export const register: Register = on => {
     })
     const storedMode = await $.store.get(STORE_MODE)
     if (storedMode === 'here' || storedMode === 'cloud') await update($, mode, () => storedMode)
-    const storedActive = (await $.store.get(STORE_ACTIVE)) as CodebookActive | undefined
-    if (storedActive && typeof storedActive.story === 'string' && (await read($, active)) === null) {
-      await update($, active, () => storedActive)
-    }
-    const storedWatched = (await $.store.get(STORE_WATCHED)) as CodebookWatch[] | undefined
-    if (Array.isArray(storedWatched) && (await read($, watched)).length === 0) {
-      await update($, watched, () => storedWatched.filter(one => typeof one?.story === 'string'))
-    }
+    await restoreSession($)
     $.clock.every(1000, () => {
       void tick($)
     })
