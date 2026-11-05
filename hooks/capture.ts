@@ -6,9 +6,14 @@
 // with tail and head. A place is kept per file, per session, in `$.store`, and moves only after CodeBook said it has the
 // rows, so a failed upload is simply sent again. CodeBook keeps the first copy of each block, so sending twice is harmless.
 //
+// PERMISSION. Claude Code's permission check still judges `$.mcp.call`: auto mode's classifier refuses a call no message asked for, a
+// headless session has nobody to ask, and the engine skips this plugin's own tool.check for a call it raised itself. So saving needs one
+// allow rule from the person, like the pane's reads (README). Status and one toast say so; the plugin does not change their permissions.
+//
 // NEVER IN THE SESSION'S WAY. A hook here only notes that there is something to do. The work runs on the pane's one-second
 // timer, one chunk at a time, one at a time, and a failure waits and tries later, silently. /factory capture status says what
-// happened. Only session.end waits, for at most SESSION_END_WAIT_MS, and anything it misses goes up from the next session.
+// happened. Only session.end waits, for at most SESSION_END_WAIT_MS; under `claude -p` the connector is already gone by then, so what the last
+// seconds said goes up from the next session.
 //
 // WHAT GOES. Which sessions: only those that called CodeBook; a conversation that never touched it stays on this computer. Which
 // rows: what was said, thought, called and answered, compaction summaries, and messages queued while a turn ran. Not the
@@ -33,7 +38,8 @@ const MAX_BATCH_ENTRIES = 400
 export const MAX_BLOCK_CHARS = 280_000
 const BLOCK_TAIL = 50_000
 const IDLE_SCAN_MS = 20_000
-const OTHERS_SCAN_MS = 600_000
+const OTHERS_SCAN_MS = 150_000
+const LONG_QUIET_MS = 86_400_000
 const OTHERS_QUIET_MS = 120_000
 const FORGET_AFTER_MS = 30 * 86_400_000
 const MIN_BACKOFF_MS = 5_000
@@ -42,6 +48,7 @@ const HOLD_MS = 1_800_000
 const UPLOAD_TIMEOUT_MS = 45_000
 const SESSION_END_WAIT_MS = 2_000
 const MAX_LINKS = 40
+const PERMISSION_RULE = 'Claude Code\'s permission check refuses this upload, so nothing is being saved. To allow it, add "mcp__plugin_codebook_codebook__capture_transcript" to permissions.allow in ~/.claude/settings.json. It lets this plugin save your own conversation to your own account, and nothing else.'
 
 /** Where one file was read up to. */
 export type FilePlace = {
@@ -161,7 +168,9 @@ export function parseRow(row: Row, place: FilePlace, out: Parsed): void {
   const role = message.role === 'assistant' ? 'assistant' : 'user'
   const model = typeof message.model === 'string' && !message.model.startsWith('<') ? message.model : undefined
   if (model) out.meta.model = model
-  const is_meta = !!row.isMeta
+  // What the engine put in the person's mouth: kept, shown only when asked for.
+  const injected = (text: unknown) => typeof text === 'string' && /^\s*<system-reminder>/.test(text)
+  const is_meta = !!row.isMeta || injected(message.content) || (Array.isArray(message.content) && message.content.length > 0 && message.content.every((b: Row) => b.type === 'text' && injected(b.text)))
   const base = { role, at, model, ...(is_meta ? { is_meta } : {}) } as const
   const kindOfText = row.isCompactSummary ? 'summary' : 'text'
   if (typeof message.content === 'string') {
@@ -223,6 +232,11 @@ export function batchesOf(entries: Entry[]): Entry[][] {
   return out
 }
 
+/** Whether a failed call was Claude Code's permission check and not CodeBook or the network. */
+export function isPermissionRefusal(code: string, message: string): boolean {
+  return code === 'AUTO_MODE' || /permission check refused|requested permissions/i.test(message)
+}
+
 // ── the module's memory: rebuilt after a reload, from the store and the next hook ────────────────────────────────────
 
 let busy = false
@@ -234,7 +248,10 @@ let waitUntil = 0
 let serverSays: 'on' | 'off' | 'full' = 'on'
 let lastProblem: string | null = null
 let askAgainAt = 0
+const pathOf = new Map<string, string>()
+const settled = new Set<string>()
 let told = false
+let toldPermission = false
 
 const keyOf = (sessionId: string) => `${STORE_CAPTURE}${sessionId}`
 async function keptOf($: EngineInterface, sessionId: string): Promise<Kept | null> {
@@ -244,7 +261,7 @@ async function keptOf($: EngineInterface, sessionId: string): Promise<Kept | nul
 /** The session used CodeBook: it is saved from its first word. Called from a hook, so it only writes down that it should be. */
 export async function markSession($: EngineInterface, sessionId: string): Promise<void> {
   if (await keptOf($, sessionId)) return
-  await $.store.set(keyOf(sessionId), { path: null, main: newPlace(), agents: {}, at: await $.clock.now() } satisfies Kept)
+  await $.store.set(keyOf(sessionId), { path: pathOf.get(sessionId) ?? null, main: newPlace(), agents: {}, at: await $.clock.now() } satisfies Kept)
   due = true
   if (!told && !(await isLocallyOff($))) {
     told = true
@@ -256,6 +273,8 @@ export async function markSession($: EngineInterface, sessionId: string): Promis
 export async function noteTranscript($: EngineInterface, sessionId: unknown, path: unknown): Promise<void> {
   due = true
   if (typeof sessionId !== 'string' || typeof path !== 'string' || !path || path.includes('/subagents/')) return
+  // Known from the session's first event, because a manager's one turn can run for an hour: it must not wait for the turn's end.
+  pathOf.set(sessionId, path)
   const kept = await keptOf($, sessionId)
   if (kept && kept.path !== path) await $.store.set(keyOf(sessionId), { ...kept, path })
 }
@@ -314,16 +333,25 @@ async function send($: EngineInterface, args: Record<string, unknown>): Promise<
   const timer = $.clock.sleep(UPLOAD_TIMEOUT_MS).then(() => ({ ok: false as const, code: 'TIMEOUT', message: 'the upload timed out', isSignIn: false }))
   const got = await Promise.race([ask, timer])
   if (got.ok) return { ok: true, capture: got.data?.capture ?? 'on', retentionDays: got.data?.retention_days }
+  if (isPermissionRefusal(got.code, got.message)) {
+    // A timer's upload is not something a person asked for, so it needs the person's rule. Said once, and then in status.
+    if (!toldPermission) {
+      toldPermission = true
+      try { await $.ui.toast('CodeBook cannot save this conversation without your permission: /factory capture status says how.') } catch { /* no surface to say it on */ }
+    }
+    return { ok: false, wait: MAX_BACKOFF_MS, problem: PERMISSION_RULE }
+  }
   const named = /try again in (\d+)\s*s/i.exec(got.message)
   return { ok: false, wait: named ? Number(named[1]) * 1000 : 0, problem: got.isSignIn ? 'Sign in to CodeBook to save conversations (/mcp).' : got.message }
 }
 
 /** Reads one chunk of one file and uploads it. → whether anything moved. */
-async function stepFile($: EngineInterface, sessionId: string, kept: Kept, agent: { id: string; file: string } | null, path: string, off: boolean): Promise<boolean> {
+async function stepFile($: EngineInterface, sessionId: string, kept: Kept, agent: { id: string; file: string } | null, path: string, off: boolean, isOwn: boolean): Promise<boolean> {
   const place = agent ? (kept.agents[agent.id] ??= newPlace()) : kept.main
   const size = await sizeOf($, path)
   if (size === null || size <= place.offset) return false
-  const save = async () => { await $.store.set(keyOf(sessionId), { ...kept, at: await $.clock.now() }) }
+  // `at` says when the session itself was last alive; catching it up does not make it so.
+  const save = async () => { await $.store.set(keyOf(sessionId), { ...kept, at: isOwn ? await $.clock.now() : kept.at }) }
   // Off: what is being said now is never uploaded, later included.
   if (off) { place.offset = size; await save(); return false }
   let length = CHUNK_BYTES
@@ -373,17 +401,18 @@ async function settle($: EngineInterface, sent: Extract<Sent, { ok: false }>): P
   backoff = Math.min(MAX_BACKOFF_MS, Math.max(MIN_BACKOFF_MS, backoff * 2, sent.wait))
   waitUntil = (await $.clock.now()) + backoff
   lastProblem = sent.problem
+  try { $.ui.log(`codebook capture: ${sent.problem}`, { to: 'debug' }) } catch { /* nowhere to say it */ }
   return false
 }
 
 /** One session's next chunk. → whether anything moved. */
-async function stepSession($: EngineInterface, sessionId: string, off: boolean): Promise<boolean> {
+async function stepSession($: EngineInterface, sessionId: string, off: boolean, isOwn = true): Promise<boolean> {
   const kept = await keptOf($, sessionId)
   if (!kept?.path) return false
-  if (await stepFile($, sessionId, kept, null, kept.path, off)) return true
+  if (await stepFile($, sessionId, kept, null, kept.path, off, isOwn)) return true
   if ((await $.clock.now()) < waitUntil) return false
   for (const agent of await agentFiles($, kept.path)) {
-    if (await stepFile($, sessionId, kept, agent, agent.file, off)) return true
+    if (await stepFile($, sessionId, kept, agent, agent.file, off, isOwn)) return true
     if ((await $.clock.now()) < waitUntil) return false
   }
   return false
@@ -396,9 +425,12 @@ async function stepOthers($: EngineInterface, own: string, off: boolean, now: nu
     const kept = (await $.store.get(key)) as Kept | undefined
     const session = key.slice(STORE_CAPTURE.length)
     if (!kept || now - kept.at < OTHERS_QUIET_MS) continue
+    // One look per process at what has been quiet for a day: a backfill can hold hundreds, and nothing is adding to them.
+    if (now - kept.at > LONG_QUIET_MS && settled.has(session)) continue
     const gone = !kept.path || (await sizeOf($, kept.path)) === null
     if (gone && now - kept.at > OTHERS_QUIET_MS) { if (now - kept.at > FORGET_AFTER_MS || kept.path) await $.store.delete(key); continue }
-    if (await stepSession($, session, off)) return true
+    if (await stepSession($, session, off, false)) return true
+    settled.add(session)
     if (now - kept.at > FORGET_AFTER_MS) await $.store.delete(key)
   }
   return false
@@ -433,6 +465,7 @@ export async function captureTick($: EngineInterface): Promise<void> {
     else nextScan = now + IDLE_SCAN_MS
   } catch (error) {
     lastProblem = error instanceof Error ? error.message : String(error)
+    try { $.ui.log(`codebook capture: ${lastProblem}`, { to: 'debug' }) } catch { /* nowhere to say it */ }
     backoff = Math.min(MAX_BACKOFF_MS, Math.max(MIN_BACKOFF_MS, backoff * 2))
     waitUntil = now + backoff
   } finally {

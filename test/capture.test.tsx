@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
-import { batchesOf, MAX_BLOCK_CHARS, namesEnvFile, parseChunk, utf8Length } from '../hooks/capture'
+import { batchesOf, isPermissionRefusal, MAX_BLOCK_CHARS, namesEnvFile, parseChunk, utf8Length } from '../hooks/capture'
 import type { FilePlace } from '../hooks/capture'
 import { isEnvFile, redactSecrets } from '../hooks/redact'
 
@@ -114,6 +114,8 @@ test('the same cases as the server\'s test: key formats go, near misses stay, tw
   for (const kept of ['The commit is 027c1ce3.', 'const token = getToken();', 'token: string', 'password: user.password', 'API_KEY=${API_KEY}', 'The token budget is 500 000 tokens.', 'postgres://localhost:5432/codebook', 'mcp__plugin_codebook_codebook__claim_work', 'tokens_used: 1234', 'secret: true', 'tokenLike(value)']) {
     expect(redactSecrets(kept)).toEqual({ text: kept, count: 0 })
   }
+  for (const plain of ['MYSQL_ROOT_PASSWORD=rootpass', 'PGPASSWORD=live_password', 'export SSO_APP_TOKEN=app_token']) expect(redactSecrets(plain).count).toBe(1)
+  for (const kept of ['MAX_TOKENS=4096', 'PRIMARY_KEY=id', 'TOKEN=true']) expect(redactSecrets(kept)).toEqual({ text: kept, count: 0 })
   const once = redactSecrets(`DB_PASSWORD=Xy7-secret-Value-9`)
   expect(once.text).not.toContain('Xy7')
   expect(redactSecrets(once.text).count).toBe(0)
@@ -248,6 +250,18 @@ test('a session that ended with rows not uploaded is caught up by a later one, f
   expect(w.uploads.map((u) => [u.session.id, u.entries?.map((e) => e.key)])).toEqual([['session-old', ['o2:0']]])
 })
 
+test('catching up a session goes on until it is done, and does not make it look alive', async ($, on) => {
+  const earlier = '/tmp/project/session-old.jsonl'
+  // Over a chunk: it takes several steps, each with a pause in between that a quiet-time check must not trip on.
+  const body = Array.from({ length: 30 }, (_, i) => line(user(`o${i}`, 'z'.repeat(100_000)))).join('')
+  const w = world(on, { stored: { 'capture-1:session-old': { path: earlier, main: { offset: 0, seq: 0, sent: [], envCalls: [] }, agents: {}, at: 1 } } })
+  w.files.set(earlier, body)
+  await begin($)
+  await seconds(w, 12)
+  expect(keys(w.uploads).length).toBe(30)
+  expect((w.kept.get('capture-1:session-old') as { at: number }).at).toBe(1)
+})
+
 test('/factory capture off: nothing leaves, and what was said meanwhile stays home even after on', async ($, on) => {
   const w = world(on)
   w.files.set(TRANSCRIPT, line(user('u1', 'first')))
@@ -298,4 +312,11 @@ test('/factory capture status says what it does, where it stands, and that remov
   const said = JSON.stringify(await typed($, 'capture status'))
   expect(said).toContain('This session: 1 blocks saved')
   expect(said).toContain('best effort')
+})
+
+test('Claude Code\'s permission check is told from CodeBook and the network', () => {
+  expect(isPermissionRefusal('AUTO_MODE', 'anything')).toBe(true)
+  expect(isPermissionRefusal('UNREACHABLE', "Claude Code's permission check refused the call to CodeBook (capture_transcript).")).toBe(true)
+  expect(isPermissionRefusal('UNREACHABLE', 'ECONNREFUSED: Unable to connect.')).toBe(false)
+  expect(isPermissionRefusal('FAILED', 'You are over the limit of 60 conversation saves a minute.')).toBe(false)
 })

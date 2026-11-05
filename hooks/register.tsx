@@ -165,7 +165,9 @@ export const register: Register = on => {
       ? { decision: 'allow', reason: 'The CodeBook Factory pane following the story you chose (read only).' }
       : next.origin.plugin === $.plugin.name && e.tool === OWN_CAPTURE
         ? { decision: 'allow', reason: 'Saving this conversation to your own CodeBook account (/factory capture off stops it).' }
-        : next(e),
+        : e.tool === OWN_CAPTURE
+          ? { decision: 'deny', reason: 'This is the CodeBook plugin\'s own upload, not a tool for the model.' }
+          : next(e),
   ).catch(($, e, next) => next(e))
 
   // Claude's calls of the connector (the requests the pane offered, the factory-worker's reports): the pane takes
@@ -173,12 +175,12 @@ export const register: Register = on => {
   on('tool.call', async ($, e, next) => {
     const ran = await next(e)
     const tool = String(e.tool)
-    if (!tool.startsWith(OWN_TOOLS) || ran.deny !== undefined || ran.isError) return ran
-    // A session the model used CodeBook in is saved (capture.ts); the pane's own reads do not count.
+    // A session the model called CodeBook in is saved (capture.ts), even if this call failed; the pane's own reads do not count.
     // Nothing about saving may ever get between a tool call and what follows it, the guard's list included.
-    try {
-      if (next.origin.plugin !== $.plugin.name) await markSession($, await $.session.id())
-    } catch { /* the next call marks it */ }
+    if (tool.startsWith(OWN_TOOLS) && next.origin.plugin !== $.plugin.name) {
+      try { await markSession($, await $.session.id()) } catch { /* the next call marks it */ }
+    }
+    if (!tool.startsWith(OWN_TOOLS) || ran.deny !== undefined || ran.isError) return ran
     const name = tool.slice(OWN_TOOLS.length)
     const data = payloadOf(ran) as { run?: number; brief?: unknown; recorded?: boolean } | null
     // Where each repository's code is on this computer, for /factory status.
@@ -256,6 +258,8 @@ export const register: Register = on => {
   on('classic.UserPromptSubmit', async ($, e, next) => { await noteTranscript($, e.session_id, e.transcript_path).catch(() => {}); return next(e) })
   on('classic.Stop', async ($, e, next) => { await noteTranscript($, e.session_id, e.transcript_path).catch(() => {}); return next(e) })
   on('classic.SubagentStop', async ($, e, next) => { noteDue(); return next(e) })
+  // After a reload mid-turn the module has forgotten where the transcript is; the next tool call says.
+  on('classic.PostToolUse', async ($, e, next) => { await noteTranscript($, e.session_id, e.transcript_path).catch(() => {}); return next(e) })
   on('session.end', async ($, e, next) => { await captureAtEnd($, e.sessionId).catch(() => {}); return next(e) })
 
   on('command.run', { command: 'factory' }, async ($, e) => {

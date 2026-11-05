@@ -196,9 +196,9 @@ settings (in auto mode, the auto-mode check judges it like anything you type). T
 
 ### Auto mode
 
-In auto mode Claude Code checks each tool call against what you asked for. The pane's own refreshes come from the
-plugin, not from a message of yours, so the check refuses them and the pane says "Not reached". Allow the pane's
-three read-only calls in `~/.claude/settings.json`:
+In auto mode Claude Code checks each tool call against what you asked for. The pane's own refreshes and the upload of your
+conversation come from the plugin, not from a message of yours, so the check refuses them: the pane says "Not reached", and
+nothing is saved (one notice says so, and `/factory capture status` says how to fix it). Allow them in `~/.claude/settings.json`:
 
 ```json
 {
@@ -206,20 +206,36 @@ three read-only calls in `~/.claude/settings.json`:
     "allow": [
       "mcp__plugin_codebook_codebook__list_factories",
       "mcp__plugin_codebook_codebook__story_status",
-      "mcp__plugin_codebook_codebook__story_trail"
+      "mcp__plugin_codebook_codebook__story_trail",
+      "mcp__plugin_codebook_codebook__capture_transcript"
     ]
   }
 }
 ```
 
-Only those three reads skip the check. Starting a story, approving, sending back and changing a factory still go
-through your prompt box and your permission mode.
+The first three are reads. The last saves your own conversation to your own account. Nothing else skips the check: starting a
+story, approving, sending back and changing a factory still go through your prompt box and your permission mode.
+
+## Saving conversations
+
+A session that calls CodeBook is saved to your CodeBook account as it happens, from its first word: what was said, thought, called and answered, and each sub-agent as its own conversation, linked to the factory, story and agent it worked on. A session that never calls CodeBook stays on your computer. Only you can read what is saved, in the app's manager chat and agent chats and under Factory settings › Your computer. From there you can carry one on with an agent in the app.
+
+- **It never gets in the session's way.** The upload runs in the background one piece at a time, and a failure waits and tries again without a word. If you were offline, or a session ended before its last rows went up, a later session catches it up from where it stopped. It has its own connector limit, so it does not use the 120 requests a minute your work needs.
+- **Secrets are removed first**, on your computer, and checked again by CodeBook: known key formats, private keys, authorization headers, connection-string logins, sensitive names given a value, and whatever a tool read from a `.env` file. That is best effort. A password typed into a sentence, or a key in a format nobody listed, may not be recognised.
+- **What it leaves out**: the transcript's bookkeeping (API request records, file history, costs, the instruction text repeated each turn), about three quarters of the file. Images go as a line saying one was there. The middle of a block over 280,000 characters is not saved, and the row says so.
+- **It needs one permission**: `mcp__plugin_codebook_codebook__capture_transcript` in `permissions.allow`, under Auto mode above. Without it nothing is saved, and it says so once.
+- **`/factory capture off`** stops it on this computer; `/factory capture on` starts it again; `/factory capture status` says where it stands; `/factory capture backfill` uploads this project's older sessions that used CodeBook. Saved conversations in the app has the same switch for every computer, and how long they are kept (a year by default). What is said while it is off is never uploaded later, even after turning it back on.
+- It reads the file with `sh`, `tail` and `head`, so it needs a POSIX shell: on Windows without one nothing is saved.
+
+Claude's chat tab and ChatGPT cannot do this: a connector sees tool calls, never the conversation. There, ask the model to save the chat, and it writes a copy with `save_conversation`, labelled in the app as a copy the model wrote. Or import the app's export under Saved conversations.
 
 ## What is sent where
 
 - **To CodeBook (app.codebook.work)**, over the connector, signed in as you: the factory and story you pick, the story
   title you type, your Approve / Send back decisions and reasons, and, for a station worked here, the claim, the
-  summary of what was done, the pull request link and the artifacts the station asks for.
+  summary of what was done, the pull request link and the artifacts the station asks for. And, for a session that calls
+  CodeBook, that session's conversation, with secrets removed as best they can be recognised: see Saving conversations.
+  `/factory capture off` stops it.
 - **To your repository's git remote (for example GitHub)**: the branch and the draft pull request, with your own
   `git` and `gh` credentials.
 - **Nothing else.** The plugin has no servers of its own, no analytics, and no keys in this repository. Your code

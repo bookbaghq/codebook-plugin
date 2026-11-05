@@ -56,7 +56,9 @@ export function redactSecrets(input: unknown): { text: string; count: number } {
     text = text.replace(AUTH_HEADER, (_: string, head: string) => { count++; return `${head}${mark('authorization')}`; });
     text = text.replace(ASSIGNED, (whole: string, before: string, name: string, between: string, open: string | undefined, value: string, close: string | undefined) => {
         if (!value || NOT_A_SECRET.test(value)) return whole;
-        if (!open && !tokenLike(value)) return whole;
+        // PGPASSWORD=rootpass: an environment-style assignment of a password or token says what it is, however plain the value. Numbers are limits (MAX_TOKENS=4096).
+        const envStyle = /^[A-Z0-9_]+$/.test(name) && between.trim() === '=' && /PASS|PWD|SECRET|TOKEN|CREDENTIAL/.test(name) && value.length >= 4 && !/^\d+$/.test(value);
+        if (!open && !envStyle && !tokenLike(value)) return whole;
         if (open && value.length < 4) return whole;
         count++;
         return `${before}${name}${between}${open || ''}${mark(String(name).toLowerCase().slice(0, 40))}${close || ''}`;
