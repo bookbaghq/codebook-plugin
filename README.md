@@ -122,7 +122,7 @@ business analysts side by side are several sub-agents of this one session. Three
 
 - **Runs at once on your computer** (Factory settings › Your computer): 3 unless you change it, up to 16.
 - **Cards at once** at a station (the station's settings): no limit unless you set one. It holds in CodeBook's cloud too.
-- **Which agents share a station** (the station's Routing › Share the work): each new card goes to whichever has the fewest
+- **Which agents share a station** (the station's Routing › Several agents, sharing): each new card goes to whichever has the fewest
   runs going. Worth it when they should differ in skill or model; more runs of one agent go just as fast.
 
 Claude can change these too, after your yes (`set_parallel`). Many test suites at once slow a computer down, and tests that
