@@ -607,3 +607,28 @@ test('many followed stories are polled one per tick, so a session stays well und
   // Each gets its turn.
   expect(new Set(polled.map(one => (one.args as { story: string }).story)).size).toBe(8)
 })
+
+test("workers' calls do not each poll: the timer stays the only poll, and the pane still catches up", async ($, on) => {
+  const { calls, clock } = engine(on, { now: 'build', session: 'session-a', stored: { 'session-1:session-a': { at: 1_000_000, active: FOLLOWED, watched: [] } } })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(5000)
+  const polled = () => calls.filter(one => one.tool === 'story_status').length
+  const before = polled()
+  for (let i = 0; i < 20; i++) await $.tool.call({ tool: 'mcp__plugin_codebook_codebook__run_note', run: 8, fence: 1, note: `step ${i}` } as never)
+  expect(polled()).toBe(before)
+  await clock.advance(5000)
+  expect(polled()).toBe(before + 1)
+})
+
+test('a call on a story that looks finished is caught up within the short poll, not the quiet one', async ($, on) => {
+  const { calls, clock } = engine(on, { now: 'done', session: 'session-a', stored: { 'session-1:session-a': { at: 1_000_000, active: FOLLOWED, watched: [] } } })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(5000)
+  const polled = () => calls.filter(one => one.tool === 'story_status').length
+  const before = polled()
+  await clock.advance(10000)
+  expect(polled()).toBe(before)
+  await $.tool.call({ tool: 'mcp__plugin_codebook_codebook__send_back', story: 'st_57' } as never)
+  await clock.advance(5000)
+  expect(polled()).toBe(before + 1)
+})

@@ -638,7 +638,17 @@ export async function startStory($: EngineInterface, factory: string, title: str
   await offer($, startRequest(factory, title, where), 'The request to start the story')
 }
 
-/** Folds the answer of a connector call Claude made back into the pane: a started story is followed, others refresh. */
+// A call Claude made changed something, so the next tick polls even when the story looks quiet.
+let pollSoon = false
+
+/** Whether a call asked for a poll since the last one. Reading it clears it. */
+export function takePollSoon(): boolean {
+  const asked = pollSoon
+  pollSoon = false
+  return asked
+}
+
+/** Folds the answer of a connector call Claude made back into the pane: a started story is followed, others ask the timer to poll. */
 export async function adopt($: EngineInterface, tool: string, data: unknown): Promise<void> {
   if (tool === 'start_story') {
     const s = data as Started | null
@@ -691,7 +701,9 @@ export async function adopt($: EngineInterface, tool: string, data: unknown): Pr
   }
   const said = (data as { next?: unknown } | null)?.next
   if (typeof said === 'string') await update($, notice, () => said)
-  if ((await read($, active)) !== null) await refresh($)
+  // Never a poll per call: with eight workers side by side that was over half the connector's 120 requests a minute,
+  // and the workers' own calls were refused. The pane catches up on the next tick, within POLL_MS.
+  pollSoon = true
 }
 
 export async function approve($: EngineInterface): Promise<void> {
