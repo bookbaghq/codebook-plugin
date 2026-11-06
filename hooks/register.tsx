@@ -1,6 +1,7 @@
 // The CodeBook plugin's hooks: the /factory command, the Factory pane beside the chat, the timer that follows the
-// story, and the repository guard. The plugin itself only reads CodeBook; every write is a request the person sends
-// and Claude makes (Run here: the codebook:factory-manager skill runs the stations with sub-agents).
+// story, the repository guard, and saving conversations (capture.ts). The plugin itself only reads CodeBook, apart from that
+// upload of the person's own conversation; every other write is a request the person sends and Claude makes (Run here: the
+// codebook:factory-manager skill runs the stations with sub-agents).
 
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
@@ -28,6 +29,7 @@ import {
 } from './factory'
 import type { Status } from './factory'
 import { drawPane, PANE } from './pane'
+import { captureAtEnd, captureCommand, captureTick, markSession, noteDue, noteTranscript } from './capture'
 
 // The pane's values, declared again here: the engine reads state only through atoms written in the same file.
 // Keep each tag as factory.ts has it.
@@ -52,6 +54,7 @@ let isPolling = false
 
 async function tick($: EngineInterface): Promise<void> {
   flushAsk($)
+  void captureTick($)
   if (isPolling) return
   const a = await read($, active)
   const others = await read($, watched)
@@ -86,6 +89,7 @@ const HELP = [
   '/factory follow <story> [<factory>] — follow a story already on the board (#57 needs the factory)',
   '/factory here | cloud — where agent stations of the next story run',
   '/factory stop — stop following the story',
+  '/factory capture [on | off | backfill] — whether this computer saves conversations that use CodeBook to your account',
 ].join('\n')
 
 async function statusText($: EngineInterface): Promise<{ text: string; context?: string[] }> {
@@ -124,6 +128,8 @@ async function storyText($: EngineInterface): Promise<{ text: string; context?: 
 /** The plugin's own connector tools, as the permission check and tool.call name them. */
 const OWN_TOOLS = 'mcp__plugin_codebook_codebook__'
 /** The reads the pane makes by itself (following the story the person chose); writes go through the person. */
+/** The plugin's own upload of this session's transcript (capture.ts). Its own rows, for its owner; it decides nothing. */
+const OWN_CAPTURE = `${OWN_TOOLS}capture_transcript`
 const OWN_READS = new Set(
   [
     'list_factories',
@@ -157,7 +163,11 @@ export const register: Register = on => {
   on('tool.check', ($, e, next) =>
     next.origin.plugin === $.plugin.name && OWN_READS.has(e.tool)
       ? { decision: 'allow', reason: 'The CodeBook Factory pane following the story you chose (read only).' }
-      : next(e),
+      : next.origin.plugin === $.plugin.name && e.tool === OWN_CAPTURE
+        ? { decision: 'allow', reason: 'Saving this conversation to your own CodeBook account (/factory capture off stops it).' }
+        : e.tool === OWN_CAPTURE
+          ? { decision: 'deny', reason: 'This is the CodeBook plugin\'s own upload, not a tool for the model.' }
+          : next(e),
   ).catch(($, e, next) => next(e))
 
   // Claude's calls of the connector (the requests the pane offered, the factory-worker's reports): the pane takes
@@ -165,6 +175,11 @@ export const register: Register = on => {
   on('tool.call', async ($, e, next) => {
     const ran = await next(e)
     const tool = String(e.tool)
+    // A session the model called CodeBook in is saved (capture.ts), even if this call failed; the pane's own reads do not count.
+    // Nothing about saving may ever get between a tool call and what follows it, the guard's list included.
+    if (tool.startsWith(OWN_TOOLS) && next.origin.plugin !== $.plugin.name) {
+      try { await markSession($, await $.session.id()) } catch { /* the next call marks it */ }
+    }
     if (!tool.startsWith(OWN_TOOLS) || ran.deny !== undefined || ran.isError) return ran
     const name = tool.slice(OWN_TOOLS.length)
     const data = payloadOf(ran) as { run?: number; brief?: unknown; recorded?: boolean } | null
@@ -227,7 +242,7 @@ export const register: Register = on => {
     await $.command.register({
       name: 'factory',
       description: 'CodeBook factories: open the Factory pane, start a story (run), or show its status',
-      argumentHint: '[run <factory> "<story>" | status | follow <story> | here | cloud | stop]',
+      argumentHint: '[run <factory> "<story>" | status | follow <story> | here | cloud | stop | capture]',
     })
     const storedMode = await $.store.get(STORE_MODE)
     if (storedMode === 'here' || storedMode === 'cloud') await update($, mode, () => storedMode)
@@ -237,6 +252,15 @@ export const register: Register = on => {
     })
     return next(e)
   })
+
+  // Where each session's transcript is, and that there may be something to save. No work here: the timer does it.
+  on('classic.SessionStart', async ($, e, next) => { await noteTranscript($, e.session_id, e.transcript_path).catch(() => {}); return next(e) })
+  on('classic.UserPromptSubmit', async ($, e, next) => { await noteTranscript($, e.session_id, e.transcript_path).catch(() => {}); return next(e) })
+  on('classic.Stop', async ($, e, next) => { await noteTranscript($, e.session_id, e.transcript_path).catch(() => {}); return next(e) })
+  on('classic.SubagentStop', async ($, e, next) => { noteDue(); return next(e) })
+  // After a reload mid-turn the module has forgotten where the transcript is; the next tool call says.
+  on('classic.PostToolUse', async ($, e, next) => { await noteTranscript($, e.session_id, e.transcript_path).catch(() => {}); return next(e) })
+  on('session.end', async ($, e, next) => { await captureAtEnd($, e.sessionId).catch(() => {}); return next(e) })
 
   on('command.run', { command: 'factory' }, async ($, e) => {
     const [verb = '', ...rest] = words(e.args.trim())
@@ -258,6 +282,8 @@ export const register: Register = on => {
     }
 
     if (lower === 'help') return { text: HELP }
+
+    if (lower === 'capture') return { text: await captureCommand($, rest[0] ?? '') }
 
     if (lower === 'list') {
       const failed = await loadFactories($)
