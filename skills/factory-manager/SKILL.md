@@ -101,9 +101,9 @@ number).
    and say which stories touch the same files. Give each sub-agent
    that skill as its instructions, the person's words, the factory's repositories with their `checkout_path`
    (it reads there, `git -C "<checkout_path>" …`), the board, and this task:
-   research read only, then return either the questions the stories need, or 1–6 small stories (title, description
-   with acceptance criteria that can be checked, risk low / medium / high). It changes nothing and cannot talk to the
-   person: its questions come back to you.
+   research read only, then return either the questions the stories need, or 1–6 small stories (title, description,
+   acceptance criteria each with the evidence that will show it, as "Done is agreed up front" below says, risk low /
+   medium / high). It changes nothing and cannot talk to the person: its questions come back to you.
    - **Read only** means commands that read: `git log`/`branch`/`status`/`show`/`worktree list`, `gh pr list`/`view`,
      `gh api` GET, the connector's read tools. Nothing that writes, here or on GitHub: no delete, push, fetch
      `--prune`, worktree `prune`/`remove`, checkout, pull, commit, edit, `gh pr close` or `gh api` with another method.
@@ -158,9 +158,36 @@ user stories", and offer: "I write the stories myself this time, or we add a bus
 `propose_stories` leaves out stories that are already on the factory (`already_there`): tell the person which, and
 pass `new: true` only when they say it really is different work.
 
+**Done is agreed up front.** Every story goes to `propose_stories` with its acceptance criteria in
+`stories[].criteria`, not in the description: `[{ text, evidence, spec }]`, where `text` is what must be true, in one
+sentence, and `evidence` says what will show it:
+
+| `evidence` | `spec` | Where it can be shown |
+|---|---|---|
+| `test` | the test's name, as the test runner will print it | anywhere a proof runs, here included |
+| `command` | a step of the repository's recipe: `test`, `build`, `lint` or `typecheck` | anywhere a proof runs, here included |
+| `browser` | the page's path, such as `/settings` | a browser check on the factory's own runner |
+| `http` | the call and its status, such as `GET /api/health 200` | CodeBook's hosted sandbox only |
+| `sign_off` | what the person checks (optional) | the person, on the story's card on the website |
+
+- These stories run here, so prefer a named test or a recipe step: that is what `request_proof` can show on this
+  computer. Use `http` or `browser` only when the factory can run them, and `sign_off` only where nothing can be run.
+- A criterion nobody can check by running the code is a wish. Have the story writer rewrite it until something can
+  show it, or make it a sign-off and say so.
+- CodeBook marks a criterion met only from a verified run of the code at the pull request's head commit. No tool of
+  yours marks one, a worker's own account does not, and you never sign one off for the person.
+- CodeBook refuses a list it cannot read (`INVALID_INPUT`, with the sentence that says what to fix: no evidence, no
+  spec, a page that is not a path). Fix it and propose again.
+- An older CodeBook does not know `criteria`: its answer has no `stories[].criteria`. Then say that the criteria were
+  not stored as criteria, and propose the story again with them written in its description.
+
 ## 3. "Proceed?"
 
-Show the proposal plainly: its reference (WO-7), each story's title, a one-line summary and risk, and the link. When
+Show the proposal plainly: its reference (WO-7), each story's title, a one-line summary and risk, and the link. Under
+each story list its criteria as `propose_stories` answered them (`stories[].criteria`), each with the evidence that will
+show it ("A person signs in with a valid code: the test `signs in with a valid code` passes"). The person's "proceed" is
+their yes to that list as what done means, so they have to see it. A story with no criteria: say that nothing but an
+agent's word will say it is done, and offer to add criteria before they answer. When
 `propose_stories` answers `stories[].backlog`, the stories are already cards in the board's **Backlog drawer**, marked
 "Proposed · WO-7", running nothing: say so, with each card's link, and that the person may edit them there before
 answering (an older CodeBook keeps them as plan lines only: then they appear after "proceed"). Say who
@@ -191,7 +218,8 @@ its place, and do not add a step of your own to replace it. Then ask, in these w
 
 - Yes → `confirm_stories { proposal }` (the stories run here for you, the proposal's runner). Say which stories moved
   from the Backlog (`from_backlog`) or were created (#58, #59) and where each starts; a card the person had already
-  moved by hand (`moved_by_hand`) stays where they put it.
+  moved by hand (`moved_by_hand`) stays where they put it. `created[].criteria` is each story's list as it stands on
+  its card: if the person edited a criterion in the Backlog, that edit is what was confirmed, so say what changed.
 - They change something → `propose_stories` again with `proposal` to add to it, or `discard_proposal` with `stories`
   for the ones to drop, then ask again.
 - No → `discard_proposal { proposal, reason }`. Its `backlog_cards` say which Backlog cards were removed and which
@@ -214,6 +242,13 @@ Use `story_status { story, after }` for the one story you need the detail of. Po
     and reports them: neither you nor the worker reports a proof. If CodeBook records a pass as blocked for
     "NO PROOF RUN", the checks did not run at the pull request's head commit: say so, and have the station worked
     again. If the factory's repository has no recipe yet, tell the person: Factory settings → Proof runs.
+  - **Criteria.** `story_trail { story }` answers `criteria`: each with its `state` (`met`, `failed` or `none`), `why`,
+    and the proof run that decided it. When a pass is recorded blocked or failed and the card names acceptance criteria
+    ("did not produce verified evidence for…", or "The story's acceptance criteria wait on it"), read them out with
+    each `why`, and have the station worked again: its worker writes the test under the name the criterion gives, or
+    fixes what failed, commits, and asks for a proof. A push puts every run-shown criterion back to `none` until a
+    proof runs on the new commit. A `sign_off` criterion waits for the person on the story's card on the website: tell
+    them which, with the story's link; you cannot sign it.
   - **The model.** CodeBook picks it: `manager_brief.stations[].model.here` (the same as the run's
     `brief.run_here.model.here`). Pass `here.claude` (`haiku`, `sonnet`, `opus` or `fable`) as `model`; when it is
     null, leave `model` out (the session's own model: a station that writes code, or a crew). When the person names a
