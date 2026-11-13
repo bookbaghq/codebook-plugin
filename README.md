@@ -189,8 +189,9 @@ the story and you still approve your stations here. Nothing runs on your compute
 
 ## Permissions
 
-The plugin itself only **reads** CodeBook: the pane lists your factories and follows the story you chose. Every
-change is yours to send. Start, Approve, Send back and moving a story to Claude or to CodeBook put the request,
+The plugin itself only **reads** CodeBook, with two exceptions that are its own work: it uploads your conversation
+(Saving conversations) and it reports the proof runs it made (Proof runs). The pane lists your factories and follows the
+story you chose. Every other change is yours to send. Start, Approve, Send back and moving a story to Claude or to CodeBook put the request,
 in plain words, into your prompt box; you press Enter, and Claude makes the call under your usual permission
 settings (in auto mode, the auto-mode check judges it like anything you type). The pane picks up the answer.
 
@@ -207,14 +208,45 @@ nothing is saved (one notice says so, and `/factory capture status` says how to 
       "mcp__plugin_codebook_codebook__list_factories",
       "mcp__plugin_codebook_codebook__story_status",
       "mcp__plugin_codebook_codebook__story_trail",
-      "mcp__plugin_codebook_codebook__capture_transcript"
+      "mcp__plugin_codebook_codebook__capture_transcript",
+      "mcp__plugin_codebook_codebook__claim_proof"
     ]
   }
 }
 ```
 
-The first three are reads. The last saves your own conversation to your own account. Nothing else skips the check: starting a
+The first three are reads. `capture_transcript` saves your own conversation to your own account. `claim_proof` lets the
+plugin take a proof run you or your agent asked for (see Proof runs); the plugin refuses it to Claude. Nothing else skips the check: starting a
 story, approving, sending back and changing a factory still go through your prompt box and your permission mode.
+
+## Proof runs
+
+CodeBook counts a check as proven when a program ran it and reported the result itself, not when an agent says it did.
+On your computer that program is this plugin.
+
+- **An agent asks, the plugin runs.** When Claude calls `request_proof` for a story, the plugin takes the proof from
+  CodeBook, runs the repository's checks in your checkout (the recipe under Factory settings → Proof runs: test, lint,
+  type check, build), and sends CodeBook each command's exit code, its output, a SHA-256 of that output, the commit that
+  was checked out and whether anything was uncommitted. The story then shows the command as **Verified · run on a
+  person's computer**. Claude reads what CodeBook recorded; it never writes the result.
+- **`/factory prove`** runs a proof that is waiting, such as the one "Try it" queues from Factory settings → Proof runs.
+- **Boxed.** Each command runs under the system's sandbox where there is one: Seatbelt (`sandbox-exec`) on macOS,
+  bubblewrap (`bwrap`) on Linux. It can write only in the checkout, in `~/.codebook/proof` and in the temporary folders;
+  it cannot read `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`, `~/.docker`, `~/.config/gh`, `~/.claude`, `~/.netrc` or
+  `~/.npmrc`; it gets a short list of environment variables (`PATH`, `HOME` and a few more), not your session's; and it
+  reaches only the computer itself unless the recipe says its checks need the network. With no sandbox on the computer
+  the command still runs, and the story says it was not boxed.
+- **Failures that were already there.** When a check fails, the plugin runs it again on the default branch in a separate
+  worktree under `~/.codebook/proof/baseline`, so CodeBook can say which failures are new. Your checkout is never
+  switched, stashed or reset. Dependencies are linked from your checkout when both commits pin the same ones; otherwise
+  the recipe's install line runs in that worktree, with the network.
+- **Commit first.** A run on uncommitted changes is recorded and proves no commit.
+- **Limits.** One command runs for at most ten minutes. The network is the computer itself or everything; a list of
+  allowed hosts is not built. The sandbox limits a repository's test code; it does not make a forged report impossible
+  for a model that set out to send one from your shell, which is why a factory can also require its own runner.
+- **Auto mode** needs `mcp__plugin_codebook_codebook__claim_proof` in `permissions.allow` (below). The plugin refuses that
+  tool to Claude whatever your settings say: it is the plugin's own call, and its answer holds the token the result is
+  reported with.
 
 ## Saving conversations
 
@@ -236,6 +268,8 @@ Claude's chat tab and ChatGPT cannot do this: a connector sees tool calls, never
   summary of what was done, the pull request link and the artifacts the station asks for. And, for a session that calls
   CodeBook, that session's conversation, with secrets removed as best they can be recognised: see Saving conversations.
   `/factory capture off` stops it.
+  And, for a proof run: each command's exit code, the last million characters of its output, a hash of it, the commit
+  and whether the checkout had uncommitted changes (see Proof runs).
 - **To your repository's git remote (for example GitHub)**: the branch and the draft pull request, with your own
   `git` and `gh` credentials.
 - **Nothing else.** The plugin has no servers of its own, no analytics, and no keys in this repository. Your code
@@ -250,6 +284,7 @@ Claude's chat tab and ChatGPT cannot do this: a connector sees tool calls, never
 | `skills/factory-manager/` | The manager skill Run here follows: the code on your computer, stories, "proceed?", stations, people, narration. |
 | `agents/factory-worker.md` | The sub-agent that works one station run here as that station's agent. |
 | `agents/benchmark-worker.md` | The sub-agent that answers one benchmark run here, as the model the manager chose, for CodeBook's judge to grade. |
+| `hooks/proof.ts` | Proof runs: the repository's checks, run here boxed and reported by the plugin itself. |
 | `types/index.d.ts` | The pane's state contract. |
 | `test/` | Tests for `claude plugin test`. |
 | `.claude-plugin/` | The plugin manifest, the marketplace file and the icon. |

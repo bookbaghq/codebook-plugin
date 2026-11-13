@@ -1,6 +1,7 @@
 // The CodeBook plugin's hooks: the /factory command, the Factory pane beside the chat, the timer that follows the
-// story, the repository guard, and saving conversations (capture.ts). The plugin itself only reads CodeBook, apart from that
-// upload of the person's own conversation; every other write is a request the person sends and Claude makes (Run here: the
+// story, the repository guard, saving conversations (capture.ts) and proof runs (proof.ts: the repository's checks, run
+// here and reported by the plugin itself). The plugin itself only reads CodeBook, apart from that upload of the person's
+// own conversation and those proof results; every other write is a request the person sends and Claude makes (Run here: the
 // codebook:factory-manager skill runs the stations with sub-agents).
 
 import { atom, read, update } from 'claude-code'
@@ -30,6 +31,7 @@ import {
 import type { Status } from './factory'
 import { drawPane, PANE } from './pane'
 import { captureAtEnd, captureCommand, captureTick, markSession, noteDue, noteTranscript } from './capture'
+import { runProof, waitingProofs } from './proof'
 
 // The pane's values, declared again here: the engine reads state only through atoms written in the same file.
 // Keep each tag as factory.ts has it.
@@ -89,6 +91,7 @@ const HELP = [
   '/factory follow <story> [<factory>] — follow a story already on the board (#57 needs the factory)',
   '/factory here | cloud — where agent stations of the next story run',
   '/factory stop — stop following the story',
+  '/factory prove [<proof>] — run a waiting proof run here: the repository\'s checks, run and reported by the plugin itself',
   '/factory capture [on | off | backfill] — whether this computer saves conversations that use CodeBook to your account',
 ].join('\n')
 
@@ -130,6 +133,9 @@ const OWN_TOOLS = 'mcp__plugin_codebook_codebook__'
 /** The reads the pane makes by itself (following the story the person chose); writes go through the person. */
 /** The plugin's own upload of this session's transcript (capture.ts). Its own rows, for its owner; it decides nothing. */
 const OWN_CAPTURE = `${OWN_TOOLS}capture_transcript`
+/** The plugin's own taking of a proof run (proof.ts): its answer carries the token the result is reported with, so the model never makes this call. */
+const OWN_CLAIM = `${OWN_TOOLS}claim_proof`
+const CLAIM_REFUSED = 'This is the CodeBook plugin\'s own call: it takes a proof run and reports the result itself. Ask for a proof with request_proof; you cannot run or report one.'
 const OWN_READS = new Set(
   [
     'list_factories',
@@ -167,12 +173,18 @@ export const register: Register = on => {
         ? { decision: 'allow', reason: 'Saving this conversation to your own CodeBook account (/factory capture off stops it).' }
         : e.tool === OWN_CAPTURE
           ? { decision: 'deny', reason: 'This is the CodeBook plugin\'s own upload, not a tool for the model.' }
-          : next(e),
+          : next.origin.plugin === $.plugin.name && e.tool === OWN_CLAIM
+            ? { decision: 'allow', reason: 'The CodeBook plugin taking a proof run you or your agent asked for, to run the repository\'s checks here.' }
+            : e.tool === OWN_CLAIM
+              ? { decision: 'deny', reason: CLAIM_REFUSED }
+              : next(e),
   ).catch(($, e, next) => next(e))
 
   // Claude's calls of the connector (the requests the pane offered, the factory-worker's reports): the pane takes
   // up a started story and refreshes after the rest.
   on('tool.call', async ($, e, next) => {
+    // The model never takes a proof run: the answer holds the token its result is reported with (proof.ts).
+    if (String(e.tool) === OWN_CLAIM && next.origin.plugin !== $.plugin.name) return { deny: CLAIM_REFUSED }
     const ran = await next(e)
     const tool = String(e.tool)
     // A session the model called CodeBook in is saved (capture.ts), even if this call failed; the pane's own reads do not count.
@@ -197,8 +209,22 @@ export const register: Register = on => {
       await update($, claims, list => list.filter(one => one.run !== run))
     }
     await adopt($, name, data)
+    // A proof the model asked for is run here and now, by the plugin: the commands, the sandbox and the report are
+    // proof.ts's, and the model reads only what CodeBook recorded. A failure to run it never fails the model's call.
+    if (name === 'request_proof') {
+      const asked = (data as { proof?: unknown } | null)?.proof
+      if (typeof asked === 'number') {
+        let told: string
+        try {
+          told = (await runProof($, { proof: asked, known: await read($, checkouts) })).text
+        } catch (error) {
+          told = `The CodeBook plugin could not run proof ${asked} here: ${error instanceof Error ? error.message : String(error)}. It is still waiting; /factory prove tries again.`
+        }
+        return { ...ran, context: [...(ran.context ?? []), told] }
+      }
+    }
     return ran
-  }).catch(($, e, next) => next(e))
+  }).catch(($, e, next) => (next.called ? next(e) : String(e.tool) === OWN_CLAIM ? { deny: CLAIM_REFUSED } : next(e)))
 
   // The repository guard (G5 decision 6): while this session works a CodeBook run, pushes and pull requests reach only
   // the repositories its brief lists. Outside CodeBook work it stands aside. It only ever refuses.
@@ -242,7 +268,7 @@ export const register: Register = on => {
     await $.command.register({
       name: 'factory',
       description: 'CodeBook factories: open the Factory pane, start a story (run), or show its status',
-      argumentHint: '[run <factory> "<story>" | status | follow <story> | here | cloud | stop | capture]',
+      argumentHint: '[run <factory> "<story>" | status | follow <story> | here | cloud | stop | capture | prove]',
     })
     const storedMode = await $.store.get(STORE_MODE)
     if (storedMode === 'here' || storedMode === 'cloud') await update($, mode, () => storedMode)
@@ -284,6 +310,18 @@ export const register: Register = on => {
     if (lower === 'help') return { text: HELP }
 
     if (lower === 'capture') return { text: await captureCommand($, rest[0] ?? '') }
+
+    if (lower === 'prove') {
+      const wanted = rest[0] ? Number(rest[0].replace(/^#/, '')) : null
+      if (wanted !== null && !Number.isSafeInteger(wanted)) return { text: 'Usage: /factory prove [<proof number>]' }
+      if (wanted === null) {
+        const peeked = await waitingProofs($)
+        if (!peeked.ok) return { text: peeked.message }
+        if (peeked.waiting.length === 0) return { text: 'No proof run is waiting for this computer. One is asked for by an agent (request_proof) or with "Try it" under Factory settings → Proof runs.' }
+      }
+      const done = await runProof($, { proof: wanted, known: await read($, checkouts) })
+      return { text: done.text }
+    }
 
     if (lower === 'list') {
       const failed = await loadFactories($)

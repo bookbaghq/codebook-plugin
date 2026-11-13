@@ -209,6 +209,11 @@ Use `story_status { story, after }` for the one story you need the detail of. Po
   `codebook:factory-worker` sub-agent for that run (`subagent_type: "codebook:factory-worker"`), telling it the run
   number, the story, the station, the agent's name and the `checkout_path` from step 0. Say: "Alex (Developer) is
   working #58 at Build, spawned here."
+  - **Proof.** A station whose pass needs a proof run says so in its brief (`brief.proof.required`). The worker asks
+    for one with `request_proof` after its last commit, and the CodeBook plugin runs the repository's checks itself
+    and reports them: neither you nor the worker reports a proof. If CodeBook records a pass as blocked for
+    "NO PROOF RUN", the checks did not run at the pull request's head commit: say so, and have the station worked
+    again. If the factory's repository has no recipe yet, tell the person: Factory settings → Proof runs.
   - **The model.** CodeBook picks it: `manager_brief.stations[].model.here` (the same as the run's
     `brief.run_here.model.here`). Pass `here.claude` (`haiku`, `sonnet`, `opus` or `fable`) as `model`; when it is
     null, leave `model` out (the session's own model: a station that writes code, or a crew). When the person names a
