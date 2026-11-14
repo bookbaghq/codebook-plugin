@@ -182,6 +182,9 @@ function engine(on: On, at: { now: At; asks58?: boolean; session?: string; store
     return { result: { content: [{ type: 'text', text: JSON.stringify(data) }], structuredContent: data }, text: JSON.stringify(data) }
   })
   function answer(tool: string, args: Record<string, unknown>) {
+    if (tool === 'work_orders') return { work_order: { reference: 'WO-7', title: 'Migrate exporter', status: 'open', paused: true }, factory_paused: false,
+      milestones: [{ milestone: 1, label: 'Needs a person', check: { needs_person: true, latest: { steps: [{ status: 'failed', title: 'Amounts agree', commit_sha: '0123456789abcdef', run_id: 32, detail: 'Expected 100, saw 99.' }] } } }],
+      questions: [{ question: 'Include refunds?' }], money: { total_usd: 0.25, complete: false, tokens: 90, sandbox: { seconds: 30, usd: null } } }
     return tool === 'start_story'
         ? {
             story: { story: '6KjN', reference: '#57', title: String(args.title) },
@@ -286,6 +289,30 @@ test('Work it here offers the worker request for a station waiting here', async 
   expect(filled.at(-1)).toContain('codebook:factory-worker')
   expect(filled.at(-1)).toContain('run 811')
   await ui.unmount()
+})
+
+test('a new terminal can read an overnight report without approving, resuming or running a model', async ($, on) => {
+  const { calls, prompts, filled } = engine(on, { now: 'build' })
+  const bad = await $.command.run(typed('report Payments'))
+  expect(bad.text).toContain('Usage:')
+  const r = await $.command.run(typed('report Platform Payments WO-7'))
+  expect(calls).toEqual([{ tool: 'work_orders', args: { factory: 'Platform Payments', order: 'WO-7' } }])
+  for (const detail of ['paused', 'A person needs to decide', 'failed: Amounts agree', 'commit 0123456789abcdef', 'run #32', 'Expected 100, saw 99.', 'Include refunds?', '$0.2500 (partial)', 'Unpriced sandbox time: 30s']) expect(r.text).toContain(detail)
+  expect([...prompts, ...filled].length).toBe(0)
+})
+
+test('overnight proposes a cloud work order even when this session normally runs here', async ($, on) => {
+  const { filled, calls } = engine(on, { now: 'build' })
+  await $.command.run(typed('overnight Payments "Modernize the invoice exporter"'))
+  expect(filled[0]).toContain('Modernize the invoice exporter')
+  expect(filled[0]).toContain('propose_stories with run_location "cloud"')
+  expect(filled[0]).toContain('ask "proceed?" before confirm_stories')
+  expect(filled[0]).toContain('manager’s token ceiling')
+  expect(filled[0]).toContain('open_sub_manager in fresh mode')
+  expect(calls.some(c => ['propose_stories', 'confirm_stories', 'open_sub_manager'].includes(c.tool))).toBe(false)
+  const refused = await $.command.run(typed('overnight Payments "Upgrade the worker" --here'))
+  expect(refused.text).toContain('Overnight work runs in CodeBook')
+  expect(filled.length).toBe(1)
 })
 
 test('a cloud story is offered with run_location cloud', async ($, on) => {
