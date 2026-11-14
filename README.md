@@ -51,6 +51,7 @@ do what you can do on app.codebook.work.
 | Type | What happens |
 | --- | --- |
 | `/factory` | Opens the Factory pane. Pick a factory and type what it should make. |
+| `/factory report Payments WO-7` | Reopen the work order from any signed-in session. See milestone results, evidence commits, decisions and recorded cost without starting a model or resuming work. |
 | `/factory overnight Payments "Migrate the invoice exporter"` | Draft a cloud work order with milestones and acceptance checks. Review the plan and its manager’s token ceiling. Once approved, the cloud manager supervises the work and reports back after you close the terminal. |
 | `/factory run Payments "Let customers refund a payment"` | Starts a story in the Payments factory and follows it in the pane. Add `--here` or `--cloud` to choose for this story. |
 | `/factory status` | Where the story is, station by station, and where each repository's code is on this computer (checked as you ask). |

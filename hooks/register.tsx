@@ -31,6 +31,7 @@ import {
   unfollow,
 } from './factory'
 import type { Status } from './factory'
+import { orderReport, type WorkOrderReport } from './work-order-report'
 import { drawPane, PANE } from './pane'
 import { captureAtEnd, captureCommand, captureTick, markSession, noteDue, noteTranscript } from './capture'
 import { runProof, waitingProofs } from './proof'
@@ -87,6 +88,7 @@ async function openPane($: EngineInterface): Promise<boolean> {
 
 const HELP = [
   '/factory — open the Factory pane (pick a factory, follow a story)',
+  '/factory report <factory> <WO-7> — read milestones, evidence, questions and recorded cost',
   '/factory overnight <factory> "<goal>" — propose a cloud work order with milestones',
   '/factory run <factory> "<story title>" [--here | --cloud] — start a story and follow it',
   "/factory status — where the followed story is, and where each repository's code is on this computer",
@@ -146,6 +148,7 @@ const OWN_READS = new Set(
   [
     'list_factories',
     'factory_board',
+    'work_orders',
     'story_status',
     'list_my_work',
     'manager_brief',
@@ -428,6 +431,13 @@ export const register: Register = on => {
       }
     }
 
+    if (lower === 'report') {
+      const order = rest.at(-1) ?? '', factory = rest.slice(0, -1).join(' ')
+      if (!factory || !/^wo-?[1-9]\d*$/i.test(order)) return { text: 'Usage: /factory report <factory> <WO-7>' }
+      const got = await call<WorkOrderReport>($, 'work_orders', { factory, order })
+      if (!got.ok) return { text: got.message }
+      return { text: orderReport(got.data) }
+    }
     if (lower === 'status') return statusText($)
 
     if (lower === 'follow') {
