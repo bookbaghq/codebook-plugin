@@ -8,22 +8,29 @@ Run your [CodeBook](https://app.codebook.work) factories from Claude Code. Start
 
 ## Install
 
-In the Claude Code desktop app: click **+** next to the prompt box, then **Plugins**, **Add marketplace**, enter
-`bookbaghq/codebook-plugin`, then add the **codebook** plugin.
-
-At the prompt of a terminal session:
-
-```
-/plugin install codebook --marketplace bookbaghq/codebook-plugin
-```
-
-From a shell:
+From a shell with Claude Code installed, add Bookbag’s public marketplace and install the plugin for your user profile:
 
 ```bash
-claude plugin install codebook --marketplace bookbaghq/codebook-plugin
+claude plugin marketplace add bookbaghq/codebook-plugin
+claude plugin install codebook@codebook --scope user
+claude plugin list
 ```
 
-Answer `y` to add the marketplace, then pick a scope (user scope makes it available in every project).
+Look for **codebook@codebook**, a version number, **user** scope and **enabled** status. To inspect its agents, skill and MCP server, run `claude plugin details codebook@codebook`. Start Claude Code, or enter `/reload-plugins` in an open session, then enter `/factory help` at the Claude Code prompt.
+
+You can also install in one shell command with `claude plugin install codebook --marketplace bookbaghq/codebook-plugin`, or enter `/plugin install codebook --marketplace bookbaghq/codebook-plugin` at the Claude Code prompt. In the **Code** view of Claude Desktop, open **+ → Plugins → Add marketplace**, enter `bookbaghq/codebook-plugin`, then add **codebook**. User scope makes the plugin available across your projects.
+
+## Update
+
+Refresh the marketplace, update the plugin in its installed scope, and check the version:
+
+```bash
+claude plugin marketplace update codebook
+claude plugin update codebook@codebook --scope user
+claude plugin list
+```
+
+Reload plugins in an open Claude Code session or start a new one. For Windows and WSL setup, sign-in troubleshooting, and removal, see the [CodeBook support guide](https://codebook.work/docs/claude-and-chatgpt/connect-claude).
 
 ## Sign in
 
