@@ -321,7 +321,7 @@ export const register: Register = on => {
     await $.command.register({
       name: 'factory',
       description: 'CodeBook factories: open the Factory pane, start a story (run), or show its status',
-      argumentHint: '[run <factory> "<story>" | status | follow <story> | here | cloud | stop | outside | inside | capture | prove]',
+      argumentHint: '[overnight <factory> "<goal>" | report <factory> <WO-7> | run <factory> "<story>" | status | follow <story> | here | cloud | stop | outside | inside | capture | prove]',
     })
     // Which factory works on this folder's repository, asked now so the first prompt need not wait (never awaited, never fatal).
     try { await sweepCheckouts($) } catch { /* next session */ }
