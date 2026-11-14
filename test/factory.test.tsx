@@ -187,7 +187,10 @@ function engine(on: On, at: { now: At; asks58?: boolean; session?: string; store
       ...(at.controls && { spend_balance: { available_usd: '17.2500', reserved_usd: '5.0000', spent_usd: '2.7500' },
         production_watch: { enabled: true, owner_name: 'Mia', filter: 'Export failed', can_decide: false, hold_id: 82, incidents: [
           { id: 82, title: 'Export failed twice', severity: 'high', deployed_service: 'exporter', pull_number: 92, commit: 'abc123', incident_url: 'https://monitor.example/23', deploy_url: 'https://deploy.example/55', resumed_at: null, resumed_by: null },
-          { id: 77, title: 'Earlier export failure', pull_number: 88, commit: 'bc1234', resumed_at: 42, resumed_by: 'Tom' }] } }),
+          { id: 77, title: 'Earlier export failure', pull_number: 88, commit: 'bc1234', rollback_decision: 'rolled_back', decision_note: 'Previous release restored.', resumed_at: 42, resumed_by: 'Tom' },
+          { id: 76, title: 'Retry burst', resumed_at: 41, resumed_by: 'Tom', rollback_decision: 'kept_deployment' },
+          { id: 75, title: 'Historical alert', resumed_at: 39, resumed_by: 'Sam' },
+          { id: 81, title: 'Another unresolved alert', resumed_at: null, resumed_by: null }] } }),
       milestones: [{ milestone: 1, label: 'Needs a person', check: { needs_person: true, latest: { steps: [{ status: 'failed', title: 'Amounts agree', commit_sha: '0123456789abcdef', run_id: 32, detail: 'Expected 100, saw 99.' }] } } }],
       questions: [{ question: 'Include refunds?' }], money: { total_usd: 0.25, complete: false, tokens: 90, sandbox: { seconds: 30, usd: null } } }
     return tool === 'start_story'
@@ -311,7 +314,7 @@ test('a new terminal can read an overnight report without approving, resuming or
 test('report reads order limits, reserved funds, a held operation and the human production decision', async ($, on) => {
   const { calls, prompts, filled } = engine(on, { now: 'build', controls: true })
   const report = await $.command.run(typed('report Payments WO-7'))
-  for (const text of ['spend limit at configured rates: $25.0000', '$17.2500 available', '$5.0000 reserved', '$2.7500 recorded', '2030-05-15T12:00:00.000Z (reached', 'This model has no configured price.', 'Mia watches alerts containing "Export failed"', 'Production hold #82', 'Review is with the watch owner or work-order creator', 'Export failed twice (high, exporter, PR #92, commit abc123)', 'https://monitor.example/23', 'https://deploy.example/55', 'resumed by Tom']) expect(report.text).toContain(text)
+  for (const text of ['spend limit at configured rates: $25.0000', '$17.2500 available', '$5.0000 reserved', '$2.7500 recorded', '2030-05-15T12:00:00.000Z (reached', 'This model has no configured price.', 'Mia watches alerts containing "Export failed"', 'Production hold #82', 'Review is with the watch owner or work-order creator', 'Export failed twice (high, exporter, PR #92, commit abc123)', 'https://monitor.example/23', 'https://deploy.example/55', 'resumed by Tom', 'Rolled back — Previous release restored.', 'Kept deployment', 'Decision not recorded', 'Another unresolved alert']) expect(report.text).toContain(text)
   expect(calls).toEqual([{ tool: 'work_orders', args: { factory: 'Payments', order: 'WO-7' } }])
   expect([...prompts, ...filled].length).toBe(0)
 })

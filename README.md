@@ -51,7 +51,7 @@ do what you can do on app.codebook.work.
 | Type | What happens |
 | --- | --- |
 | `/factory` | Opens the Factory pane. Pick a factory and type what it should make. |
-| `/factory report Payments WO-7` | Reopen the work order from any signed-in session. Read milestone evidence, recorded cost, remaining budget, deadline, held operations and production decisions. The command makes one read-only request. |
+| `/factory report Payments WO-7` | Reopen the work order from any signed-in session. Read milestone evidence, recorded cost, remaining budget, deadline, held operations and production decisions. For reviewed production alerts, see whether the owner rolled back or kept the deployment and the note they recorded. The command makes one read-only request. |
 | `/factory overnight Payments "Migrate the invoice exporter"` | Draft a cloud work order with milestones and acceptance checks. Review the plan and its manager’s token ceiling. Once approved, the cloud manager supervises the work and reports back after you close the terminal. Later milestones follow your factory’s approval policy. |
 | `/factory run Payments "Let customers refund a payment"` | Starts a story in the Payments factory and follows it in the pane. Add `--here` or `--cloud` to choose for this story. |
 | `/factory status` | Where the story is, station by station, and where each repository's code is on this computer (checked as you ask). |

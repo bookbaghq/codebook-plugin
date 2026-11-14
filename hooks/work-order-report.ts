@@ -6,6 +6,7 @@ type SpendBalance = { available_usd: string; reserved_usd: string; spent_usd: st
 type ProductionIncident = {
   id: number; title: string; severity: string | null; pull_number: number; commit: string | null
   deployed_service: string | null; incident_url: string | null; deploy_url: string | null
+  rollback_decision?: 'rolled_back' | 'kept_deployment' | null; decision_note?: string | null
   resumed_at: number | null; resumed_by: string | null
 }
 type ProductionWatch = {
@@ -38,9 +39,13 @@ export function orderReport(report: WorkOrderReport): string {
     lines.push('Production hold #' + watch.hold_id + '. ' + (watch.can_decide ? 'You can review this hold.' : 'Review is with the watch owner or work-order creator.') + ' Assess customer impact and decide whether to roll back in the deployment system before resuming the order.')
   }
   for (const incident of watch?.incidents ?? []) {
-    if (incident.id !== watch?.hold_id && !incident.resumed_at) continue
+    if (!watch?.hold_id && !incident.resumed_at) continue
     const evidence = [incident.severity, incident.deployed_service, incident.pull_number ? 'PR #' + incident.pull_number : '', incident.commit ? 'commit ' + incident.commit : ''].filter(Boolean).join(', ')
     lines.push('  ' + incident.title + (evidence ? ' (' + evidence + ')' : '') + (incident.resumed_at ? ' — resumed by ' + (incident.resumed_by || 'a person') + '.' : ''))
+    if (incident.resumed_at) {
+      const choice = incident.rollback_decision === 'rolled_back' ? 'Rolled back' : incident.rollback_decision === 'kept_deployment' ? 'Kept deployment' : 'Decision not recorded'
+      lines.push('  ' + choice + (incident.decision_note ? ' — ' + incident.decision_note : ''))
+    }
     if (incident.incident_url) lines.push('  Alert: ' + incident.incident_url)
     if (incident.deploy_url) lines.push('  Deployment: ' + incident.deploy_url)
   }
