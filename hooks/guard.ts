@@ -26,7 +26,10 @@ export type Check =
   | { kind: 'hooks'; cwd: string | null; isLost: boolean }
 
 /** A command as the guard reads it: the pushes and pull requests it names, and what else to look into. */
-export type Reading = { targets: Target[]; checks: Check[]; programs: string[]; pushLike: boolean }
+export type Reading = { targets: Target[]; checks: Check[]; programs: string[]; pushLike: boolean; merges: Merge[] }
+
+/** A `gh pr merge` a command would make: the folder it runs in and the repository it names, if it names one (0.20.0). */
+export type Merge = { cwd: string | null; repo: string | null }
 
 /** `github.com/owner/name` from any spelling of a GitHub remote (https, ssh, scp-like, with or without .git). */
 export function repoOf(remote: string): string | null {
@@ -54,7 +57,7 @@ export function allowedOf(brief: unknown): string[] {
  * Anything that might push, open a pull request or change where a push goes. A command without any of these is not
  * read at all (`git log`, `npm test`); one with any of them is read word by word, and what cannot be read is refused.
  */
-const PUSH_LIKE = /\bpush|send-pack|\bpr\s+(?:create|new)\b|\bpulls\b|createpullrequest|\bmutation\b|\bgh\b[^\n]*\bapi\b|set-url|\bremote\.|\burl\.|insteadof|\bGIT_\w+/i
+const PUSH_LIKE = /\bpush|send-pack|\bpr\s+(?:create|new|merge)\b|\bpulls\b|createpullrequest|\bmutation\b|\bgh\b[^\n]*\bapi\b|set-url|\bremote\.|\burl\.|insteadof|\bGIT_\w+/i
 
 /** Whether text (a command, an alias's expansion, a script's body) might push or open a pull request. */
 export function isPushLike(text: string): boolean {
@@ -413,7 +416,7 @@ function readGit(argv: string[], cwd: string | null): GitRead {
 const GH_PR_VALUES = new Set(['-t', '--title', '-b', '--body', '-F', '--body-file', '-B', '--base', '-H', '--head', '-a', '--assignee', '-l', '--label', '-m', '--milestone', '-p', '--project', '-r', '--reviewer', '-T', '--template', '--recover', '-R', '--repo'])
 const GH_API_VALUES = new Set(['-X', '--method', '-f', '--raw-field', '-F', '--field', '-H', '--header', '--input', '-q', '--jq', '-t', '--template', '--hostname', '--cache', '-p', '--preview', '-R', '--repo'])
 
-type GhRead = { pr?: { repo: string | null }; isUnreadable?: boolean; other?: string }
+type GhRead = { pr?: { repo: string | null }; merge?: { repo: string | null }; isUnreadable?: boolean; other?: string }
 
 /** One `gh …` command: the pull request it opens (with its `-R`/`--repo`), or that it writes where the guard cannot read. */
 function readGh(argv: string[]): GhRead {
@@ -424,6 +427,16 @@ function readGh(argv: string[]): GhRead {
     else if (!word.startsWith('-')) positional.push(word)
   }
   const [command = '', sub = ''] = positional
+  if (command === 'pr' && sub === 'merge') {
+    let repo: string | null = null
+    for (let at = 1; at < argv.length; at++) {
+      const word = argv[at] ?? ''
+      if (word === '-R' || word === '--repo') repo = argv[at + 1] ?? null
+      else if (word.startsWith('--repo=')) repo = word.slice('--repo='.length)
+      else if (/^-R\S+$/.test(word)) repo = word.slice(2).replace(/^=/, '')
+    }
+    return { merge: { repo } }
+  }
   if (command === 'pr' && (sub === 'create' || sub === 'new')) {
     let repo: string | null = null
     for (let at = 1; at < argv.length; at++) {
@@ -540,7 +553,8 @@ export function readCommand(full: string): Reading | null {
   // (`f(){ git "$1"sh …; }; f pu`) or an eval may hide a push without saying "push".
   const hidesGit = /(?:\b[A-Za-z_][\w-]*\s*\(\s*\)\s*\{|\bfunction\s+[A-Za-z_]|\beval\b)[\s\S]*\b(?:git|gh)\b|\b(?:git|gh)\b[\s\S]*\beval\b/.test(full)
   const programs: string[] = []
-  const unreadable = (): Reading | null => (pushLike || hidesGit ? null : { targets: [], checks, programs, pushLike })
+  const merges: Merge[] = []
+  const unreadable = (): Reading | null => (pushLike || hidesGit ? null : { targets: [], checks, programs, pushLike, merges: [] })
   const { text: command, isRun } = stripHeredocs(full)
   if (pushLike && (isRun || /\$\(|`|<\(|>\(/.test(command))) return null
   const simple = simpleCommands(command)
@@ -610,6 +624,10 @@ export function readCommand(full: string): Reading | null {
         if (isLost) return unreadable()
         targets.push({ kind: 'pr', cwd, repo: read.pr.repo ?? prefixGhRepo ?? ghRepo, ...(ghRepoUnset ? { ghRepoUnset: true } : {}) })
       }
+      if (read.merge) {
+        if (isLost) return unreadable()
+        merges.push({ cwd, repo: read.merge.repo ?? prefixGhRepo ?? ghRepo })
+      }
       continue
     }
     if (INERT.has(name)) continue
@@ -632,5 +650,5 @@ export function readCommand(full: string): Reading | null {
   if (pushLike && feedsPush && checks.some(check => check.kind === 'file' || check.kind === 'npm' || check.kind === 'make')) return null
   // Any git command runs the repository's hooks (pre-commit, pre-push): resolve.ts reads them.
   if (sawGit) checks.push({ kind: 'hooks', cwd: gitCwd, isLost })
-  return { targets, checks, programs, pushLike }
+  return { targets, checks, programs, pushLike, merges }
 }

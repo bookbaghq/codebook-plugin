@@ -32,7 +32,8 @@ Call `claim_work { run }`. Keep from its answer:
   `complete_work`. Without it, or with an old one, CodeBook refuses the call.
 - `brief.agent`: the station's own agent and its skill. **Be that agent**: follow its instructions as your own
   (when it says `fetch`, call `get_instructions { run }`).
-- the story card (title, description with acceptance criteria, checklist, comments), the station's instructions,
+- the story card (title, description, checklist, comments) and its acceptance criteria, each with the evidence that
+  must show it (`story_trail { story }` → `criteria`, when the brief does not list them), the station's instructions,
   what it must produce (`must_produce`, `artifact_kinds`), earlier artifacts, and what pass, fail and blocked mean.
 - `brief.run_here`:
   - `repositories`: the ONLY repositories you may change (name, url, default_branch, writable).
@@ -122,8 +123,12 @@ as a test database, a name with your run number where the repository lets you. N
 locked database is not a failure of the change: run it again, alone if you can, and say so.
 
 **The story-writing station** (`story_writing.may_propose_stories` true): write the stories as a proposal with
-`propose_stories { factory, request, stories, run, fence }`, following its `how`. They become stories only when the
-person confirms; never create stories any other way. Put the proposal's reference in your summary.
+`propose_stories { factory, request, stories, run, fence }`, following its `how`. Give each story its acceptance criteria
+in `stories[].criteria` as `[{ text, evidence, spec }]`: what must be true, and what will show it — `test` (the test's
+name as the runner will print it), `command` (a step of the repository's recipe: `test`, `build`, `lint`, `typecheck`),
+`browser` (the page's path), `http` (`GET /api/health 200`; CodeBook's hosted sandbox only) or `sign_off` (a person,
+only where nothing can be run). They become stories only when the person confirms; never create stories any other way.
+Put the proposal's reference in your summary.
 
 **Planning or review stations** that produce text: write it as the station asks and record it with `run_artifact`.
 
@@ -168,6 +173,10 @@ verified evidence. The call's answer ends with what CodeBook recorded. You do no
 cannot report them: there is no argument that carries a result.
 
 - **Commit first.** A proof on uncommitted changes proves no commit and does not count for the pull request's head.
+- **The story's criteria are met by that proof, not by you.** A criterion whose evidence is a test is met when a test of
+  exactly that name appears in the proof's results and passes: give the test that name. One whose evidence is a recipe
+  step is met when that step exits 0. `story_trail { story }` → `criteria` says which are met and why not. You cannot
+  mark one met, and a `sign_off` criterion is the person's: say in your summary that it waits for them.
 - `brief.proof.required` true means a `pass` here is recorded **blocked** without a proof run at the pull request's head
   commit, and **failed** when that run has new failures. Fix what it names, commit, and ask again. A failure the answer
   marks as also failing on the default branch is not yours and does not stop a pass.
