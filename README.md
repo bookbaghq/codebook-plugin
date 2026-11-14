@@ -101,6 +101,8 @@ Everything else is instruction: Claude is told to work through the factory, and 
 connector's own instructions, and a block in the repository's `AGENTS.md` that an owner or admin adds with one draft pull
 request from the Repository report in CodeBook ("Assistants", under each repository). Codex reads `AGENTS.md` at the
 start of every run.
+In a trial with the Codex CLI, the block made Codex ask CodeBook first (and stop and ask you when CodeBook was not
+connected); the connector's instructions alone did not. So add the block to each repository a factory works on.
 
 ## The two run modes
 
