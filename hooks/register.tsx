@@ -1,5 +1,5 @@
 // The CodeBook plugin's hooks: the /factory command, the Factory pane beside the chat, the timer that follows the
-// story, the repository guard, saving conversations (capture.ts) and proof runs (proof.ts: the repository's checks, run
+// story, the repository guard, a checkout that knows its factory (checkout.ts), saving conversations (capture.ts) and proof runs (proof.ts: the repository's checks, run
 // here and reported by the plugin itself). The plugin itself only reads CodeBook, apart from that upload of the person's
 // own conversation and those proof results; every other write is a request the person sends and Claude makes (Run here: the
 // codebook:factory-manager skill runs the stations with sub-agents).
@@ -10,7 +10,9 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { CodebookActive, CodebookCheckout, CodebookClaim, CodebookLink, CodebookMode, CodebookStory, CodebookWatch } from '../types'
 import { call, words } from './connector'
 import { allowedOf, readCommand } from './guard'
-import { checkOne, checkShellWords, reaches, shellState } from './resolve'
+import { checkOne, checkShellWords, folderOf, reaches, shellState } from './resolve'
+import { adoptCheckout, askAtStart, askBefore, checkoutLine, contextBlock, outsideCommand, promptNote, sweepCheckouts } from './checkout'
+import type { Reach } from './checkout'
 import { checkoutLines, checkoutsOf, mergeCheckouts } from './local'
 import {
   adopt,
@@ -91,6 +93,7 @@ const HELP = [
   '/factory follow <story> [<factory>] — follow a story already on the board (#57 needs the factory)',
   '/factory here | cloud — where agent stations of the next story run',
   '/factory stop — stop following the story',
+  '/factory outside | inside — in a factory\'s checkout: work outside the factory for this session (no story first, no question before a push), or through it again',
   '/factory prove [<proof>] — run a waiting proof run here: the repository\'s checks, run and reported by the plugin itself',
   '/factory capture [on | off | backfill] — whether this computer saves conversations that use CodeBook to your account',
 ].join('\n')
@@ -99,7 +102,9 @@ async function statusText($: EngineInterface): Promise<{ text: string; context?:
   const known = await read($, checkouts)
   const code = known.length > 0 ? ['The code on this computer:', ...(await checkoutLines($, known))].join('\n') : ''
   const followed = await storyText($)
-  return { ...followed, text: [followed.text, code].filter(Boolean).join('\n\n') }
+  // Whether the folder this session is in is a factory's checkout (checkout.ts).
+  const here = await checkoutLine($).catch(() => null)
+  return { ...followed, text: [followed.text, here ?? '', code].filter(Boolean).join('\n\n') }
 }
 
 async function storyText($: EngineInterface): Promise<{ text: string; context?: string[] }> {
@@ -146,6 +151,8 @@ const OWN_READS = new Set(
     'read_agent_conversations',
     'story_trail',
     'factory_events',
+    // Which of the person's factories work on the repository this session is in (checkout.ts): asked by the plugin itself.
+    'checkout_factory',
   ].map(
     name => OWN_TOOLS + name,
   ),
@@ -198,6 +205,8 @@ export const register: Register = on => {
     // Where each repository's code is on this computer, for /factory status.
     const local = checkoutsOf(name, data)
     if (local !== null) await update($, checkouts, list => mergeCheckouts(list, local))
+    // What CodeBook said about a repository's factory, or that the person's own switch for it changed (checkout.ts).
+    try { await adoptCheckout($, name, e, data) } catch { /* the next prompt asks again */ }
     if (OWN_READS.has(tool)) return ran
     // The guard's list: a claim brings its brief's repositories, a report ends the claim.
     if (name === 'claim_work' && typeof data?.run === 'number') {
@@ -264,12 +273,55 @@ export const register: Register = on => {
     return next(e)
   }).catch(($, e, next) => (next.called ? next(e) : { deny: 'CodeBook: the repository guard failed, so the push was not made. Try again.' }))
 
+  // A checkout that knows its factory (checkout.ts). In a factory's checkout, outside a station's run, a push, a pull
+  // request or a merge is put to the person: they allow it ("myself, this once") or refuse it and have the factory do the
+  // work. It only ever asks, it never refuses, and in any other folder it does nothing. /factory outside turns it off
+  // for the session. A failure here stands aside: the engine's own decision is the answer.
+  on('tool.check', { tool: 'Bash' }, async ($, e, next) => {
+    const command = String((e.input as { command?: unknown } | null)?.command ?? '')
+    const below = await next(e)
+    if (below.decision === 'deny' || !/\bpush\b|\bpr\s+(?:create|new|merge)\b/.test(command)) return below
+    // While a run is held, the repository guard below decides: its pushes are the station's own.
+    if ((await read($, claims)).length > 0) return below
+    const reading = readCommand(command)
+    const reaches: Reach[] = []
+    if (reading === null) reaches.push({ what: 'push', dir: await $.session.cwd() })
+    else {
+      for (const target of reading.targets) reaches.push({ what: target.kind, dir: await folderOf($, target.cwd) })
+      for (const merge of reading.merges) reaches.push({ what: 'merge', dir: await folderOf($, merge.cwd) })
+    }
+    if (reaches.length === 0) return below
+    const why = await askBefore($, reaches, 2500)
+    return why === null ? below : { decision: 'ask', reason: why }
+  }).catch(($, e, next) => next(e))
+
+  // The conversation's own context, at its first request and again after a compaction: in a factory's checkout, the
+  // manager's instructions as CodeBook words them. In any other folder, nothing.
+  on('prompt.context', async ($, e, next) => {
+    let note: string | null = null
+    try { note = await contextBlock($, 3000) } catch { note = null }
+    return next(note === null ? e : { ...e, blocks: [...e.blocks.filter(block => block.name !== 'codebookFactory'), { name: 'codebookFactory', text: note }] })
+  }).catch(($, e, next) => next(e))
+
+  // Each prompt: when the session has come into a factory's checkout the model was not told about (the answer arrived
+  // after the conversation began, or the session moved to another folder), the note rides with this prompt; one line
+  // when it has left one. Nothing otherwise, and a slash command is left alone.
+  on('prompt.submit', async ($, e, next) => {
+    if (e.command) return next(e)
+    let note: string | null = null
+    try { note = await promptNote($, 2000) } catch { note = null }
+    return next(note === null ? e : { ...e, context: [...(e.context ?? []), note] })
+  }).catch(($, e, next) => next(e))
+
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'factory',
       description: 'CodeBook factories: open the Factory pane, start a story (run), or show its status',
-      argumentHint: '[run <factory> "<story>" | status | follow <story> | here | cloud | stop | capture | prove]',
+      argumentHint: '[run <factory> "<story>" | status | follow <story> | here | cloud | stop | outside | inside | capture | prove]',
     })
+    // Which factory works on this folder's repository, asked now so the first prompt need not wait (never awaited, never fatal).
+    try { await sweepCheckouts($) } catch { /* next session */ }
+    void askAtStart($, e.cwd).catch(() => null)
     const storedMode = await $.store.get(STORE_MODE)
     if (storedMode === 'here' || storedMode === 'cloud') await update($, mode, () => storedMode)
     await restoreSession($)
@@ -399,6 +451,8 @@ export const register: Register = on => {
           : "Agent stations of the stories you start run in CodeBook's cloud."
       return { text: moved ? `${next}\n${moved}` : next }
     }
+
+    if (lower === 'outside' || lower === 'inside') return { text: await outsideCommand($, lower === 'outside') }
 
     if (lower === 'stop') {
       await unfollow($)

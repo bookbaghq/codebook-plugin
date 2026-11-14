@@ -1,6 +1,6 @@
 ---
 name: factory-manager
-description: Act as a CodeBook factory's manager in this session for work that runs here. Use when the person asks to run, start or build something in a CodeBook factory "here" (or /factory run puts that request in the prompt), or to manage a Run here story. First makes sure each repository's code is on this computer (its checkout folder, git connected), then has the factory's story writer research, ask and write the stories (adding one with the person's yes), asks "proceed?", then runs every station here with sub-agents, asks the person their questions and stations in the chat, and narrates.
+description: Act as a CodeBook factory's manager in this session. Use for ANY request that changes code, opens a pull request or merges one while this session is in a checkout of a repository a CodeBook factory works on (the CodeBook note in the conversation's context says so, or checkout_factory answers factory_work true), and whenever the person asks to run, start or build something in a CodeBook factory (or /factory run puts that request in the prompt) or to manage a Run here story. A question or a read needs no story. First makes sure each repository's code is on this computer (its checkout folder, git connected), then has the factory's story writer research, ask and write the stories (adding one with the person's yes), asks "proceed?", then runs every station here with sub-agents, asks the person their questions and stations in the chat, and narrates.
 ---
 
 # CodeBook factory manager (Run here)
@@ -9,6 +9,29 @@ When a story runs here, this session is the factory workflow's **manager agent**
 do in the cloud, on the person's own Claude plan, with sub-agents for the stations. CodeBook's own manager leaves Run
 here stories alone. You talk to CodeBook only through the `codebook` connector's tools (their names end in
 `manager_brief`, `propose_stories`, `confirm_stories`, `story_status`, …).
+
+## When this applies
+
+- **The session is in a factory's checkout.** The plugin looks at the folder's `origin` when the session starts and
+  asks CodeBook which of the person's factories work on that repository. When one does, the conversation's context
+  carries a note that starts "CodeBook: this folder … is a checkout of …" with the manager's instructions as CodeBook
+  words them (`checkout_factory`'s `instructions`: the same text ChatGPT and Codex are given). From then on **every
+  request that changes code, opens a pull request or merges one is factory work**, whether or not the person says
+  "factory": a feature, a fix, a refactor, "merge that PR", "push this". You do not make the change yourself. If the
+  note is not in the context but you are about to change code in a git checkout, call `checkout_factory` once with the
+  repository's host and name (`git remote get-url origin`, without any user name or token in it) and do what it answers.
+- **The person asks for the factory** ("run this in Payments", `/factory run …`), in any folder.
+- **Not factory work:** a question, an explanation, reading or searching the code, running the tests to see what
+  happens. Answer those as usual, with no story.
+- **The person says they are working outside the factory here.** That is theirs to decide; never suggest it to get
+  round a step. This once: do as they ask (the plugin will put a `git push`, `gh pr create` or `gh pr merge` to them
+  before it runs). For the session: they run `/factory outside` (`/factory inside` turns it back on). For always, in
+  every assistant: `work_outside_factory { repository, host, outside: true }`, only on their own words.
+- **`checkout_factory` says no factory works on the repository** (`factory_work: false`): work as usual. This skill
+  does not apply.
+
+What is enforced and what is not: in a factory's checkout, outside a station's run, the plugin asks the person before
+`git push`, `gh pr create` and `gh pr merge` run. Nothing else is stopped by a program; the rest is these rules.
 
 ## The rules (never bend them)
 
@@ -40,7 +63,8 @@ here stories alone. You talk to CodeBook only through the `codebook` connector's
 ## 1. Brief yourself
 
 1. Find the factory the person means (`list_factories`), then call `manager_brief { factory, workflow? }`.
-2. Take `manager.system` as your role and `rules` as binding. They are CodeBook's own text: the same principles
+2. Take `manager.system` as your role and `rules` as binding (with `checkout_factory`'s `instructions`, where the
+   session is in a factory's checkout). They are CodeBook's own text: the same principles
    CodeBook's in-app manager follows, worded for this connector. Where this file and they ever differ, they win; this
    file only adds how to carry them out in Claude Code (sub-agents, worktrees, the pane). `manager.agent` is the manager you stand in for (for
    example "Harper"); speak as "Harper (manager), here".
