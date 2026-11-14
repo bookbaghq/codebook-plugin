@@ -8,22 +8,29 @@ Run your [CodeBook](https://app.codebook.work) factories from Claude Code. Start
 
 ## Install
 
-In the Claude Code desktop app: click **+** next to the prompt box, then **Plugins**, **Add marketplace**, enter
-`bookbaghq/codebook-plugin`, then add the **codebook** plugin.
-
-At the prompt of a terminal session:
-
-```
-/plugin install codebook --marketplace bookbaghq/codebook-plugin
-```
-
-From a shell:
+From a shell with Claude Code installed, add Bookbag’s public marketplace and install the plugin for your user profile:
 
 ```bash
-claude plugin install codebook --marketplace bookbaghq/codebook-plugin
+claude plugin marketplace add bookbaghq/codebook-plugin
+claude plugin install codebook@codebook --scope user
+claude plugin list
 ```
 
-Answer `y` to add the marketplace, then pick a scope (user scope makes it available in every project).
+Look for **codebook@codebook**, a version number, **user** scope and **enabled** status. To inspect its agents, skill and MCP server, run `claude plugin details codebook@codebook`. Start Claude Code, or enter `/reload-plugins` in an open session, then enter `/factory help` at the Claude Code prompt.
+
+You can also install in one shell command with `claude plugin install codebook --marketplace bookbaghq/codebook-plugin`, or enter `/plugin install codebook --marketplace bookbaghq/codebook-plugin` at the Claude Code prompt. In the **Code** view of Claude Desktop, open **+ → Plugins → Add marketplace**, enter `bookbaghq/codebook-plugin`, then add **codebook**. User scope makes the plugin available across your projects.
+
+## Update
+
+Refresh the marketplace, update the plugin in its installed scope, and check the version:
+
+```bash
+claude plugin marketplace update codebook
+claude plugin update codebook@codebook --scope user
+claude plugin list
+```
+
+Reload plugins in an open Claude Code session or start a new one. For Windows and WSL setup, sign-in troubleshooting, and removal, see the [CodeBook support guide](https://codebook.work/docs/claude-and-chatgpt/connect-claude).
 
 ## Sign in
 
@@ -51,7 +58,7 @@ do what you can do on app.codebook.work.
 | Type | What happens |
 | --- | --- |
 | `/factory` | Opens the Factory pane. Pick a factory and type what it should make. |
-| `/factory report Payments WO-7` | Reopen the work order from any signed-in session. Read milestone evidence, recorded cost, remaining budget, deadline, held operations and production decisions. The command makes one read-only request. |
+| `/factory report Payments WO-7` | Reopen the work order from any signed-in session. Read milestone evidence, recorded cost, remaining budget, deadline, held operations and production decisions. For reviewed production alerts, see whether the owner rolled back or kept the deployment and the note they recorded. The command makes one read-only request. |
 | `/factory overnight Payments "Migrate the invoice exporter"` | Draft a cloud work order with milestones and acceptance checks. Review the plan and its manager’s token ceiling. Once approved, the cloud manager supervises the work and reports back after you close the terminal. Later milestones follow your factory’s approval policy. |
 | `/factory run Payments "Let customers refund a payment"` | Starts a story in the Payments factory and follows it in the pane. Add `--here` or `--cloud` to choose for this story. |
 | `/factory status` | Where the story is, station by station, and where each repository's code is on this computer (checked as you ask). |
