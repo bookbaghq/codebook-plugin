@@ -51,7 +51,7 @@ do what you can do on app.codebook.work.
 | Type | What happens |
 | --- | --- |
 | `/factory` | Opens the Factory pane. Pick a factory and type what it should make. |
-| `/factory report Payments WO-7` | Reopen the work order from any signed-in session. See milestone results, evidence commits, decisions and recorded cost without starting a model or resuming work. |
+| `/factory report Payments WO-7` | Reopen the work order from any signed-in session. Read milestone evidence, recorded cost, remaining budget, deadline, held operations and production decisions. The command makes one read-only request. |
 | `/factory overnight Payments "Migrate the invoice exporter"` | Draft a cloud work order with milestones and acceptance checks. Review the plan and its manager’s token ceiling. Once approved, the cloud manager supervises the work and reports back after you close the terminal. Later milestones follow your factory’s approval policy. |
 | `/factory run Payments "Let customers refund a payment"` | Starts a story in the Payments factory and follows it in the pane. Add `--here` or `--cloud` to choose for this story. |
 | `/factory status` | Where the story is, station by station, and where each repository's code is on this computer (checked as you ask). |
@@ -60,6 +60,13 @@ do what you can do on app.codebook.work.
 | `/factory here` / `/factory cloud` | Where agent stations run: for the next stories, and for the followed story too (while none of its runs is being worked). The pane's two picture buttons do the same. |
 | `/factory stop` | Stops following; the story keeps moving on app.codebook.work. |
 | `/factory outside` / `/factory inside` | In a factory's checkout: work outside the factory for this session (no story first, no question before a push), or through it again. |
+
+To cap an overnight work order, add `--max-usd 25` to the command. Add
+`--deadline 2030-05-15T08:00:00-04:00` to set an absolute stop time. Replace
+the example date with your deadline. Either limit can be set on its own. The
+manager shows the limits CodeBook recorded when you review the proposal. The
+USD cap covers the whole order at configured rates. The dedicated manager has
+its own token ceiling.
 
 [Walk through an overnight work order](https://app.codebook.work/guides/overnight-work.txt).
 

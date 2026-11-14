@@ -136,7 +136,7 @@ function status58(asks: boolean): Record<string, unknown> {
 }
 
 /** The engine beneath the plugin: a connected codebook server answering from the fixtures above. */
-function engine(on: On, at: { now: At; asks58?: boolean; session?: string; stored?: Record<string, unknown> }) {
+function engine(on: On, at: { now: At; asks58?: boolean; session?: string; stored?: Record<string, unknown>; controls?: boolean }) {
   const calls: Calls = []
   const prompts: string[] = []
   const filled: string[] = []
@@ -182,7 +182,12 @@ function engine(on: On, at: { now: At; asks58?: boolean; session?: string; store
     return { result: { content: [{ type: 'text', text: JSON.stringify(data) }], structuredContent: data }, text: JSON.stringify(data) }
   })
   function answer(tool: string, args: Record<string, unknown>) {
-    if (tool === 'work_orders') return { work_order: { reference: 'WO-7', title: 'Migrate exporter', status: 'open', paused: true }, factory_paused: false,
+    if (tool === 'work_orders') return { work_order: { reference: 'WO-7', title: 'Migrate exporter', status: 'open', paused: true,
+      ...(at.controls && { execution_limits: { max_usd: '25.0000', deadline: '2030-05-15T12:00:00.000Z', deadline_reached: true, last_refusal: 'This model has no configured price.' } }) }, factory_paused: false,
+      ...(at.controls && { spend_balance: { available_usd: '17.2500', reserved_usd: '5.0000', spent_usd: '2.7500' },
+        production_watch: { enabled: true, owner_name: 'Mia', filter: 'Export failed', can_decide: false, hold_id: 82, incidents: [
+          { id: 82, title: 'Export failed twice', severity: 'high', deployed_service: 'exporter', pull_number: 92, commit: 'abc123', incident_url: 'https://monitor.example/23', deploy_url: 'https://deploy.example/55', resumed_at: null, resumed_by: null },
+          { id: 77, title: 'Earlier export failure', pull_number: 88, commit: 'bc1234', resumed_at: 42, resumed_by: 'Tom' }] } }),
       milestones: [{ milestone: 1, label: 'Needs a person', check: { needs_person: true, latest: { steps: [{ status: 'failed', title: 'Amounts agree', commit_sha: '0123456789abcdef', run_id: 32, detail: 'Expected 100, saw 99.' }] } } }],
       questions: [{ question: 'Include refunds?' }], money: { total_usd: 0.25, complete: false, tokens: 90, sandbox: { seconds: 30, usd: null } } }
     return tool === 'start_story'
@@ -297,14 +302,44 @@ test('a new terminal can read an overnight report without approving, resuming or
   expect(bad.text).toContain('Usage:')
   const r = await $.command.run(typed('report Platform Payments WO-7'))
   expect(calls).toEqual([{ tool: 'work_orders', args: { factory: 'Platform Payments', order: 'WO-7' } }])
+  expect(r.text).not.toContain('Work-order spend limit')
+  expect(r.text).not.toContain('Production watch')
   for (const detail of ['paused', 'A person needs to decide', 'failed: Amounts agree', 'commit 0123456789abcdef', 'run #32', 'Expected 100, saw 99.', 'Include refunds?', '$0.2500 (partial)', 'Unpriced sandbox time: 30s']) expect(r.text).toContain(detail)
   expect([...prompts, ...filled].length).toBe(0)
+})
+
+test('report reads order limits, reserved funds, a held operation and the human production decision', async ($, on) => {
+  const { calls, prompts, filled } = engine(on, { now: 'build', controls: true })
+  const report = await $.command.run(typed('report Payments WO-7'))
+  for (const text of ['spend limit at configured rates: $25.0000', '$17.2500 available', '$5.0000 reserved', '$2.7500 recorded', '2030-05-15T12:00:00.000Z (reached', 'This model has no configured price.', 'Mia watches alerts containing "Export failed"', 'Production hold #82', 'Review is with the watch owner or work-order creator', 'Export failed twice (high, exporter, PR #92, commit abc123)', 'https://monitor.example/23', 'https://deploy.example/55', 'resumed by Tom']) expect(report.text).toContain(text)
+  expect(calls).toEqual([{ tool: 'work_orders', args: { factory: 'Payments', order: 'WO-7' } }])
+  expect([...prompts, ...filled].length).toBe(0)
+})
+
+test('overnight passes explicit order limits to the new proposal and refuses an ambiguous or invalid option', async ($, on) => {
+  const { calls, filled } = engine(on, { now: 'build' })
+  await $.command.run(typed('overnight Payments "Modernize exporter" --max-usd=25 --deadline 2099-05-15T08:00:00-04:00'))
+  expect(filled[0]).toContain('The goal is "Modernize exporter".')
+  expect(filled[0]).toContain('{"max_usd":25,"deadline":"2099-05-15T08:00:00-04:00"}')
+  expect(filled[0]).toContain('proposal.execution_limits')
+  await $.command.run(typed('overnight Payments "Modernize exporter" --max-usd 0.01'))
+  expect(filled[1]).toContain('{"max_usd":0.01}')
+  await $.command.run(typed('overnight Payments "Modernize exporter" --deadline=2099-05-15T12:00:00Z'))
+  expect(filled[2]).toContain('{"deadline":"2099-05-15T12:00:00Z"}')
+  for (const bad of ['--max-usd 0', '--max-usd 100000.01', '--max-usd', '--deadline tomorrow', '--deadline 2099-05-15T08:00', '--deadline 2000-01-01T12:00:00Z', '--max-usd 20 --max-usd 50', '--max-us 25']) {
+    const result = await $.command.run(typed('overnight Payments "Modernize exporter" ' + bad))
+    expect(result.text).toContain('--')
+  }
+  expect(filled.length).toBe(3)
+  expect(calls.some(c => c.tool === 'propose_stories' || c.tool === 'confirm_stories')).toBe(false)
 })
 
 test('overnight proposes a cloud work order even when this session normally runs here', async ($, on) => {
   const { filled, calls } = engine(on, { now: 'build' })
   await $.command.run(typed('overnight Payments "Modernize the invoice exporter"'))
   expect(filled[0]).toContain('Modernize the invoice exporter')
+  expect(filled[0]).toContain('Omit each unspecified limit')
+  expect(filled[0]).not.toContain('Pass these explicit proposal fields')
   expect(filled[0]).toContain('propose_stories with run_location "cloud"')
   expect(filled[0]).toContain('ask "proceed?" before confirm_stories')
   expect(filled[0]).toContain('manager’s token ceiling')

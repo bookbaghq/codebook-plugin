@@ -32,6 +32,7 @@ import {
 } from './factory'
 import type { Status } from './factory'
 import { orderReport, type WorkOrderReport } from './work-order-report'
+import { overnightArguments, overnightRequest, overnightUsage } from './overnight'
 import { drawPane, PANE } from './pane'
 import { captureAtEnd, captureCommand, captureTick, markSession, noteDue, noteTranscript } from './capture'
 import { runProof, waitingProofs } from './proof'
@@ -88,8 +89,8 @@ async function openPane($: EngineInterface): Promise<boolean> {
 
 const HELP = [
   '/factory — open the Factory pane (pick a factory, follow a story)',
-  '/factory report <factory> <WO-7> — read milestones, evidence, questions and recorded cost',
-  '/factory overnight <factory> "<goal>" — propose a cloud work order with milestones',
+  '/factory report <factory> <WO-7> — read milestones, spending limits, production holds and evidence',
+  overnightUsage + ' — propose a cloud work order with milestones',
   '/factory run <factory> "<story title>" [--here | --cloud] — start a story and follow it',
   "/factory status — where the followed story is, and where each repository's code is on this computer",
   '/factory list — the factories you can see',
@@ -321,7 +322,7 @@ export const register: Register = on => {
     await $.command.register({
       name: 'factory',
       description: 'CodeBook factories: open the Factory pane, start a story (run), or show its status',
-      argumentHint: '[overnight <factory> "<goal>" | report <factory> <WO-7> | run <factory> "<story>" | status | follow <story> | here | cloud | stop | outside | inside | capture | prove]',
+      argumentHint: '[overnight <factory> "<goal>" [--max-usd <amount>] [--deadline <ISO time>] | report <factory> <WO-7> | run <factory> "<story>" | status | follow <story> | here | cloud | stop | outside | inside | capture | prove]',
     })
     // Which factory works on this folder's repository, asked now so the first prompt need not wait (never awaited, never fatal).
     try { await sweepCheckouts($) } catch { /* next session */ }
@@ -392,10 +393,11 @@ export const register: Register = on => {
 
     if (lower === 'run' || lower === 'start' || lower === 'overnight') {
       const overnight = lower === 'overnight'
-      const usage = overnight ? '/factory overnight <factory> "<goal>"' : '/factory run <factory> "<story title>"'
-      if (overnight && rest.includes('--here')) return { text: 'Overnight work runs in CodeBook. Use /factory run --here for work on this computer.' }
+      const usage = overnight ? overnightUsage : '/factory run <factory> "<story title>"'
+      const options = overnight ? overnightArguments(rest) : { args: rest, limits: {} }
+      if ('error' in options) return { text: options.error }
       let where = await read($, mode)
-      const args = rest.filter(word => {
+      const args = options.args.filter(word => {
         if (word === '--here') where = 'here'
         else if (word === '--cloud') where = 'cloud'
         else return true
@@ -415,7 +417,7 @@ export const register: Register = on => {
         }
       }
       if (overnight) {
-        const request = `Plan an overnight cloud work order for ${JSON.stringify(split.factory)}. The goal is ${JSON.stringify(split.title)}. Read manager_brief, then use propose_stories with run_location "cloud", numbered milestones and verifiable acceptance criteria. Show me which later milestones can start under the current factory policy, any human approvals, and the dedicated manager’s token ceiling (manager only), then ask "proceed?" before confirm_stories. On approval, confirm the stories and use open_sub_manager in fresh mode under the main CodeBook manager conversation, unless this order already has a manager. Brief it on the goal, constraints and evidence. Give me the work order link and its manager reference so I can follow it after closing this session.`
+        const request = overnightRequest(split.factory, split.title, options.limits)
         const filled = await $.prompt.fill({ text: request, mode: 'replace' })
         return { text: filled.isFilled ? 'Press Enter to draft the overnight plan. You can review its milestones before work starts.' : request }
       }
