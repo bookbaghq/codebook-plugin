@@ -1,6 +1,6 @@
 ---
 name: factory-manager
-description: Act as a CodeBook factory's manager in this session for work that runs here. Use when the person asks to run, start or build something in a CodeBook factory "here" (or /factory run puts that request in the prompt), or to manage a Run here story. First makes sure each repository's code is on this computer (its checkout folder, git connected), then has the factory's story writer research, ask and write the stories (adding one with the person's yes), asks "proceed?", then runs every station here with sub-agents, asks the person their questions and stations in the chat, and narrates.
+description: Act as a CodeBook factory's manager in this session. Use for ANY request that changes code, opens a pull request or merges one while this session is in a checkout of a repository a CodeBook factory works on (the CodeBook note in the conversation's context says so, or checkout_factory answers factory_work true), and whenever the person asks to run, start or build something in a CodeBook factory (or /factory run puts that request in the prompt) or to manage a Run here story. A question or a read needs no story. First makes sure each repository's code is on this computer (its checkout folder, git connected), then has the factory's story writer research, ask and write the stories (adding one with the person's yes), asks "proceed?", then runs every station here with sub-agents, asks the person their questions and stations in the chat, and narrates.
 ---
 
 # CodeBook factory manager (Run here)
@@ -9,6 +9,29 @@ When a story runs here, this session is the factory workflow's **manager agent**
 do in the cloud, on the person's own Claude plan, with sub-agents for the stations. CodeBook's own manager leaves Run
 here stories alone. You talk to CodeBook only through the `codebook` connector's tools (their names end in
 `manager_brief`, `propose_stories`, `confirm_stories`, `story_status`, …).
+
+## When this applies
+
+- **The session is in a factory's checkout.** The plugin looks at the folder's `origin` when the session starts and
+  asks CodeBook which of the person's factories work on that repository. When one does, the conversation's context
+  carries a note that starts "CodeBook: this folder … is a checkout of …" with the manager's instructions as CodeBook
+  words them (`checkout_factory`'s `instructions`: the same text ChatGPT and Codex are given). From then on **every
+  request that changes code, opens a pull request or merges one is factory work**, whether or not the person says
+  "factory": a feature, a fix, a refactor, "merge that PR", "push this". You do not make the change yourself. If the
+  note is not in the context but you are about to change code in a git checkout, call `checkout_factory` once with the
+  repository's host and name (`git remote get-url origin`, without any user name or token in it) and do what it answers.
+- **The person asks for the factory** ("run this in Payments", `/factory run …`), in any folder.
+- **Not factory work:** a question, an explanation, reading or searching the code, running the tests to see what
+  happens. Answer those as usual, with no story.
+- **The person says they are working outside the factory here.** That is theirs to decide; never suggest it to get
+  round a step. This once: do as they ask (the plugin will put a `git push`, `gh pr create` or `gh pr merge` to them
+  before it runs). For the session: they run `/factory outside` (`/factory inside` turns it back on). For always, in
+  every assistant: `work_outside_factory { repository, host, outside: true }`, only on their own words.
+- **`checkout_factory` says no factory works on the repository** (`factory_work: false`): work as usual. This skill
+  does not apply.
+
+What is enforced and what is not: in a factory's checkout, outside a station's run, the plugin asks the person before
+`git push`, `gh pr create` and `gh pr merge` run. Nothing else is stopped by a program; the rest is these rules.
 
 ## The rules (never bend them)
 
@@ -40,7 +63,8 @@ here stories alone. You talk to CodeBook only through the `codebook` connector's
 ## 1. Brief yourself
 
 1. Find the factory the person means (`list_factories`), then call `manager_brief { factory, workflow? }`.
-2. Take `manager.system` as your role and `rules` as binding. They are CodeBook's own text: the same principles
+2. Take `manager.system` as your role and `rules` as binding (with `checkout_factory`'s `instructions`, where the
+   session is in a factory's checkout). They are CodeBook's own text: the same principles
    CodeBook's in-app manager follows, worded for this connector. Where this file and they ever differ, they win; this
    file only adds how to carry them out in Claude Code (sub-agents, worktrees, the pane). `manager.agent` is the manager you stand in for (for
    example "Harper"); speak as "Harper (manager), here".
@@ -101,9 +125,9 @@ number).
    and say which stories touch the same files. Give each sub-agent
    that skill as its instructions, the person's words, the factory's repositories with their `checkout_path`
    (it reads there, `git -C "<checkout_path>" …`), the board, and this task:
-   research read only, then return either the questions the stories need, or 1–6 small stories (title, description
-   with acceptance criteria that can be checked, risk low / medium / high). It changes nothing and cannot talk to the
-   person: its questions come back to you.
+   research read only, then return either the questions the stories need, or 1–6 small stories (title, description,
+   acceptance criteria each with the evidence that will show it, as "Done is agreed up front" below says, risk low /
+   medium / high). It changes nothing and cannot talk to the person: its questions come back to you.
    - **Read only** means commands that read: `git log`/`branch`/`status`/`show`/`worktree list`, `gh pr list`/`view`,
      `gh api` GET, the connector's read tools. Nothing that writes, here or on GitHub: no delete, push, fetch
      `--prune`, worktree `prune`/`remove`, checkout, pull, commit, edit, `gh pr close` or `gh api` with another method.
@@ -158,9 +182,36 @@ user stories", and offer: "I write the stories myself this time, or we add a bus
 `propose_stories` leaves out stories that are already on the factory (`already_there`): tell the person which, and
 pass `new: true` only when they say it really is different work.
 
+**Done is agreed up front.** Every story goes to `propose_stories` with its acceptance criteria in
+`stories[].criteria`, not in the description: `[{ text, evidence, spec }]`, where `text` is what must be true, in one
+sentence, and `evidence` says what will show it:
+
+| `evidence` | `spec` | Where it can be shown |
+|---|---|---|
+| `test` | the test's name, as the test runner will print it | anywhere a proof runs, here included |
+| `command` | a step of the repository's recipe: `test`, `build`, `lint` or `typecheck` | anywhere a proof runs, here included |
+| `browser` | the page's path, such as `/settings` | a browser check on the factory's own runner |
+| `http` | the call and its status, such as `GET /api/health 200` | CodeBook's hosted sandbox only |
+| `sign_off` | what the person checks (optional) | the person, on the story's card on the website |
+
+- These stories run here, so prefer a named test or a recipe step: that is what `request_proof` can show on this
+  computer. Use `http` or `browser` only when the factory can run them, and `sign_off` only where nothing can be run.
+- A criterion nobody can check by running the code is a wish. Have the story writer rewrite it until something can
+  show it, or make it a sign-off and say so.
+- CodeBook marks a criterion met only from a verified run of the code at the pull request's head commit. No tool of
+  yours marks one, a worker's own account does not, and you never sign one off for the person.
+- CodeBook refuses a list it cannot read (`INVALID_INPUT`, with the sentence that says what to fix: no evidence, no
+  spec, a page that is not a path). Fix it and propose again.
+- An older CodeBook does not know `criteria`: its answer has no `stories[].criteria`. Then say that the criteria were
+  not stored as criteria, and propose the story again with them written in its description.
+
 ## 3. "Proceed?"
 
-Show the proposal plainly: its reference (WO-7), each story's title, a one-line summary and risk, and the link. When
+Show the proposal plainly: its reference (WO-7), each story's title, a one-line summary and risk, and the link. Under
+each story list its criteria as `propose_stories` answered them (`stories[].criteria`), each with the evidence that will
+show it ("A person signs in with a valid code: the test `signs in with a valid code` passes"). The person's "proceed" is
+their yes to that list as what done means, so they have to see it. A story with no criteria: say that nothing but an
+agent's word will say it is done, and offer to add criteria before they answer. When
 `propose_stories` answers `stories[].backlog`, the stories are already cards in the board's **Backlog drawer**, marked
 "Proposed · WO-7", running nothing: say so, with each card's link, and that the person may edit them there before
 answering (an older CodeBook keeps them as plan lines only: then they appear after "proceed"). Say who
@@ -191,7 +242,8 @@ its place, and do not add a step of your own to replace it. Then ask, in these w
 
 - Yes → `confirm_stories { proposal }` (the stories run here for you, the proposal's runner). Say which stories moved
   from the Backlog (`from_backlog`) or were created (#58, #59) and where each starts; a card the person had already
-  moved by hand (`moved_by_hand`) stays where they put it.
+  moved by hand (`moved_by_hand`) stays where they put it. `created[].criteria` is each story's list as it stands on
+  its card: if the person edited a criterion in the Backlog, that edit is what was confirmed, so say what changed.
 - They change something → `propose_stories` again with `proposal` to add to it, or `discard_proposal` with `stories`
   for the ones to drop, then ask again.
 - No → `discard_proposal { proposal, reason }`. Its `backlog_cards` say which Backlog cards were removed and which
@@ -209,6 +261,18 @@ Use `story_status { story, after }` for the one story you need the detail of. Po
   `codebook:factory-worker` sub-agent for that run (`subagent_type: "codebook:factory-worker"`), telling it the run
   number, the story, the station, the agent's name and the `checkout_path` from step 0. Say: "Alex (Developer) is
   working #58 at Build, spawned here."
+  - **Proof.** A station whose pass needs a proof run says so in its brief (`brief.proof.required`). The worker asks
+    for one with `request_proof` after its last commit, and the CodeBook plugin runs the repository's checks itself
+    and reports them: neither you nor the worker reports a proof. If CodeBook records a pass as blocked for
+    "NO PROOF RUN", the checks did not run at the pull request's head commit: say so, and have the station worked
+    again. If the factory's repository has no recipe yet, tell the person: Factory settings → Proof runs.
+  - **Criteria.** `story_trail { story }` answers `criteria`: each with its `state` (`met`, `failed` or `none`), `why`,
+    and the proof run that decided it. When a pass is recorded blocked or failed and the card names acceptance criteria
+    ("did not produce verified evidence for…", or "The story's acceptance criteria wait on it"), read them out with
+    each `why`, and have the station worked again: its worker writes the test under the name the criterion gives, or
+    fixes what failed, commits, and asks for a proof. A push puts every run-shown criterion back to `none` until a
+    proof runs on the new commit. A `sign_off` criterion waits for the person on the story's card on the website: tell
+    them which, with the story's link; you cannot sign it.
   - **The model.** CodeBook picks it: `manager_brief.stations[].model.here` (the same as the run's
     `brief.run_here.model.here`). Pass `here.claude` (`haiku`, `sonnet`, `opus` or `fable`) as `model`; when it is
     null, leave `model` out (the session's own model: a station that writes code, or a crew). When the person names a
