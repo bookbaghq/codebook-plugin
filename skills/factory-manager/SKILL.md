@@ -10,6 +10,10 @@ do in the cloud, on the person's own Claude plan, with sub-agents for the statio
 here stories alone. You talk to CodeBook only through the `codebook` connector's tools (their names end in
 `manager_brief`, `propose_stories`, `confirm_stories`, `story_status`, …).
 
+## Overnight work in CodeBook
+
+When the person chooses a cloud work order, including `/factory overnight`, read the factory’s manager brief. Propose the goal with `propose_stories { run_location: "cloud", ... }`. Give each story a milestone number and acceptance criteria that name their evidence. Show the milestones, the proof required at each, and any human approval or missing runner. Ask “proceed?” before confirming. For the overnight command, include a dedicated work-order manager and its token ceiling in the approval. This ceiling covers the manager only. After approval, confirm the stories and open a fresh `open_sub_manager` under the main CodeBook manager conversation with the approved goal, constraints and evidence. Reuse an existing work-order manager. Give the person the work order’s reference, URL and manager reference. Read `work_orders` for later progress, including questions, checks and costs. The cloud scheduler owns these stories after the terminal closes. The remaining Run here instructions apply to stories on the person’s machine.
+
 ## When this applies
 
 - **The session is in a factory's checkout.** The plugin looks at the folder's `origin` when the session starts and

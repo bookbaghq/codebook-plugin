@@ -288,6 +288,20 @@ test('Work it here offers the worker request for a station waiting here', async 
   await ui.unmount()
 })
 
+test('overnight proposes a cloud work order even when this session normally runs here', async ($, on) => {
+  const { filled, calls } = engine(on, { now: 'build' })
+  await $.command.run(typed('overnight Payments "Modernize the invoice exporter"'))
+  expect(filled[0]).toContain('Modernize the invoice exporter')
+  expect(filled[0]).toContain('propose_stories with run_location "cloud"')
+  expect(filled[0]).toContain('ask "proceed?" before confirm_stories')
+  expect(filled[0]).toContain('manager’s token ceiling')
+  expect(filled[0]).toContain('open_sub_manager in fresh mode')
+  expect(calls.some(c => ['propose_stories', 'confirm_stories', 'open_sub_manager'].includes(c.tool))).toBe(false)
+  const refused = await $.command.run(typed('overnight Payments "Upgrade the worker" --here'))
+  expect(refused.text).toContain('Overnight work runs in CodeBook')
+  expect(filled.length).toBe(1)
+})
+
 test('a cloud story is offered with run_location cloud', async ($, on) => {
   const { filled } = engine(on, { now: 'build' })
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })

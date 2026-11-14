@@ -87,6 +87,7 @@ async function openPane($: EngineInterface): Promise<boolean> {
 
 const HELP = [
   '/factory — open the Factory pane (pick a factory, follow a story)',
+  '/factory overnight <factory> "<goal>" — propose a cloud work order with milestones',
   '/factory run <factory> "<story title>" [--here | --cloud] — start a story and follow it',
   "/factory status — where the followed story is, and where each repository's code is on this computer",
   '/factory list — the factories you can see',
@@ -386,7 +387,10 @@ export const register: Register = on => {
       return { text: lines.join('\n') }
     }
 
-    if (lower === 'run' || lower === 'start') {
+    if (lower === 'run' || lower === 'start' || lower === 'overnight') {
+      const overnight = lower === 'overnight'
+      const usage = overnight ? '/factory overnight <factory> "<goal>"' : '/factory run <factory> "<story title>"'
+      if (overnight && rest.includes('--here')) return { text: 'Overnight work runs in CodeBook. Use /factory run --here for work on this computer.' }
       let where = await read($, mode)
       const args = rest.filter(word => {
         if (word === '--here') where = 'here'
@@ -394,18 +398,23 @@ export const register: Register = on => {
         else return true
         return false
       })
-      if (args.length === 0) return { text: `Usage: /factory run <factory> "<story title>"\n\n${HELP}` }
+      if (args.length === 0) return { text: `Usage: ${usage}\n\n${HELP}` }
       const failed = await loadFactories($)
       if (failed) return { text: failed }
       const names = ((await read($, factories)) ?? []).map(f => f.name)
       const split = splitRun(args, names, (await read($, picked))?.name ?? null)
       if (split !== null && !split.title) {
-        return { text: `What should ${split.factory} make? Usage: /factory run <factory> "<story title>"` }
+        return { text: `What should ${split.factory} make? Usage: ${usage}` }
       }
       if (split === null) {
         return {
-          text: `Which factory? Start with one of yours: ${names.map(name => `"${name}"`).join(', ')}.\nUsage: /factory run <factory> "<story title>"`,
+          text: `Which factory? Start with one of yours: ${names.map(name => `"${name}"`).join(', ')}.\nUsage: ${usage}`,
         }
+      }
+      if (overnight) {
+        const request = `Plan an overnight cloud work order for ${JSON.stringify(split.factory)}. The goal is ${JSON.stringify(split.title)}. Read manager_brief, then use propose_stories with run_location "cloud", numbered milestones and verifiable acceptance criteria. Show me the plan and the dedicated manager’s token ceiling (manager only), then ask "proceed?" before confirm_stories. On approval, confirm the stories and use open_sub_manager in fresh mode under the main CodeBook manager conversation, unless this order already has a manager. Brief it on the goal, constraints and evidence. Give me the work order link and its manager reference so I can follow it after closing this session.`
+        const filled = await $.prompt.fill({ text: request, mode: 'replace' })
+        return { text: filled.isFilled ? 'Press Enter to draft the overnight plan. You can review its milestones before work starts.' : request }
       }
       const request = startRequest(split.factory, split.title, where)
       const filled = await $.prompt.fill({ text: request, mode: 'replace' })
