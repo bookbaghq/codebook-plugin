@@ -57,6 +57,7 @@ do what you can do on app.codebook.work.
 | `/factory follow #57 Payments` | Follows a story that is already on the board. |
 | `/factory here` / `/factory cloud` | Where agent stations run: for the next stories, and for the followed story too (while none of its runs is being worked). The pane's two picture buttons do the same. |
 | `/factory stop` | Stops following; the story keeps moving on app.codebook.work. |
+| `/factory outside` / `/factory inside` | In a factory's checkout: work outside the factory for this session (no story first, no question before a push), or through it again. |
 
 The pane shows the story's stations as cards. A station that waits for you shows **Approve** and **Send back**
 (with the pull request to look at); both do exactly what the buttons on app.codebook.work do, once you send the
@@ -64,6 +65,42 @@ request they put in your prompt box. A question for you (from an agent or the ma
 which puts "Answer #57: " in your prompt box for your words. When "proceed?" creates several stories, the pane shows
 the first and the plugin follows them all: whatever waits on you in any of them wakes the chat with the question or
 the approval.
+
+## In a factory's checkout
+
+You do not have to say "factory". When a session starts in a folder whose git `origin` is a repository one of your
+CodeBook factories works on, the plugin finds that out by itself and the session becomes that factory's manager:
+
+1. At session start the plugin reads `git remote get-url origin` and asks CodeBook (`checkout_factory`) which of your
+   factories work on that repository. It sends the host and `owner/name`, nothing else.
+2. When one does, the conversation's context carries CodeBook's own instructions for that factory's manager: the same
+   words ChatGPT and Codex are given. A request that changes code, opens a pull request or merges one becomes a story
+   the factory's agents work (story writer, "proceed?", stations). A question or a read is answered as usual.
+3. Outside a station's run, `git push`, `gh pr create` and `gh pr merge` in that checkout are put to you before they
+   run: "this repository is worked by the factory X". Allow it to do it yourself, this once; or refuse it and ask Claude
+   to put the change through the factory.
+
+In any other folder the plugin adds nothing and asks nothing. If you are signed out or offline it learns nothing, does
+not hold up a prompt for more than two seconds (once), and tries again a few minutes later.
+
+**What is enforced and what is not.** The question before a push, a pull request or a merge is the only thing a
+program stops, and only for commands the plugin can read (`git push`, `gh pr create`, `gh pr merge`, and commands it
+cannot read at all, which it asks about). In a session with nobody to ask (`claude -p`), the command is refused.
+Everything else is instruction: Claude is told to work through the factory, and nothing forces it. CodeBook's own gates
+(station contracts, the merge rule, your host's branch protection) are what hold when an instruction is ignored.
+
+**Turning it off.**
+
+| For | How |
+| --- | --- |
+| one push | Allow it when asked. |
+| this session | `/factory outside` (`/factory inside` turns it back on). |
+| always, in this checkout, in every assistant | Tell Claude "I work outside the factory here" (it saves it with `work_outside_factory`), or Factory settings → Your computer in CodeBook. |
+
+**ChatGPT and Codex** have no plugin, so nothing asks before a push there. They are told two ways: the CodeBook
+connector's own instructions, and a block in the repository's `AGENTS.md` that an owner or admin adds with one draft pull
+request from the Repository report in CodeBook ("Assistants", under each repository). Codex reads `AGENTS.md` at the
+start of every run.
 
 ## The two run modes
 
@@ -152,8 +189,9 @@ wrong; it never falls back to the session's folder. Code stations work in a work
 `<checkout>-<story number>` (for example `~/code/payments-58`), which QA then tests. With an older CodeBook that has no
 **Your computer** setting, the session's folder is the checkout, as before.
 
-Claude chat and ChatGPT cannot reach your computer: stations that change code run here in Claude Code, or in
-CodeBook's cloud.
+Claude chat and ChatGPT on the web cannot reach your computer: stations that change code run here in Claude Code, or in
+CodeBook's cloud. Codex can work in a checkout, but Run here, the pane and the question before a push are this
+plugin's: from Codex, the factory's stations are started in CodeBook's cloud.
 
 ### What the manager does with a new issue
 
@@ -191,7 +229,7 @@ the story and you still approve your stations here. Nothing runs on your compute
 
 The plugin itself only **reads** CodeBook, with two exceptions that are its own work: it uploads your conversation
 (Saving conversations) and it reports the proof runs it made (Proof runs). The pane lists your factories and follows the
-story you chose. Every other change is yours to send. Start, Approve, Send back and moving a story to Claude or to CodeBook put the request,
+story you chose, and at session start the plugin asks which factory works on the folder's repository (In a factory's checkout). Every other change is yours to send. Start, Approve, Send back and moving a story to Claude or to CodeBook put the request,
 in plain words, into your prompt box; you press Enter, and Claude makes the call under your usual permission
 settings (in auto mode, the auto-mode check judges it like anything you type). The pane picks up the answer.
 
@@ -208,6 +246,7 @@ nothing is saved (one notice says so, and `/factory capture status` says how to 
       "mcp__plugin_codebook_codebook__list_factories",
       "mcp__plugin_codebook_codebook__story_status",
       "mcp__plugin_codebook_codebook__story_trail",
+      "mcp__plugin_codebook_codebook__checkout_factory",
       "mcp__plugin_codebook_codebook__capture_transcript",
       "mcp__plugin_codebook_codebook__claim_proof"
     ]
@@ -215,7 +254,8 @@ nothing is saved (one notice says so, and `/factory capture status` says how to 
 }
 ```
 
-The first three are reads. `capture_transcript` saves your own conversation to your own account. `claim_proof` lets the
+The first four are reads (`checkout_factory` is the question "which factory works on this repository?"; without it the
+session may learn it only when Claude asks, as the connector's instructions tell it to). `capture_transcript` saves your own conversation to your own account. `claim_proof` lets the
 plugin take a proof run you or your agent asked for (see Proof runs); the plugin refuses it to Claude. Nothing else skips the check: starting a
 story, approving, sending back and changing a factory still go through your prompt box and your permission mode.
 
@@ -268,6 +308,8 @@ Claude's chat tab and ChatGPT cannot do this: a connector sees tool calls, never
   summary of what was done, the pull request link and the artifacts the station asks for. And, for a session that calls
   CodeBook, that session's conversation, with secrets removed as best they can be recognised: see Saving conversations.
   `/factory capture off` stops it.
+  And, for the folder a session is in, when it is a git checkout: the repository's host and `owner/name`, to ask which
+  of your factories work on it. Never the address as git holds it (it can carry a token), the folder's path or any file.
   And, for a proof run: each command's exit code, the last million characters of its output, a hash of it, the commit
   and whether the checkout had uncommitted changes (see Proof runs).
 - **To your repository's git remote (for example GitHub)**: the branch and the draft pull request, with your own
@@ -280,7 +322,7 @@ Claude's chat tab and ChatGPT cannot do this: a connector sees tool calls, never
 | Path | What it is |
 | --- | --- |
 | `.mcp.json` | The CodeBook connector (`https://app.codebook.work/mcp`), with no credentials. |
-| `hooks/` | The Factory pane, `/factory` and the repository guard (a Claude Code hooks module): `register.tsx`, `pane.tsx`, `factory.ts`, `connector.ts`, `guard.ts`, `resolve.ts` (what git and gh decide for a push), `local.ts` (the checkouts `/factory status` shows), and `art.ts` (the illustrations, small WebP). |
+| `hooks/` | The Factory pane, `/factory` and the repository guard (a Claude Code hooks module): `register.tsx`, `pane.tsx`, `factory.ts`, `connector.ts`, `guard.ts`, `resolve.ts` (what git and gh decide for a push), `checkout.ts` (a checkout that knows its factory: the lookup, the note for the session and the question before a push), `local.ts` (the checkouts `/factory status` shows), and `art.ts` (the illustrations, small WebP). |
 | `skills/factory-manager/` | The manager skill Run here follows: the code on your computer, stories, "proceed?", stations, people, narration. |
 | `agents/factory-worker.md` | The sub-agent that works one station run here as that station's agent. |
 | `agents/benchmark-worker.md` | The sub-agent that answers one benchmark run here, as the model the manager chose, for CodeBook's judge to grade. |
