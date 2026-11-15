@@ -39,3 +39,27 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $claude plugin test .
           exit $LASTEXITCODE
+      - name: Install the marketplace plugin and run its help command
+        shell: pwsh
+        run: |
+          $claude = Join-Path $env:RUNNER_TEMP 'factory-plugin-cli/node_modules/.bin/claude.cmd'
+          $env:CLAUDE_CONFIG_DIR = Join-Path $env:RUNNER_TEMP 'factory-user-profile'
+          $env:CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = '1'
+          $env:ANTHROPIC_BASE_URL = 'http://127.0.0.1:1'
+          $env:ANTHROPIC_API_KEY = 'offline-test-fixture'
+          $emptyMcp = Join-Path $env:RUNNER_TEMP 'factory-empty-mcp.json'
+          Set-Content -LiteralPath $emptyMcp -Value '{"mcpServers":{}}' -Encoding utf8
+          Set-Location $env:RUNNER_TEMP
+          & $claude plugin marketplace add $env:GITHUB_WORKSPACE
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $claude plugin install codebook@codebook
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $installed = & $claude plugin list --json | ConvertFrom-Json
+          $package = Get-Content (Join-Path $env:GITHUB_WORKSPACE '.claude-plugin/plugin.json') -Raw | ConvertFrom-Json
+          $matchesPlugin = @($installed | Where-Object { $_.id -eq 'codebook@codebook' -and $_.enabled -and $_.version -eq $package.version })
+          if ($matchesPlugin.Count -ne 1) { throw 'The released plugin was not installed and enabled.' }
+          $helpText = (& $claude --strict-mcp-config --mcp-config $emptyMcp -p '/factory help') -join [Environment]::NewLine
+          if ($LASTEXITCODE -ne 0 -or $helpText -notmatch '/factory backlog' -or $helpText -notmatch '/factory report') {
+            throw 'An installed plugin must display its factory commands offline.'
+          }
+          Write-Host "Verified installed CodeBook $($package.version) and /factory help."
