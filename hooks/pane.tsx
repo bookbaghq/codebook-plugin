@@ -3,6 +3,7 @@
 // the latest events. MadeBook's style in CodeBook's teal. Pictures are Svg on the desktop; the terminal
 // draws the same pane in words.
 
+import { backlogText } from './backlog'
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, RenderElement, RenderInput } from 'claude-code'
 
@@ -563,7 +564,10 @@ export async function drawPane($: EngineInterface, e: RenderInput): Promise<Rend
         </Box>
       ) : (
         <Box flexDirection="column" gap={1}>
-          <Text weight="bold">{`New story in ${chosen.name}`}</Text>
+          <Text weight="bold">{chosen.name}</Text>
+          <Button key="backlog" onPress={async () => { $.ui.log(await backlogText($, [chosen.factory])) }}>
+            View backlog
+          </Button>
           {Input && chosen.mayStart ? <Text dimColor>What should the factory make?</Text> : null}
           {Input && chosen.mayStart ? (
             <Input
@@ -606,7 +610,7 @@ export async function drawPane($: EngineInterface, e: RenderInput): Promise<Rend
             ? 'Next: show your factories and pick one.'
             : chosen === null
               ? 'Next: pick the factory to work in.'
-              : 'Next: say what it should make and press Start. The request lands in your prompt box: press Enter to send it.'}
+              : chosen.mayStart ? 'View the backlog or enter a title to start a story.' : 'View the backlog to find a story.'}
         </Text>
         {problem}
         {body}

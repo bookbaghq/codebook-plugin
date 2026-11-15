@@ -63,7 +63,8 @@ do what you can do on app.codebook.work.
 | `/factory run Payments "Let customers refund a payment"` | Starts a story in the Payments factory and follows it in the pane. Add `--here` or `--cloud` to choose for this story. |
 | `/factory status` | Where the story is, station by station, and where each repository's code is on this computer (checked as you ask). |
 | `/factory list` | The factories you can see. |
-| `/factory follow #57 Payments` | Follows a story that is already on the board. |
+| `/factory backlog Payments` | List up to 15 stories waiting to enter a station. Each row includes a follow command and any pending work-order item. Choose **View backlog** in the Factory pane for the same list. Use the printed next-page command or add `--workflow "Release QA"` to select another workflow. Older servers can show these stories in the web Backlog drawer. |
+| `/factory follow #57 Payments` | Follows a story on the board or in its backlog. Use the story ID from the backlog list to follow across workflows. |
 | `/factory here` / `/factory cloud` | Where agent stations run: for the next stories, and for the followed story too (while none of its runs is being worked). The pane's two picture buttons do the same. |
 | `/factory stop` | Stops following; the story keeps moving on app.codebook.work. |
 | `/factory outside` / `/factory inside` | In a factory's checkout: work outside the factory for this session (no story first, no question before a push), or through it again. |
