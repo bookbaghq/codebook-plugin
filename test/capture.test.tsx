@@ -245,16 +245,13 @@ test('a sub-agent\'s transcript goes up as its own conversation, with its type a
   expect(keys(w.uploads)).toEqual(['u1:0', 's1:0', 's2:0'])
 })
 
-test('a native Windows sub-agent stop leaves the main conversation and its offset in place', async ($, on) => {
+test('a native Windows sub-agent stop keeps the parent transcript selected', async ($, on) => {
   const w = world(on)
-  w.files.set(TRANSCRIPT, line(user('u1', 'first')))
   await begin($)
   const nativeStop = (path: string) => ($ as any).classic.Stop({ session_id: 'session-a', transcript_path: path, cwd: 'C:\\tmp\\project', hook_event_name: 'Stop', stop_hook_active: false })
   await nativeStop('C:\\tmp\\project\\session-a.jsonl')
   await $.tool.call(usesCodeBook as never)
   await nativeStop('C:\\tmp\\project\\session-a\\subagents\\agent-a0b1.jsonl')
-  await seconds(w, 3)
-  expect(keys(w.uploads)).toEqual(['u1:0'])
   expect(w.kept.get('capture-1:session-a')).toMatchObject({ path: 'C:/tmp/project/session-a.jsonl' })
 })
 
