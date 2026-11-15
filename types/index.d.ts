@@ -111,6 +111,8 @@ export type CodebookLink =
   | { state: 'signin'; message: string }
   | { state: 'error'; message: string }
 
+export type CodebookBacklogPage = { factory: string; lines: string[]; next?: { factory: string; workflow: string; offset: number } }
+
 declare module 'claude-code' {
   interface PluginState {
     codebook: {
@@ -120,6 +122,7 @@ declare module 'claude-code' {
       events: Shaped<CodebookEvent[]>
       factories: Shaped<CodebookFactory[] | null>
       picked: Shaped<CodebookFactory | null>
+      backlogPage: Shaped<CodebookBacklogPage | null>
       link: Shaped<CodebookLink>
       busy: string | null
       sendingBack: boolean

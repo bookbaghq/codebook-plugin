@@ -3,11 +3,11 @@
 // the latest events. MadeBook's style in CodeBook's teal. Pictures are Svg on the desktop; the terminal
 // draws the same pane in words.
 
-import { backlogText } from './backlog'
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, RenderElement, RenderInput } from 'claude-code'
 
 import type { CodebookLink, CodebookMode, CodebookStation, CodebookStory, CodebookTrail, CodebookWatch } from '../types'
+import { readBacklog } from './backlog'
 import { ART } from './art'
 import type { ArtName } from './art'
 import {
@@ -28,6 +28,7 @@ const active = atom({ plugin: 'codebook', key: 'active' } as const, null, { shap
 const story = atom({ plugin: 'codebook', key: 'story' } as const, null, { shape: 'story-4' })
 const events = atom({ plugin: 'codebook', key: 'events' } as const, [], { shape: 'events-1' })
 const factories = atom({ plugin: 'codebook', key: 'factories' } as const, null, { shape: 'factories-1' })
+const backlogPage = atom({ plugin: 'codebook', key: 'backlogPage' } as const, null, { shape: 'backlog-1' })
 const picked = atom({ plugin: 'codebook', key: 'picked' } as const, null, { shape: 'factories-1' })
 const link = atom({ plugin: 'codebook', key: 'link' } as const, { state: 'idle' } as CodebookLink, {
   shape: 'link-1',
@@ -528,6 +529,24 @@ export async function drawPane($: EngineInterface, e: RenderInput): Promise<Rend
   async function drawPicker(): Promise<RenderElement> {
     const list = await read($, factories)
     const chosen = await read($, picked)
+    const page = await read($, backlogPage)
+    async function showPage(factory: string, workflow?: string, offset = 0) {
+      const result = await readBacklog($, factory, workflow, offset)
+      await update($, backlogPage, () => result)
+    }
+    const nextPage = page?.next
+    if (chosen && page?.factory === chosen.factory) return (
+      <Box flexDirection="column" gap={1}>
+        {header}
+        {page.lines.map((line, index) => <Text key={`backlog-line-${index}`}>{line}</Text>)}
+        {nextPage && (
+          <Button key="next-backlog" onPress={() => showPage(nextPage.factory, nextPage.workflow, nextPage.offset)}>
+            Next page
+          </Button>
+        )}
+        <Button key="back-to-factory" onPress={() => update($, backlogPage, () => null)}>← Back to factory</Button>
+      </Box>
+    )
     const body =
       list === null ? (
         <Button
@@ -565,7 +584,7 @@ export async function drawPane($: EngineInterface, e: RenderInput): Promise<Rend
       ) : (
         <Box flexDirection="column" gap={1}>
           <Text weight="bold">{chosen.name}</Text>
-          <Button key="backlog" onPress={async () => { $.ui.log(await backlogText($, [chosen.factory])) }}>
+          <Button key="backlog" onPress={() => showPage(chosen.factory)}>
             View backlog
           </Button>
           {Input && chosen.mayStart ? <Text dimColor>What should the factory make?</Text> : null}

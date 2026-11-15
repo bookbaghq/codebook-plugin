@@ -1,4 +1,5 @@
 import type { EngineInterface } from 'claude-code'
+import type { CodebookBacklogPage } from '../types'
 import { call } from './connector'
 
 export const backlogUsage = '/factory backlog <factory> [--workflow "<name or ID>"] [--offset <number>]'
@@ -34,11 +35,16 @@ export async function backlogText($: EngineInterface, words: string[]): Promise<
   }
   const factory = factoryWords.join(' ').trim()
   if (!factory) return 'Usage: ' + backlogUsage
-  const got = await call<Board>($, 'factory_board', { factory, ...(workflow ? { workflow } : {}), backlog_offset: offset ?? 0 })
-  if (!got.ok) return got.message
+  const page = await readBacklog($, factory, workflow, offset)
+  return page.lines.join('\n')
+}
+
+export async function readBacklog($: EngineInterface, factory: string, workflow?: string, offset = 0): Promise<CodebookBacklogPage> {
+  const got = await call<Board>($, 'factory_board', { factory, ...(workflow ? { workflow } : {}), backlog_offset: offset })
+  if (!got.ok) return { factory, lines: [got.message] }
   const board = got.data
   const page = board?.backlog
-  if (!page) return 'This CodeBook server did not return backlog pages. Open the Backlog drawer in CodeBook to see its stories.'
+  if (!page) return { factory, lines: ['This CodeBook server did not return backlog pages. Open the Backlog drawer in CodeBook to see its stories.'] }
   const command = `/factory backlog ${board.factory} --workflow ${board.workflow.workflow}`
   const lines = [`${board.name} · ${board.workflow.name} backlog`]
   if (!page.stories.length) {
@@ -52,5 +58,9 @@ export async function backlogText($: EngineInterface, words: string[]): Promise<
     }
     if (page.next_offset !== null) lines.push(`Next page: ${command} --offset ${page.next_offset}`)
   }
-  return lines.join('\n')
+  return {
+    factory: board.factory,
+    lines,
+    next: page.next_offset === null ? undefined : { factory: board.factory, workflow: board.workflow.workflow, offset: page.next_offset },
+  }
 }
