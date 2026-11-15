@@ -1,0 +1,41 @@
+name: Factory plugin on Windows
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  plugin:
+    runs-on: windows-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Read a transcript range with Git for Windows
+        shell: pwsh
+        run: |
+          $gitBin = Split-Path (Get-Command git.exe).Source
+          $usrBin = Join-Path (Split-Path $gitBin) 'usr/bin'
+          $env:PATH = "$usrBin;$env:PATH"
+          $sample = Join-Path $env:RUNNER_TEMP 'factory UTF8 sample.txt'
+          [IO.File]::WriteAllText($sample, 'aébc', [Text.UTF8Encoding]::new($false))
+          $file = $sample.Replace('\', '/')
+          $range = & sh -c 'tail -c +"$1" "$2" | head -c "$3"' sh 4 $file 2
+          if ($LASTEXITCODE -ne 0 -or "$range" -ne 'bc') { throw 'Incorrect UTF-8 byte range' }
+      - name: Run the native Claude Code plugin tests
+        shell: pwsh
+        run: |
+          $cli = Join-Path $env:RUNNER_TEMP 'factory-plugin-cli'
+          npm install --prefix $cli --no-audit --no-fund @anthropic-ai/claude-code@2.1.325
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $claude = Join-Path $cli 'node_modules/.bin/claude.cmd'
+          & $claude --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $claude plugin test .
+          exit $LASTEXITCODE

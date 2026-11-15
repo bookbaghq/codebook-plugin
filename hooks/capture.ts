@@ -269,14 +269,21 @@ export async function markSession($: EngineInterface, sessionId: string): Promis
   }
 }
 
+// Windows file APIs and Git for Windows accept forward slashes, including UNC paths.
+function transcriptPath(path: string): string {
+  return /^(?:[A-Za-z]:[\\/]|\\\\)/.test(path) ? path.replace(/\\/g, '/') : path
+}
+
 /** What a settings-hook event says about where a session's transcript is. */
 export async function noteTranscript($: EngineInterface, sessionId: unknown, path: unknown): Promise<void> {
   due = true
-  if (typeof sessionId !== 'string' || typeof path !== 'string' || !path || path.includes('/subagents/')) return
+  if (typeof sessionId !== 'string' || typeof path !== 'string' || !path) return
+  const file = transcriptPath(path)
+  if (file.includes('/subagents/')) return
   // Known from the session's first event, because a manager's one turn can run for an hour: it must not wait for the turn's end.
-  pathOf.set(sessionId, path)
+  pathOf.set(sessionId, file)
   const kept = await keptOf($, sessionId)
-  if (kept && kept.path !== path) await $.store.set(keyOf(sessionId), { ...kept, path })
+  if (kept && kept.path !== file) await $.store.set(keyOf(sessionId), { ...kept, path: file })
 }
 
 export const noteDue = (): void => { due = true }
@@ -515,7 +522,8 @@ export async function captureCommand($: EngineInterface, verb: string): Promise<
 async function backfill($: EngineInterface): Promise<string> {
   const own = await keptOf($, await $.session.id())
   if (!own?.path) return 'Use CodeBook in this session first, so it knows where this project\'s conversations are.'
-  const dir = own.path.slice(0, own.path.lastIndexOf('/'))
+  const file = transcriptPath(own.path)
+  const dir = file.slice(0, file.lastIndexOf('/'))
   const names = (await $.fs.list(dir)).filter((e) => e.name.endsWith('.jsonl')).map((e) => e.name)
   let added = 0
   for (let at = 0; at < names.length; at += 50) {

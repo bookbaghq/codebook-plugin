@@ -318,7 +318,7 @@ A session that calls CodeBook is saved to your CodeBook account as it happens, f
 - **What it leaves out**: the transcript's bookkeeping (API request records, file history, costs, the instruction text repeated each turn), about three quarters of the file. Images go as a line saying one was there. The middle of a block over 280,000 characters is not saved, and the row says so.
 - **It needs one permission**: `mcp__plugin_codebook_codebook__capture_transcript` in `permissions.allow`, under Auto mode above. Without it nothing is saved, and it says so once.
 - **`/factory capture off`** stops it on this computer; `/factory capture on` starts it again; `/factory capture status` says where it stands; `/factory capture backfill` uploads this project's older sessions that used CodeBook. Saved conversations in the app has the same switch for every computer, and how long they are kept (a year by default). What is said while it is off is never uploaded later, even after turning it back on.
-- It reads the file with `sh`, `tail` and `head`, so it needs a POSIX shell: on Windows without one nothing is saved.
+- Saved conversations read byte ranges with `sh`, `tail` and `head`. On native Windows, make these Git for Windows utilities available on the PATH used to start Claude Code. Backfilling earlier conversations also uses `grep`. In WSL, use the utilities in that distribution.
 
 Claude's chat tab and ChatGPT cannot do this: a connector sees tool calls, never the conversation. There, ask the model to save the chat, and it writes a copy with `save_conversation`, labelled in the app as a copy the model wrote. Or import the app's export under Saved conversations.
 

@@ -128,6 +128,11 @@ test('the same cases as the server\'s test: key formats go, near misses stay, tw
 const TRANSCRIPT = '/tmp/project/session-a.jsonl'
 type Upload = { session: { id: string; title?: string; agent?: { id: string; label?: string } }; entries?: { key: string }[]; links?: unknown[] }
 
+// The native test host resolves the fixture's root to the current drive on Windows.
+function fixturePath(path: unknown): string {
+  return String(path).replace(/\\/g, '/').replace(/^[A-Za-z]:(?=\/tmp\/project(?:\/|$))/, '')
+}
+
 function world(on: On, opts: { stored?: Record<string, unknown>; fail?: () => string | null; capture?: () => string } = {}) {
   const kept = new Map<string, unknown>(Object.entries(opts.stored ?? {}))
   const files = new Map<string, string>()
@@ -142,17 +147,17 @@ function world(on: On, opts: { stored?: Record<string, unknown>; fail?: () => st
   on('ui.toast', () => ({ value: undefined }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('mcp.connect', () => ({ value: { isConnected: true, server: 'plugin:codebook:codebook' } }))
-  on('fs.stat', (_, e) => { const text = files.get(String(e.path)); if (text === undefined) throw new Error('ENOENT'); return { value: { kind: 'file', size: new TextEncoder().encode(text).length, mtimeMs: 0, isLink: false } } })
+  on('fs.stat', (_, e) => { const text = files.get(fixturePath(e.path)); if (text === undefined) throw new Error('ENOENT'); return { value: { kind: 'file', size: new TextEncoder().encode(text).length, mtimeMs: 0, isLink: false } } })
   on('fs.list', (_, e) => {
-    const dir = `${e.path}/`
+    const dir = `${fixturePath(e.path)}/`
     const names = [...files.keys()].filter((f) => f.startsWith(dir) && !f.slice(dir.length).includes('/')).map((f) => f.slice(dir.length))
     if (!names.length) throw new Error('ENOENT')
     return { value: names.map((name) => ({ name, kind: 'file', size: 0, mtimeMs: 0, isLink: false })) }
   })
-  on('fs.read', (_, e) => { const text = files.get(String(e.path)); if (text === undefined) throw new Error('ENOENT'); return { value: text } })
+  on('fs.read', (_, e) => { const text = files.get(fixturePath(e.path)); if (text === undefined) throw new Error('ENOENT'); return { value: text } })
   on('process.run', (_, e) => {
     const [, , , , offset, path, length] = e.argv as string[]
-    const bytes = new TextEncoder().encode(files.get(path) ?? '')
+    const bytes = new TextEncoder().encode(files.get(fixturePath(path)) ?? '')
     return { value: { exitCode: 0, stdout: new TextDecoder().decode(bytes.slice(Number(offset) - 1, Number(offset) - 1 + Number(length))), stderr: '' } }
   })
   on('mcp.call', (_, e) => {
@@ -238,6 +243,16 @@ test('a sub-agent\'s transcript goes up as its own conversation, with its type a
   const agent = w.uploads.find((u) => u.session.agent)
   expect(agent?.session.agent).toEqual({ id: 'a0b1', type: 'codebook:factory-worker', label: 'Alex works #2 at Build' } as never)
   expect(keys(w.uploads)).toEqual(['u1:0', 's1:0', 's2:0'])
+})
+
+test('a native Windows sub-agent stop keeps the parent transcript selected', async ($, on) => {
+  const w = world(on)
+  await begin($)
+  const nativeStop = (path: string) => ($ as any).classic.Stop({ session_id: 'session-a', transcript_path: path, cwd: 'C:\\tmp\\project', hook_event_name: 'Stop', stop_hook_active: false })
+  await nativeStop('C:\\tmp\\project\\session-a.jsonl')
+  await $.tool.call(usesCodeBook as never)
+  await nativeStop('C:\\tmp\\project\\session-a\\subagents\\agent-a0b1.jsonl')
+  expect(w.kept.get('capture-1:session-a')).toMatchObject({ path: 'C:/tmp/project/session-a.jsonl' })
 })
 
 test('a session that ended with rows not uploaded is caught up by a later one, from where it stopped', async ($, on) => {
