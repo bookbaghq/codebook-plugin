@@ -31,6 +31,7 @@ import {
   unfollow,
 } from './factory'
 import type { Status } from './factory'
+import { backlogText, backlogUsage } from './backlog'
 import { orderReport, type WorkOrderReport } from './work-order-report'
 import { overnightArguments, overnightRequest, overnightUsage } from './overnight'
 import { drawPane, PANE } from './pane'
@@ -93,8 +94,9 @@ const HELP = [
   overnightUsage + ' — propose a cloud work order with milestones',
   '/factory run <factory> "<story title>" [--here | --cloud] — start a story and follow it',
   "/factory status — where the followed story is, and where each repository's code is on this computer",
+  backlogUsage + ' — list unplaced stories and pending proposals',
   '/factory list — the factories you can see',
-  '/factory follow <story> [<factory>] — follow a story already on the board (#57 needs the factory)',
+  '/factory follow <story> [<factory>] — follow a story on the board or in the backlog (#57 needs the factory)',
   '/factory here | cloud — where agent stations of the next story run',
   '/factory stop — stop following the story',
   '/factory outside | inside — in a factory\'s checkout: work outside the factory for this session (no story first, no question before a push), or through it again',
@@ -132,7 +134,7 @@ async function storyText($: EngineInterface): Promise<{ text: string; context?: 
           ? s.waitingClaimedByYou
             ? 'being worked here'
             : 'waiting for an agent here'
-          : 'moving'
+          : s.inBacklog ? 'in the backlog' : 'moving'
   const text = [`${a.reference} "${a.title}" (${a.factoryName}) — ${where}`, ...lines, a.url ?? ''].join('\n').trim()
   return { text, context: [JSON.stringify({ codebook_story: a, stations: s.stations, waiting: s.waitingOn })] }
 }
@@ -322,7 +324,7 @@ export const register: Register = on => {
     await $.command.register({
       name: 'factory',
       description: 'CodeBook factories: open the Factory pane, start a story (run), or show its status',
-      argumentHint: '[overnight <factory> "<goal>" [--max-usd <amount>] [--deadline <ISO time>] | report <factory> <WO-7> | run <factory> "<story>" | status | follow <story> | here | cloud | stop | outside | inside | capture | prove]',
+      argumentHint: '[overnight <factory> "<goal>" [--max-usd <amount>] [--deadline <ISO time>] | report <factory> <WO-7> | backlog <factory> | run <factory> "<story>" | status | follow <story> | here | cloud | stop | outside | inside | capture | prove]',
     })
     // Which factory works on this folder's repository, asked now so the first prompt need not wait (never awaited, never fatal).
     try { await sweepCheckouts($) } catch { /* next session */ }
@@ -433,6 +435,8 @@ export const register: Register = on => {
       }
     }
 
+    if (lower === 'backlog') return { text: await backlogText($, rest) }
+
     if (lower === 'report') {
       const order = rest.at(-1) ?? '', factory = rest.slice(0, -1).join(' ')
       if (!factory || !/^wo-?[1-9]\d*$/i.test(order)) return { text: 'Usage: /factory report <factory> <WO-7>' }
@@ -443,7 +447,8 @@ export const register: Register = on => {
     if (lower === 'status') return statusText($)
 
     if (lower === 'follow') {
-      const [storyRef = '', factory = ''] = rest
+      const [storyRef = '', ...factoryWords] = rest
+      const factory = factoryWords.join(' ')
       if (!storyRef) return { text: 'Usage: /factory follow <story> [<factory>]' }
       const args: Record<string, unknown> = { story: storyRef }
       if (factory) args.factory = factory

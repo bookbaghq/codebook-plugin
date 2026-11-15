@@ -136,7 +136,7 @@ function status58(asks: boolean): Record<string, unknown> {
 }
 
 /** The engine beneath the plugin: a connected codebook server answering from the fixtures above. */
-function engine(on: On, at: { now: At; asks58?: boolean; session?: string; stored?: Record<string, unknown>; controls?: boolean }) {
+function engine(on: On, at: { now: At; asks58?: boolean; session?: string; stored?: Record<string, unknown>; controls?: boolean; backlog?: boolean }) {
   const calls: Calls = []
   const prompts: string[] = []
   const filled: string[] = []
@@ -182,11 +182,20 @@ function engine(on: On, at: { now: At; asks58?: boolean; session?: string; store
     return { result: { content: [{ type: 'text', text: JSON.stringify(data) }], structuredContent: data }, text: JSON.stringify(data) }
   })
   function answer(tool: string, args: Record<string, unknown>) {
+    if (tool === 'factory_board' && at.backlog && typeof args.backlog_offset === 'number') {
+      const stories = Array.from({ length: 17 }, (_, i) => ({ story: `s${i + 1}`, reference: `#${i + 1}`, title: `Story ${i + 1}`,
+        proposal: i === 0 ? { reference: 'WO-6', item: 3, waiting_for_proceed: true } : null }))
+      if (args.workflow === 'Empty workflow') stories.length = 0
+      const offset = args.backlog_offset
+      return { ...BOARD, backlog_count: stories.length, backlog: { offset, limit: 15, next_offset: offset + 15 < stories.length ? offset + 15 : null,
+        stories: stories.slice(offset, offset + 15) } }
+    }
+    if (tool === 'story_status' && args.story === 's1') return { ...status('build'), story: { story: 's1', reference: '#1', title: 'Story 1' }, in_backlog: true, run: null, station: null, waiting: null }
     if (tool === 'work_orders') return { work_order: { reference: 'WO-7', title: 'Migrate exporter', status: 'open', paused: true,
       ...(at.controls && { execution_limits: { max_usd: '25.0000', deadline: '2030-05-15T12:00:00.000Z', deadline_reached: true, last_refusal: 'This model has no configured price.' } }) }, factory_paused: false,
       ...(at.controls && { spend_balance: { available_usd: '17.2500', reserved_usd: '5.0000', spent_usd: '2.7500' },
         production_watch: { enabled: true, owner_name: 'Mia', filter: 'Export failed', can_decide: false, hold_id: 82, incidents: [
-          { id: 82, title: 'Export failed twice', severity: 'high', deployed_service: 'exporter', pull_number: 92, commit: 'abc123', incident_url: 'https://monitor.example/23', deploy_url: 'https://deploy.example/55', resumed_at: null, resumed_by: null },
+          { id: 82, deploy_id: 55, title: 'Export failed twice', severity: 'high', deployed_service: 'exporter', pull_number: 92, commit: 'abc123', incident_url: 'https://monitor.example/23', deploy_url: 'https://deploy.example/55', resumed_at: null, resumed_by: null },
           { id: 77, title: 'Earlier export failure', pull_number: 88, commit: 'bc1234', rollback_decision: 'rolled_back', decision_note: 'Previous release restored.', resumed_at: 42, resumed_by: 'Tom' },
           { id: 76, title: 'Retry burst', resumed_at: 41, resumed_by: 'Tom', rollback_decision: 'kept_deployment' },
           { id: 75, title: 'Historical alert', resumed_at: 39, resumed_by: 'Sam' },
@@ -299,6 +308,63 @@ test('Work it here offers the worker request for a station waiting here', async 
   await ui.unmount()
 })
 
+test('backlog pages are read-only, followable, scoped to the selected workflow, and distinguish empty pages', async ($, on) => {
+  const { calls, filled, prompts } = engine(on, { now: 'build', backlog: true })
+  const first = await $.command.run(typed('backlog Platform Payments --workflow "Release QA"'))
+  expect(first.text).toContain('Showing 1–15 of 17.')
+  expect(first.text).toContain('#1 Story 1 · WO-6 item 3 (waiting for proceed) · /factory follow s1')
+  const next = '/factory backlog k3Vb9QmZ --workflow wf12 --offset 15'
+  expect(first.text).toContain(next)
+  const last = await $.command.run(typed(next.slice('/factory '.length)))
+  expect(last.text).toContain('Showing 16–17 of 17.')
+  expect(last.text).not.toContain('Next page')
+  expect((await $.command.run(typed('backlog Payments --workflow wf12 --offset 35'))).text).toContain('No stories at offset 35. Start again: /factory backlog k3Vb9QmZ --workflow wf12')
+  expect((await $.command.run(typed('backlog Payments --workflow "Empty workflow"'))).text).toContain('No stories in this backlog.')
+  expect(calls.map(c => c.tool)).toEqual(Array(4).fill('factory_board'))
+  expect(calls[0].args).toEqual({ factory: 'Platform Payments', workflow: 'Release QA', backlog_offset: 0 })
+  expect(calls[1].args).toEqual({ factory: 'k3Vb9QmZ', workflow: 'wf12', backlog_offset: 15 })
+  expect([...prompts, ...filled]).toEqual([])
+})
+
+test('backlog reports older servers and rejects invalid options before contacting CodeBook', async ($, on) => {
+  const { calls } = engine(on, { now: 'build' })
+  for (const args of ['', '--offset 3', 'Payments --offset -1', 'Payments --offset 2.3', 'Payments --offset 9007199254740992',
+    'Payments --offset', 'Payments --offset 0 --offset 4', 'Payments --workflow', 'Payments --workflow --offset 0', 'Payments --wrong 2'])
+    expect((await $.command.run(typed('backlog ' + args))).text).toContain('Usage:')
+  expect(calls.length).toBe(0)
+  const old = await $.command.run(typed('backlog Payments'))
+  expect(old.text).toContain('server did not return backlog pages')
+  expect(old.text).not.toContain('No stories')
+  expect(calls).toEqual([{ tool: 'factory_board', args: { factory: 'Payments', backlog_offset: 0 } }])
+})
+
+test('the picker can read the backlog without starting a story or calling a model', async ($, on) => {
+  const { calls, filled, prompts } = engine(on, { now: 'build', backlog: true })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'load' })
+  await ui.press({ key: 'pick-k3Vb9QmZ' })
+  await ui.press({ key: 'backlog' })
+  expect(await ui.find({ type: 'Text', text: /^Showing 1–15 of 17/ })).toBeDefined()
+  expect(calls.at(-1)).toEqual({ tool: 'factory_board', args: { factory: 'k3Vb9QmZ', backlog_offset: 0 } })
+  await ui.press({ key: 'next-backlog' })
+  expect(await ui.find({ type: 'Text', text: /^Showing 16–17 of 17/ })).toBeDefined()
+  expect(calls.at(-1)).toEqual({ tool: 'factory_board', args: { factory: 'k3Vb9QmZ', workflow: 'wf12', backlog_offset: 15 } })
+  await ui.press({ key: 'back-to-factory' })
+  expect(await ui.find({ type: 'Button', key: 'backlog' })).toBeDefined()
+  expect([...filled, ...prompts]).toEqual([])
+  await ui.unmount()
+})
+
+test('follow sends the full factory name and status identifies a story waiting in the backlog', async ($, on) => {
+  const { calls } = engine(on, { now: 'build' })
+  await $.command.run(typed('follow s1 Platform Payments'))
+  expect(calls[0]).toEqual({ tool: 'story_status', args: { story: 's1', factory: 'Platform Payments', limit: 1 } })
+  const result = await $.command.run(typed('status'))
+  expect(result.text).toContain('in the backlog')
+  expect(result.text).not.toContain('moving')
+})
+
 test('a new terminal can read an overnight report without approving, resuming or running a model', async ($, on) => {
   const { calls, prompts, filled } = engine(on, { now: 'build' })
   const bad = await $.command.run(typed('report Payments'))
@@ -314,7 +380,7 @@ test('a new terminal can read an overnight report without approving, resuming or
 test('report reads order limits, reserved funds, a held operation and the human production decision', async ($, on) => {
   const { calls, prompts, filled } = engine(on, { now: 'build', controls: true })
   const report = await $.command.run(typed('report Payments WO-7'))
-  for (const text of ['spend limit at configured rates: $25.0000', '$17.2500 available', '$5.0000 reserved', '$2.7500 recorded', '2030-05-15T12:00:00.000Z (reached', 'This model has no configured price.', 'Mia watches alerts containing "Export failed"', 'Production hold #82', 'Review is with the watch owner or work-order creator', 'Export failed twice (high, exporter, PR #92, commit abc123)', 'https://monitor.example/23', 'https://deploy.example/55', 'resumed by Tom', 'Rolled back — Previous release restored.', 'Kept deployment', 'Decision not recorded', 'Another unresolved alert']) expect(report.text).toContain(text)
+  for (const text of ['spend limit at configured rates: $25.0000', '$17.2500 available', '$5.0000 reserved', '$2.7500 recorded', '2030-05-15T12:00:00.000Z (reached', 'This model has no configured price.', 'Mia watches alerts containing "Export failed"', 'Production hold #82', 'Review is with the watch owner or work-order creator', 'Export failed twice (high, exporter, deployment #55, PR #92, commit abc123)', 'https://monitor.example/23', 'https://deploy.example/55', 'resumed by Tom', 'Rolled back — Previous release restored.', 'Kept deployment', 'Decision not recorded', 'Another unresolved alert']) expect(report.text).toContain(text)
   expect(calls).toEqual([{ tool: 'work_orders', args: { factory: 'Payments', order: 'WO-7' } }])
   expect([...prompts, ...filled].length).toBe(0)
 })
