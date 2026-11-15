@@ -63,3 +63,35 @@ jobs:
             throw 'An installed plugin must display its factory commands offline.'
           }
           Write-Host "Verified installed CodeBook $($package.version) and /factory help."
+      - name: Read the factory list and a workflow backlog in the installed Windows CLI
+        shell: pwsh
+        run: |
+          $claude = Join-Path $env:RUNNER_TEMP 'factory-plugin-cli/node_modules/.bin/claude.cmd'
+          $env:CLAUDE_CONFIG_DIR = Join-Path $env:RUNNER_TEMP 'factory-read-profile'
+          $env:CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = '1'
+          $env:ANTHROPIC_BASE_URL = 'http://127.0.0.1:1'
+          $env:ANTHROPIC_API_KEY = 'offline-test-fixture'
+          $fixture = Join-Path $env:RUNNER_TEMP 'factory-read-marketplace'
+          $archive = Join-Path $env:RUNNER_TEMP 'factory-read-marketplace.tar'
+          git archive -o $archive HEAD
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Path $fixture | Out-Null
+          tar -xf $archive -C $fixture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          # Install the same plugin code with only its connector address pointed at the local fixture.
+          $service = Join-Path $fixture 'test/support/native-factory-reads.mjs'
+          $connector = @{ mcpServers = @{ codebook = @{ command = (Get-Command node.exe).Source; args = @($service) } } }
+          $connector | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $fixture '.mcp.json') -Encoding utf8
+          Set-Location $env:RUNNER_TEMP
+          & $claude plugin marketplace add $fixture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $claude plugin install codebook@codebook
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $list = (& $claude -p '/factory list') -join [Environment]::NewLine
+          if ($LASTEXITCODE -ne 0 -or $list -notmatch 'Acceptance Factory \(Engineering\)') { throw "Unexpected factory list: $list" }
+          $backlog = (& $claude -p '/factory backlog acceptance --workflow wf1 --offset 15') -join [Environment]::NewLine
+          if ($LASTEXITCODE -ne 0 -or $backlog -notmatch 'Showing 16–16 of 16' -or $backlog -notmatch '/factory follow story16') {
+            throw "Unexpected scoped backlog: $backlog"
+          }
+          Write-Host 'Verified installed Factory commands through the local connector on native Windows.'
