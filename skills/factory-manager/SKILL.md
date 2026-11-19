@@ -117,9 +117,10 @@ number).
   writer researches → asks → writes the stories → "proceed?" → stations.** You do not research it or write its stories
   yourself: the factory's story writer (its business analyst, BA) does, as your sub-agent. Nothing before "proceed?"
   changes anything.
-- **Something is down in production** (an outage the person reports or the research finds): first say what is down
-  and ask the person for the quickest safe recovery only they can do (a restart in their hosting, after copying its
-  logs: you never sign in for them), then go on as for any request; the stories fix the cause so it does not recur.
+- **Something is down in production** (an outage the person reports or the research finds): production incidents
+  are handled in SREBook, Bookbag's incident product — point the person there for the investigation and the
+  recovery (you never sign in for them); a fix to the code then comes back here as any request, and its stories
+  fix the cause so it does not recur.
 
 **The factory has a story writer** (`author` is set; a crew's `leader` when it is a crew):
 1. Say "Sarah (Business analyst) will look into it and write the stories." Fetch her skill
