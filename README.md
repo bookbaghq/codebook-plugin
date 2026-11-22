@@ -235,8 +235,8 @@ On the board, Claude can also move and edit any card (`move_card`, `update_card`
 only after "proceed?", and CodeBook refuses unless the card's exact title is given.
 
 **The rest of the factory.** Claude can also read and use the factory's other screens: work orders (plan, replan,
-edit), the optimizer's recommendations (preview, then apply after your yes), test runs, operations (pause and resume,
-alerts), outcomes (report a production problem) and the dashboard. Anything that spends, reaches outside CodeBook or
+edit), test runs, operations (pause and resume,
+alerts), a story's outcome (report a production problem) and the dashboard. Anything that spends, reaches outside CodeBook or
 changes the factory waits for your yes; the kill switch and autonomy stay on the website.
 
 **Models.** Each station's agent runs on the Claude model CodeBook picks for it: the station's own when it is a Claude
@@ -332,7 +332,6 @@ On your computer that program is this plugin.
 | `hooks/` | The Factory pane, `/factory` and the repository guard (a Claude Code hooks module): `register.tsx`, `pane.tsx`, `factory.ts`, `connector.ts`, `guard.ts`, `resolve.ts` (what git and gh decide for a push), `checkout.ts` (a checkout that knows its factory: the lookup, the note for the session and the question before a push), `local.ts` (the checkouts `/factory status` shows), and `art.ts` (the illustrations, small WebP). |
 | `skills/factory-manager/` | The manager skill Run here follows: the code on your computer, stories, "proceed?", stations, people, narration. |
 | `agents/factory-worker.md` | The sub-agent that works one station run here as that station's agent. |
-| `agents/benchmark-worker.md` | The sub-agent that answers one benchmark run here, as the model the manager chose, for CodeBook's judge to grade. |
 | `hooks/proof.ts` | Proof runs: the repository's checks, run here boxed and reported by the plugin itself. |
 | `types/index.d.ts` | The pane's state contract. |
 | `test/` | Tests for `claude plugin test`. |
