@@ -171,7 +171,9 @@ function payloadOf(ran: { result?: unknown; text?: string }): unknown {
   }
 }
 
-export const register: Register = on => {
+export const register: Register = (on, options) => {
+  // The person's own list of hosts a proof run may reach beyond this computer (the `proof_hosts` option; egress.ts).
+  const proofHosts = options?.proof_hosts ?? null
   // The pane's own READS of the connector (listing factories, following the story the person chose): auto mode's
   // classifier judges the model's requests and has no verdict for a timer's read, so these are allowed here. Nothing
   // else is: writes are requests the person sends, and the model's calls keep the person's permission settings.
@@ -218,7 +220,7 @@ export const register: Register = on => {
       if (typeof asked === 'number') {
         let told: string
         try {
-          told = (await runProof($, { proof: asked, known: await read($, checkouts) })).text
+          told = (await runProof($, { proof: asked, known: await read($, checkouts), hosts: proofHosts })).text
         } catch (error) {
           told = `The CodeBook plugin could not run proof ${asked} here: ${error instanceof Error ? error.message : String(error)}. It is still waiting; /factory prove tries again.`
         }
@@ -353,7 +355,7 @@ export const register: Register = on => {
         if (!peeked.ok) return { text: peeked.message }
         if (peeked.waiting.length === 0) return { text: 'No proof run is waiting for this computer. One is asked for by an agent (request_proof) or with "Try it" under Factory settings → Proof runs.' }
       }
-      const done = await runProof($, { proof: wanted, known: await read($, checkouts) })
+      const done = await runProof($, { proof: wanted, known: await read($, checkouts), hosts: proofHosts })
       return { text: done.text }
     }
 
