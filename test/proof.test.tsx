@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
-import { boxedArgv, bubblewrapArgs, cleanEnvironment, seatbeltProfile, slugOf, summaryOf } from '../hooks/proof'
+import { boxedArgv, bubblewrapArgs, cleanEnvironment, reachOf, seatbeltProfile, slugOf, summaryOf } from '../hooks/proof'
 
 const OWN = 'mcp__plugin_codebook_codebook__'
 const HEAD = 'a'.repeat(40)
@@ -18,6 +18,14 @@ type World = {
   steps?: unknown[]
   system?: string
   lockfilesDiffer?: boolean
+  /** The recipe CodeBook answers (network, hosts); loopback and no hosts when left out. */
+  recipe?: Record<string, unknown>
+  /** Where `command -v node` finds Node; none when null. */
+  node?: string | null
+  /** What the proxy notes it refused, one `host:port reason` per line. */
+  refusedLog?: string
+  /** What the proxy prints before it ends: `ready …` by default. */
+  proxySays?: string
 }
 
 /** The engine, CodeBook and this computer, as one world; what ran, what was claimed and what was reported come back. */
@@ -25,6 +33,7 @@ function world(on: On, w: World) {
   const processes: string[][] = []
   const mcp: { tool: string; args: Record<string, unknown> }[] = []
   const reports: { url: string; auth: string; body: Record<string, unknown> }[] = []
+  const spawned: string[][] = []
   let now = 1_000_000
   mock.store(on)
   on('clock.now', () => ({ value: (now += 250) }))
@@ -37,6 +46,8 @@ function world(on: On, w: World) {
     processes.push(argv)
     const joined = argv.join(' ')
     if (argv[0] === 'uname') return out(`${w.system ?? 'Darwin'}\n`) as never
+    if (argv[0] === '/bin/sh' && argv[2] === 'command -v node') return (w.node === null ? out('', 1) : out(`${w.node ?? '/opt/homebrew/bin/node'}\n`)) as never
+    if (argv[0] === 'cat' && argv[1]?.includes('/.codebook/proof/egress-')) return out(w.refusedLog ?? '', w.refusedLog === undefined ? 1 : 0) as never
     if (argv[0] === '/usr/bin/sandbox-exec' && argv.at(-1) === '/usr/bin/true') return out('') as never
     if (argv[0] === '/usr/bin/bwrap' && argv.at(-1) === '/bin/true') return out('') as never
     if (argv[0] === 'git') {
@@ -59,12 +70,19 @@ function world(on: On, w: World) {
     }
     return out('') as never
   })
+  // The proxy: it says where it listens, then lives until the plugin closes its stream.
+  on('process.spawn', async function* (_, e) {
+    spawned.push([...e.argv])
+    const where = e.argv.at(-3) === 'tcp' ? '18601' : String(e.argv.at(-3))
+    yield { stream: 'stdout' as const, text: w.proxySays ?? `ready ${where} 4242\n` }
+    return { value: { code: 0, signal: null } } as never
+  })
   const steps = w.steps ?? [{ run: 71, name: 'test', line: 'npm test', timeout_seconds: 900, baseline: false }]
   const answer = (tool: string, args: Record<string, unknown>) =>
     tool === 'claim_proof'
       ? args.peek
         ? { waiting: w.waiting === false ? [] : [{ proof: 70, repository: 'acme/payments', default_branch: 'main', commands: ['test'], commit: null }] }
-        : { proof: 70, token: TOKEN, report_url: REPORT, report_path: '/kanban/api/proof/report', repository: { id: 5, full_name: 'acme/payments', default_branch: 'main' }, expected_commit: null, recipe: { revision: 2, install: 'npm ci', network: 'loopback' }, steps }
+        : { proof: 70, token: TOKEN, report_url: REPORT, report_path: '/kanban/api/proof/report', repository: { id: 5, full_name: 'acme/payments', default_branch: 'main' }, expected_commit: null, recipe: { revision: 2, install: 'npm ci', network: 'loopback', ...(w.recipe ?? {}) }, steps }
       : tool === 'request_proof'
         ? { proof: 70, where: 'here', commands: [{ name: 'test', status: 'queued' }] }
         : { ok: true }
@@ -85,7 +103,7 @@ function world(on: On, w: World) {
     const failed = typeof body.exit_code === 'number' && body.exit_code !== 0
     return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ data: true, recorded: true, status: body.skipped ? 'cancelled' : failed ? 'failed' : 'passed', tests: body.skipped ? 0 : 3, new_failures: failed ? 1 : 0, remaining: 0 }) } }
   })
-  return { processes, mcp, reports }
+  return { processes, mcp, reports, spawned }
 }
 
 test('the Seatbelt profile: writes only in the checkout, no credential folders, no network but the computer itself', () => {
@@ -231,4 +249,109 @@ test('the summary names what was not boxed', () => {
   const text = summaryOf('acme/payments', { kind: 'none', bin: null }, [{ name: 'lint', baseline: false, status: 'passed', exitCode: 0, tests: 0, newFailures: 0, isDirty: false, commit: HEAD }], [])
   expect(text).toContain('NOT boxed')
   expect(text).toContain('lint: passed at aaaaaaa')
+})
+
+// ── A list of allowed hosts (C27) ────────────────────────────────────────────────────────────────────────────────────
+
+const boxedLine = (w: { processes: string[][] }) => w.processes.find(argv => argv.includes('/bin/sh') && argv.at(-1)?.includes('npm test'))
+
+test('with no list nothing changes: no proxy, no proxy variables, the box allows the computer itself alone', async ($, on) => {
+  const w = world(on, { results: { 'head:npm test': { exit: 0, output: 'ok 1 - a\n' } } })
+  const asked = await $.tool.call({ tool: `${OWN}request_proof`, story: '6KjN' } as never)
+  expect(w.spawned.length).toBe(0)
+  expect(w.processes.some(argv => argv[2] === 'command -v node')).toBe(false)
+  const boxed = boxedLine(w)
+  expect(boxed?.[2]).toBe(seatbeltProfile({ dirs: [DIR, '/Users/me/.codebook/proof'], home: '/Users/me', network: 'loopback' }))
+  expect(boxed?.some(one => /_PROXY=/i.test(one))).toBe(false)
+  expect([w.reports[0]?.body.network, w.reports[0]?.body.hosts]).toEqual([undefined, undefined])
+  expect((asked.context ?? []).join('\n')).not.toContain('Network:')
+})
+
+test('the recipe\'s hosts: the proxy is started with them, the box stays shut, the command is told the proxy', async ($, on) => {
+  const w = world(on, { recipe: { hosts: ['registry.npmjs.org', '*.example.com:8443'] }, results: { 'head:npm test': { exit: 0, output: 'ok 1 - a\n' } } })
+  const asked = await $.tool.call({ tool: `${OWN}request_proof`, story: '6KjN' } as never)
+  // One proxy, Node from this computer's PATH, the validated rules as JSON, on 127.0.0.1 (macOS).
+  expect(w.spawned.length).toBe(1)
+  const proxy = w.spawned[0] ?? []
+  expect(proxy.slice(0, 2)).toEqual(['/opt/homebrew/bin/node', '-e'])
+  expect(JSON.parse(proxy.at(-4) ?? '[]')).toEqual([{ host: 'registry.npmjs.org', port: null, suffix: false, isPrivate: false }, { host: 'example.com', port: 8443, suffix: true, isPrivate: false }])
+  expect(proxy.at(-3)).toBe('tcp')
+  expect(proxy.at(-2)).toBe('/Users/me/.codebook/proof/egress-70.log')
+  // The Seatbelt profile is exactly the one with no network: the proxy on the computer itself is the only way out.
+  const boxed = boxedLine(w)
+  expect(boxed?.[2]).toBe(seatbeltProfile({ dirs: [DIR, '/Users/me/.codebook/proof'], home: '/Users/me', network: 'loopback' }))
+  expect(boxed?.[2]).toContain('(deny network*)')
+  expect(boxed).toContain('HTTPS_PROXY=http://127.0.0.1:18601')
+  expect(boxed).toContain('NO_PROXY=localhost,127.0.0.1,::1,.localhost')
+  // CodeBook is told the list the run had; the model reads it too.
+  expect([w.reports[0]?.body.network, w.reports[0]?.body.hosts]).toEqual(['hosts', ['registry.npmjs.org', '*.example.com:8443']])
+  expect((asked.context ?? []).join('\n')).toContain('Network: this computer and registry.npmjs.org, *.example.com:8443 (through the plugin\'s filtering proxy; the sandbox refused every other way out).')
+  // The proxy's notes are read and removed afterwards.
+  expect(w.processes.some(argv => argv[0] === 'rm' && argv.includes('/Users/me/.codebook/proof/egress-70.log'))).toBe(true)
+})
+
+test('a host the proxy refused is named in the summary; a refused entry is left out and said', async ($, on) => {
+  const w = world(on, {
+    recipe: { hosts: ['registry.npmjs.org', '*', '10.0.0.0/8'] },
+    refusedLog: 'example.org:443 not on this run\'s list of allowed hosts\nexample.org:443 not on this run\'s list of allowed hosts\nregistry.npmjs.org:22 not on this run\'s list of allowed hosts\n',
+    results: { 'head:npm test': { exit: 1, output: 'not ok 1 - fetch\n' } },
+  })
+  const asked = await $.tool.call({ tool: `${OWN}request_proof`, story: '6KjN' } as never)
+  expect(JSON.parse(w.spawned[0]?.at(-4) ?? '[]').map((one: { host: string }) => one.host)).toEqual(['registry.npmjs.org'])
+  const told = (asked.context ?? []).join('\n')
+  expect(told).toContain('Refused by the list: example.org:443, registry.npmjs.org:22.')
+  expect(told).toContain('Left out of the allowed hosts (the recipe): *, as a wildcard that matches every host would be the whole network.')
+  expect(told).toContain('Left out of the allowed hosts (the recipe): 10.0.0.0/8, as an address range or a path cannot be enforced; list each host.')
+})
+
+test('the person\'s own list (the proof_hosts option) is used, and a recipe that needs the whole network still has it', { options: { proof_hosts: 'pypi.org, files.pythonhosted.org' } }, async ($, on) => {
+  const w = world(on, { results: { 'head:npm test': { exit: 0, output: 'ok 1 - a\n' } } })
+  await $.tool.call({ tool: `${OWN}request_proof`, story: '6KjN' } as never)
+  expect(JSON.parse(w.spawned[0]?.at(-4) ?? '[]').map((one: { host: string }) => one.host)).toEqual(['pypi.org', 'files.pythonhosted.org'])
+  expect(w.reports[0]?.body.hosts).toEqual(['pypi.org', 'files.pythonhosted.org'])
+  // "full" is as before: no proxy, no deny.
+  expect(reachOf({ revision: 1, install: '', network: 'full' }, 'pypi.org')).toEqual({ network: 'full', rules: [], refused: [] })
+  expect(reachOf({ revision: 1, install: '', network: 'loopback' }, '').network).toBe('loopback')
+  expect(reachOf({ revision: 1, install: '', network: 'loopback', hosts: 'pypi.org' }, 'pypi.org').rules.length).toBe(1)
+})
+
+test('with no Node for the proxy the run reaches the computer itself only, and says so', async ($, on) => {
+  const w = world(on, { node: null, recipe: { hosts: ['registry.npmjs.org'] }, results: { 'head:npm test': { exit: 0, output: 'ok 1 - a\n' } } })
+  const asked = await $.tool.call({ tool: `${OWN}request_proof`, story: '6KjN' } as never)
+  expect(w.spawned.length).toBe(0)
+  expect(boxedLine(w)?.some(one => /_PROXY=/i.test(one))).toBe(false)
+  expect(boxedLine(w)?.[2]).toContain('(deny network*)')
+  expect(w.reports[0]?.body.network).toBe(undefined)
+  expect((asked.context ?? []).join('\n')).toContain('The allowed hosts were not reachable: the list of allowed hosts needs Node.js')
+})
+
+test('a proxy that ends before it is ready leaves the run on the computer itself', async ($, on) => {
+  const w = world(on, { proxySays: 'Error: listen EPERM\n', recipe: { hosts: ['registry.npmjs.org'] }, results: { 'head:npm test': { exit: 0, output: 'ok 1 - a\n' } } })
+  const asked = await $.tool.call({ tool: `${OWN}request_proof`, story: '6KjN' } as never)
+  expect(boxedLine(w)?.some(one => /_PROXY=/i.test(one))).toBe(false)
+  expect((asked.context ?? []).join('\n')).toContain('its proxy ended before it was ready')
+})
+
+test('on Linux the box keeps its own network; the proxy is a socket in the cache and a forwarder inside starts the line', async ($, on) => {
+  const w = world(on, { system: 'Linux', node: '/usr/bin/node', recipe: { hosts: ['registry.npmjs.org'] }, results: { 'head:npm test': { exit: 0, output: 'ok 1 - a\n' } } })
+  await $.tool.call({ tool: `${OWN}request_proof`, story: '6KjN' } as never)
+  const socket = '/Users/me/.codebook/proof/egress-70.sock'
+  expect(w.spawned[0]?.at(-3)).toBe(socket)
+  const boxed = w.processes.find(argv => argv[0] === '/usr/bin/bwrap' && argv.at(-1)?.includes('npm test')) ?? []
+  expect(boxed).toContain('--unshare-net')
+  expect(boxed.join(' ')).toContain('--bind /Users/me/.codebook/proof /Users/me/.codebook/proof')
+  const node = boxed.indexOf('/usr/bin/node')
+  expect(boxed.slice(node + 1, node + 2)).toEqual(['-e'])
+  expect(boxed.slice(node + 3, node + 8)).toEqual(['--', socket, '/bin/sh', '-c', `cd "${DIR}" && { npm test\n} 2>&1`])
+  expect(boxed).toContain('HTTPS_PROXY=http://127.0.0.1:3128')
+  expect(w.processes.some(argv => argv[0] === 'rm' && argv.includes(socket))).toBe(true)
+})
+
+test('boxedArgv: a list without a proxy tells the command nothing; "full" never gets the proxy', () => {
+  const env = ['PATH=/usr/bin']
+  const base = { sandbox: { kind: 'seatbelt' as const, bin: '/usr/bin/sandbox-exec' }, line: 'npm test', cwd: DIR, dirs: [DIR], home: '/Users/me', hidden: [], env }
+  expect(boxedArgv({ ...base, network: 'hosts', egress: null })).toEqual(boxedArgv({ ...base, network: 'loopback' }))
+  expect(boxedArgv({ ...base, network: 'full', egress: { kind: 'tcp', port: 18601 } }).some(one => one.startsWith('HTTPS_PROXY='))).toBe(false)
+  expect(boxedArgv({ ...base, network: 'hosts', egress: { kind: 'tcp', port: 18601 } })).toContain('HTTPS_PROXY=http://127.0.0.1:18601')
+  expect(bubblewrapArgs({ dirs: [DIR], hidden: [], network: 'hosts' })).toContain('--unshare-net')
 })
