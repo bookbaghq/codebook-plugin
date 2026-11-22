@@ -7,7 +7,8 @@
 //   2. runs each line in the person's checkout, boxed by the system's own sandbox where there is one (Seatbelt on macOS,
 //      bubblewrap on Linux): writes limited to the checkout, the proof cache and temporary folders; no reading of the
 //      folders credentials live in; a scrubbed environment; and no network beyond the computer itself unless the
-//      repository's recipe says its checks need it;
+//      repository's recipe says its checks need it, or a list of allowed hosts names some (egress.ts: a filtering
+//      proxy outside the box is then the only way out);
 //   3. when a check fails, runs the same line on the default branch in a separate worktree, so CodeBook can tell a
 //      failure that was already there from one this change made;
 //   4. reports each step to CodeBook over HTTPS with the token: exit code, the output (CodeBook reads the tests from
