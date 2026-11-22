@@ -1,8 +1,8 @@
 // The CodeBook plugin's hooks: the /factory command, the Factory pane beside the chat, the timer that follows the
-// story, the repository guard, a checkout that knows its factory (checkout.ts), saving conversations (capture.ts) and proof runs (proof.ts: the repository's checks, run
-// here and reported by the plugin itself). The plugin itself only reads CodeBook, apart from that upload of the person's
-// own conversation and those proof results; every other write is a request the person sends and Claude makes (Run here: the
-// codebook:factory-manager skill runs the stations with sub-agents).
+// story, the repository guard, a checkout that knows its factory (checkout.ts) and proof runs (proof.ts: the repository's checks, run
+// here and reported by the plugin itself). The plugin itself only reads CodeBook, apart from those proof results; every
+// other write is a request the person sends and Claude makes (Run here: the codebook:factory-manager skill runs the
+// stations with sub-agents).
 
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
@@ -35,7 +35,6 @@ import { backlogText, backlogUsage } from './backlog'
 import { orderReport, type WorkOrderReport } from './work-order-report'
 import { overnightArguments, overnightRequest, overnightUsage } from './overnight'
 import { drawPane, PANE } from './pane'
-import { captureAtEnd, captureCommand, captureTick, markSession, noteDue, noteTranscript } from './capture'
 import { runProof, waitingProofs } from './proof'
 
 // The pane's values, declared again here: the engine reads state only through atoms written in the same file.
@@ -61,7 +60,6 @@ let isPolling = false
 
 async function tick($: EngineInterface): Promise<void> {
   flushAsk($)
-  void captureTick($)
   if (isPolling) return
   const a = await read($, active)
   const others = await read($, watched)
@@ -101,7 +99,6 @@ const HELP = [
   '/factory stop — stop following the story',
   '/factory outside | inside — in a factory\'s checkout: work outside the factory for this session (no story first, no question before a push), or through it again',
   '/factory prove [<proof>] — run a waiting proof run here: the repository\'s checks, run and reported by the plugin itself',
-  '/factory capture [on | off | backfill] — whether this computer saves conversations that use CodeBook to your account',
 ].join('\n')
 
 async function statusText($: EngineInterface): Promise<{ text: string; context?: string[] }> {
@@ -141,12 +138,10 @@ async function storyText($: EngineInterface): Promise<{ text: string; context?: 
 
 /** The plugin's own connector tools, as the permission check and tool.call name them. */
 const OWN_TOOLS = 'mcp__plugin_codebook_codebook__'
-/** The reads the pane makes by itself (following the story the person chose); writes go through the person. */
-/** The plugin's own upload of this session's transcript (capture.ts). Its own rows, for its owner; it decides nothing. */
-const OWN_CAPTURE = `${OWN_TOOLS}capture_transcript`
 /** The plugin's own taking of a proof run (proof.ts): its answer carries the token the result is reported with, so the model never makes this call. */
 const OWN_CLAIM = `${OWN_TOOLS}claim_proof`
 const CLAIM_REFUSED = 'This is the CodeBook plugin\'s own call: it takes a proof run and reports the result itself. Ask for a proof with request_proof; you cannot run or report one.'
+/** The reads the pane makes by itself (following the story the person chose); writes go through the person. */
 const OWN_READS = new Set(
   [
     'list_factories',
@@ -183,15 +178,11 @@ export const register: Register = on => {
   on('tool.check', ($, e, next) =>
     next.origin.plugin === $.plugin.name && OWN_READS.has(e.tool)
       ? { decision: 'allow', reason: 'The CodeBook Factory pane following the story you chose (read only).' }
-      : next.origin.plugin === $.plugin.name && e.tool === OWN_CAPTURE
-        ? { decision: 'allow', reason: 'Saving this conversation to your own CodeBook account (/factory capture off stops it).' }
-        : e.tool === OWN_CAPTURE
-          ? { decision: 'deny', reason: 'This is the CodeBook plugin\'s own upload, not a tool for the model.' }
-          : next.origin.plugin === $.plugin.name && e.tool === OWN_CLAIM
-            ? { decision: 'allow', reason: 'The CodeBook plugin taking a proof run you or your agent asked for, to run the repository\'s checks here.' }
-            : e.tool === OWN_CLAIM
-              ? { decision: 'deny', reason: CLAIM_REFUSED }
-              : next(e),
+      : next.origin.plugin === $.plugin.name && e.tool === OWN_CLAIM
+        ? { decision: 'allow', reason: 'The CodeBook plugin taking a proof run you or your agent asked for, to run the repository\'s checks here.' }
+        : e.tool === OWN_CLAIM
+          ? { decision: 'deny', reason: CLAIM_REFUSED }
+          : next(e),
   ).catch(($, e, next) => next(e))
 
   // Claude's calls of the connector (the requests the pane offered, the factory-worker's reports): the pane takes
@@ -201,11 +192,6 @@ export const register: Register = on => {
     if (String(e.tool) === OWN_CLAIM && next.origin.plugin !== $.plugin.name) return { deny: CLAIM_REFUSED }
     const ran = await next(e)
     const tool = String(e.tool)
-    // A session the model called CodeBook in is saved (capture.ts), even if this call failed; the pane's own reads do not count.
-    // Nothing about saving may ever get between a tool call and what follows it, the guard's list included.
-    if (tool.startsWith(OWN_TOOLS) && next.origin.plugin !== $.plugin.name) {
-      try { await markSession($, await $.session.id()) } catch { /* the next call marks it */ }
-    }
     if (!tool.startsWith(OWN_TOOLS) || ran.deny !== undefined || ran.isError) return ran
     const name = tool.slice(OWN_TOOLS.length)
     const data = payloadOf(ran) as { run?: number; brief?: unknown; recorded?: boolean } | null
@@ -324,7 +310,7 @@ export const register: Register = on => {
     await $.command.register({
       name: 'factory',
       description: 'CodeBook factories: open the Factory pane, start a story (run), or show its status',
-      argumentHint: '[overnight <factory> "<goal>" [--max-usd <amount>] [--deadline <ISO time>] | report <factory> <WO-7> | backlog <factory> | run <factory> "<story>" | status | follow <story> | here | cloud | stop | outside | inside | capture | prove]',
+      argumentHint: '[overnight <factory> "<goal>" [--max-usd <amount>] [--deadline <ISO time>] | report <factory> <WO-7> | backlog <factory> | run <factory> "<story>" | status | follow <story> | here | cloud | stop | outside | inside | prove]',
     })
     // Which factory works on this folder's repository, asked now so the first prompt need not wait (never awaited, never fatal).
     try { await sweepCheckouts($) } catch { /* next session */ }
@@ -337,15 +323,6 @@ export const register: Register = on => {
     })
     return next(e)
   })
-
-  // Where each session's transcript is, and that there may be something to save. No work here: the timer does it.
-  on('classic.SessionStart', async ($, e, next) => { await noteTranscript($, e.session_id, e.transcript_path).catch(() => {}); return next(e) })
-  on('classic.UserPromptSubmit', async ($, e, next) => { await noteTranscript($, e.session_id, e.transcript_path).catch(() => {}); return next(e) })
-  on('classic.Stop', async ($, e, next) => { await noteTranscript($, e.session_id, e.transcript_path).catch(() => {}); return next(e) })
-  on('classic.SubagentStop', async ($, e, next) => { noteDue(); return next(e) })
-  // After a reload mid-turn the module has forgotten where the transcript is; the next tool call says.
-  on('classic.PostToolUse', async ($, e, next) => { await noteTranscript($, e.session_id, e.transcript_path).catch(() => {}); return next(e) })
-  on('session.end', async ($, e, next) => { await captureAtEnd($, e.sessionId).catch(() => {}); return next(e) })
 
   on('command.run', { command: 'factory' }, async ($, e) => {
     const [verb = '', ...rest] = words(e.args.trim())
@@ -367,8 +344,6 @@ export const register: Register = on => {
     }
 
     if (lower === 'help') return { text: HELP }
-
-    if (lower === 'capture') return { text: await captureCommand($, rest[0] ?? '') }
 
     if (lower === 'prove') {
       const wanted = rest[0] ? Number(rest[0].replace(/^#/, '')) : null

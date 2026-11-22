@@ -14,7 +14,7 @@ here stories alone. You talk to CodeBook only through the `codebook` connector's
 
 When the person chooses a cloud work order, including `/factory overnight`, read the factory’s manager brief. Propose the goal with `propose_stories { run_location: "cloud", ... }`. Pass an explicitly requested whole-order spend ceiling as numeric `max_usd` and an explicitly requested stop time as `deadline` (ISO 8601 including a time zone) on the new proposal. Resolve relative deadlines to an exact time and clarify ambiguous limits. Omit each limit the person left unspecified. “Overnight” alone supplies neither. Check that `proposal.execution_limits` contains every requested limit before offering confirmation. If an older server cannot enforce a requested limit, explain this and leave the proposal unconfirmed.
 
-Give each story a milestone number and acceptance criteria that name their evidence. Show the milestones, the proof required at each, and any human approval or missing runner. Explain the proposal’s continuation policy: when the factory only suggests work, a person must come back to release the next group. Ask “proceed?” before confirming. For the overnight command, include a dedicated work-order manager and its token ceiling in the approval. This ceiling covers the manager only. After approval, confirm the stories and open a fresh `open_sub_manager` under the main CodeBook manager conversation with the approved goal, constraints and evidence. Reuse an existing work-order manager. Give the person the work order’s reference, URL and manager reference. Offer `/factory report <factory> <WO-7>` for a read-only handoff from a fresh terminal. Read `work_orders` for later progress, including questions, checks, costs, the order’s balance and any last refusal or deadline. A `production_watch.hold_id` requires a human decision. Report the alert and deployment evidence. The watch owner or work-order creator reviews customer impact and any rollback in the deployment system. On their explicit request to resume, record their actual outcome for each distinct unresolved `deploy_id` in `production_watch.incidents`. Send `update_work_order` with `factory`, `order`, `status: "resume"`, the reviewed `production_hold_id`, and `deployment_decisions`. Each decision has the `deploy_id`, `rollback_decision` (`rolled_back` or `kept_deployment`), and an optional `decision_note` in their words. Ask for any missing outcome. If the server cannot record their decisions, keep the order paused and tell them. A newer hold requires a fresh decision. Reading a report leaves it paused. The cloud scheduler owns these stories after the terminal closes. The remaining Run here instructions apply to stories on the person’s machine.
+Give each story a milestone number and acceptance criteria that name their evidence. Show the milestones, the proof required at each, and any person's station or missing runner. Explain the proposal’s continuation policy: when the factory only suggests work, a person must come back to release the next group. Ask “proceed?” before confirming. For the overnight command, include a dedicated work-order manager and its token ceiling in the approval. This ceiling covers the manager only. After approval, confirm the stories and open a fresh `open_sub_manager` under the main CodeBook manager conversation with the approved goal, constraints and evidence. Reuse an existing work-order manager. Give the person the work order’s reference, URL and manager reference. Offer `/factory report <factory> <WO-7>` for a read-only handoff from a fresh terminal. Read `work_orders` for later progress, including questions, checks, costs, the order’s balance and any last refusal or deadline. A `production_watch.hold_id` requires a human decision. Report the alert and deployment evidence. The watch owner or work-order creator reviews customer impact and any rollback in the deployment system. On their explicit request to resume, record their actual outcome for each distinct unresolved `deploy_id` in `production_watch.incidents`. Send `update_work_order` with `factory`, `order`, `status: "resume"`, the reviewed `production_hold_id`, and `deployment_decisions`. Each decision has the `deploy_id`, `rollback_decision` (`rolled_back` or `kept_deployment`), and an optional `decision_note` in their words. Ask for any missing outcome. If the server cannot record their decisions, keep the order paused and tell them. A newer hold requires a fresh decision. Reading a report leaves it paused. The cloud scheduler owns these stories after the terminal closes. The remaining Run here instructions apply to stories on the person’s machine.
 
 ## When this applies
 
@@ -81,7 +81,9 @@ What is enforced and what is not: in a factory's checkout, outside a station's r
    may already be there.
 5. **At the start of each turn of factory work, call `needs_you { factory }`.** Ask each waiting question in the chat
    with its text (one at a time, with its likely answers) and answer it with `answer_question` in the person's words;
-   show each waiting approval or review as in section 4. Never `approve_station` in place of an answer.
+   show each waiting approval or review as in section 4. Never `approve_station` in place of an answer. It lists factory
+   work only: a person's station to approve and a question from a run. A merge waiting for a person is not listed, and
+   what must be approved before a change ships is MadeBook's.
 
 ## Step 0: the code on this computer
 
@@ -222,27 +224,21 @@ agent's word will say it is done, and offer to add criteria before they answer. 
 `propose_stories` answers `stories[].backlog`, the stories are already cards in the board's **Backlog drawer**, marked
 "Proposed · WO-7", running nothing: say so, with each card's link, and that the person may edit them there before
 answering (an older CodeBook keeps them as plan lines only: then they appear after "proceed"). Say who
-merges the stories' pull requests at Done, from `manager_brief.merge.sentence` as CodeBook wrote it (for example "Every
-station of this workflow is an agent's, so no person approves a commit and CodeBook does not merge: at Done its pull
-requests stay open …"); without it (an older CodeBook), say "CodeBook may merge at Done".
+merges the stories' pull requests at Done, from `manager_brief.merge.sentence` as CodeBook wrote it (for example "CodeBook merges each pull request when its story reaches Done, once its checks pass"); without it (an older CodeBook), say "CodeBook may merge at Done".
 
 **The stations are whatever `manager_brief.stations` says now.** No column is built in: not Review, not QA. Columns are the
 person's to change, so a station that is gone was removed on purpose (`station.removed` in `factory_events` says who). Do not
 report it as a problem or a surprise, investigate it, put it back, or do its work some other way. Read the brief again rather
 than rely on what the workflow looked like earlier in the conversation.
 
-**Who approves is the person's choice, and you ask.** When `manager_brief.merge.human_approval.ask` is set, no person works
-a station of this workflow and nobody has said what they want. Ask that question, as CodeBook wrote it, before "Proceed?",
-once per workflow, and name what the workflow has no station for: with no test station, no agent tests the work beyond the
-developer's own checks. If the person already told you in this conversation ("auto merge", "no review"), that is their
-answer: do not ask again.
-
-- They do not want a person → `set_human_approval { factory, workflow, human_approval: false, answer: "<their words>" }`.
-  CodeBook merges what finishes from then on, by its other rules. If its answer's `waiting` lists pull requests already at
-  Done, name each one and ask whether to include them; on a yes, call it again with `include_waiting: true`.
-- They will test or approve it themselves → `set_human_approval { ..., human_approval: true, answer: "<their words>" }`, and
-  offer to add a person's station on the website so CodeBook merges the commit they approve. Otherwise it waits for them at
-  the repository host.
+**A person approves a merge only at a person's station.** CodeBook keeps a station's pass rules and the stations a
+person works; it has no factory-wide approval switch, and you do not ask one. Approval rules live in MadeBook: with
+MadeBook linked, a merge also waits for its `madebook/compliance` check. A workflow with no person's station merges
+what reaches Done. When the person says they want to test or approve the work themselves, or no person works
+a station of this workflow and that seems to matter to them, name what the workflow has no station for (with no test
+station, no agent tests the work beyond the developer's own checks) and offer to add a person's station
+on the website (`add_station` adds only an agent's), so CodeBook merges the commit they approve. If they already told you in this
+conversation ("auto merge", "no review"), do not ask again.
 
 Never answer for them, and never treat a green QA as a yes. A stage the workflow does not have is not run: do not test in
 its place, and do not add a step of your own to replace it. Then ask, in these words: **"Proceed?"** Wait for the person.
@@ -404,10 +400,10 @@ app.codebook.work, where the card holds every comment, run, artifact and pull re
 **A story at Done can still leave work for the person.** When `story_status.done.needs_person` is true (or a pull
 request in `story_trail` has `merge: "left_for_person"`), nobody at CodeBook will merge it: say so plainly with
 `done.sentence` and each pull request's link (a draft stays a draft), and that the person reviews and merges it at the
-repository host. If `human_approval.ask` is set, or the person wants these merged, use `set_human_approval` as in section 3.
-Do not call the story finished without it.
+repository host. `needs_you` does not list it (it lists factory work only), so this summary is where the person
+hears of it. Do not call the story finished without it.
 
-**A merge that failed is not Done.** Where the person chose no human approval, a card whose merge fails moves back out of Done:
+**A merge that failed is not Done.** Where CodeBook merges, a card whose merge fails moves back out of Done:
 `story_status.merge_problem` says so, and `story_trail` has CodeBook's comment with the reason. Tell them plainly that the story
 is not done, with the reason and the link. A conflict or failing check goes back to the station that built it by itself. For
 anything else, such as branch protection, the person sorts out the cause and the story is moved to Done again (`move_card { card, to }`, after
