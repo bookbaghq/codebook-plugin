@@ -28,6 +28,11 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $claude plugin test .
           exit $LASTEXITCODE
+      - name: Check the rule sentences in the skill and the agent
+        shell: pwsh
+        run: |
+          node --test test/rule-texts.mjs
+          exit $LASTEXITCODE
       - name: Install the marketplace plugin and run its help command
         shell: pwsh
         run: |
