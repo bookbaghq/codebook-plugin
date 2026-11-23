@@ -7,7 +7,8 @@
 //
 // RULES below are the sentences CodeBook's server says to every assistant (bookbaghq/codebook-app,
 // components/kanban/app/service/managerGuide.js: DECIDES, ASK_ONLY, GOES_ALONE, LOCAL_TESTING, FINISH_WITHOUT,
-// MANAGER_LOCAL_TESTING, MANAGER_FINISH_WITHOUT, NO_RECIPE). Change one here only together with that file.
+// MANAGER_LOCAL_TESTING, MANAGER_FINISH_WITHOUT, NO_RECIPE, SETTINGS_TOGGLE, SETTINGS_ON, SETTINGS_OFF, SETTINGS_RULE,
+// BACKLOG_LOOK). Change one here only together with that file.
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -38,6 +39,11 @@ export const RULES = {
   ],
   MANAGER_LOCAL_TESTING: 'Tests run on a local copy of the app, never on production. The station\'s agent builds it from the checkout, starts it on free ports with a throwaway database, seeds it, and creates its own test accounts and organisations there, with stand-ins for sign-in and outside services.',
   MANAGER_FINISH_WITHOUT: 'Before a story waits for a person, try the local route first. If it can be finished with a stand-in, a recorded response or a contract test, have it finished that way, with what was not checked written on the card. A story that still waits says in one sentence what only the person can give.',
+  SETTINGS_TOGGLE: 'Let the manager change this factory\'s settings. It still asks you before each change.',
+  SETTINGS_ON: 'This factory lets you change its settings, and you still ask first. Say in the chat which setting you would change and what that does, and change it only after the person\'s yes.',
+  SETTINGS_OFF: 'This factory does not let you change its settings. Tell the person where the setting is, and change nothing.',
+  SETTINGS_RULE: 'A factory\'s settings are changed only where the factory lets you, by its own switch, and only after the person\'s yes each time. Where it does not, tell the person where the setting is, and change nothing.',
+  BACKLOG_LOOK: 'After each finished story, look at the Backlog too. Start the stories that are ready, as the factory\'s setting for new stories allows, and tell the person which ones are parked and on what.',
   NO_RECIPE: 'When a check or a proof cannot run because the repository has no recipe, do not stop there. Read the repository (its package scripts, CLAUDE.md and Dockerfile) and propose the recipe yourself. Where the factory lets you go alone it is saved and the check runs again; otherwise ask the person to save it. Passing a check by hand is the last resort.',
 }
 /** The fixed list, as ASK_ONLY names its six things. */
@@ -148,6 +154,26 @@ test('a story is finished with a stand-in, and the card says what was not checke
   carries(skill, 'The manager skill', RULES.MANAGER_FINISH_WITHOUT)
   carries(worker, 'The factory-worker agent', RULES.FINISH_WITHOUT)
   assert.ok(worker.includes('"Not checked:"'))
+})
+
+test('the factory\'s settings change only where its switch lets the manager, after the person\'s yes (Q9)', () => {
+  carries(skill, 'The manager skill', [RULES.SETTINGS_RULE, RULES.SETTINGS_TOGGLE, RULES.SETTINGS_ON, RULES.SETTINGS_OFF])
+  for (const part of ['`manager_brief.settings`', '`{ manager_may_change, switch, rule, where, now, change_with?, never }`', '`manager_may_change: true`', '`manager_may_change: false`',
+    '`change_factory_setting { factory, setting, value, reason }`', '`goes_alone`', '`check_cannot_run`', '`merge_outside_pull_requests`', '`pending: true`', '`manager_brief.settings.manager_may_change`']) {
+    assert.ok(skill.includes(part), `the skill does not say: ${part}`)
+  }
+  // The server's principle no longer forbids changing a setting outright: neither does the skill.
+  for (const old of ['change a setting', 'Controls; you never do']) assert.ok(!skill.includes(old), `The manager skill still says: ${old}`)
+  carries(readme, 'The README', RULES.SETTINGS_TOGGLE)
+  assert.ok(readme.includes('`change_factory_setting`'))
+})
+
+test('after each finished story the manager looks at the Backlog and says what is parked (Q11)', () => {
+  carries(skill, 'The manager skill', RULES.BACKLOG_LOOK)
+  for (const part of ['`manager_brief.backlog`', '`{ stories: [{ story, title, workflow, proposal?, ready, parked_on, start_with? }], ready, parked, say }`', '`start_with`', '`parked_on`', 'No `backlog` in the brief (an older CodeBook)']) {
+    assert.ok(skill.includes(part), `the skill does not say: ${part}`)
+  }
+  assert.ok(readme.includes('tells you which ones are parked and on what'))
 })
 
 test('the README tells the owner the same rules', () => {

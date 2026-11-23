@@ -190,7 +190,8 @@ business analysts side by side are several sub-agents of this one session. Three
 - **Which agents share a station** (the station's Routing › Several agents, sharing): each new card goes to whichever has the fewest
   runs going. Worth it when they should differ in skill or model; more runs of one agent go just as fast.
 
-Claude can change these too, after your yes (`set_parallel`). Many test suites at once slow a computer down, and tests that
+Claude can change these too, after your yes (`set_parallel`): your computer's number always, a station's cards at once and
+its agents only where the factory lets the manager change its settings (below). Many test suites at once slow a computer down, and tests that
 share a port or database can fail each other: lower the number if that happens.
 
 **Who is working on what.** Each code worker tells CodeBook its branch, worktree and the files it expects to change. Two
@@ -238,6 +239,14 @@ A change to the factory itself (an agent, a station, a limit) is offered in one 
 work carries on meanwhile. These rules are CodeBook's own sentences, copied word for word from its server, and where
 `manager_brief.rules` words one differently, the server wins.
 
+**The factory's settings.** A factory's settings are changed only where the factory lets the manager, by its own switch
+under Factory settings › Controls ("Let the manager change this factory's settings. It still asks you before each
+change."), and only after your yes each time. The switch is off until you turn it on. With it on, the manager says in
+the chat which setting it would change and what that does, and changes it (`change_factory_setting`) only after your yes.
+With it off, it tells you where the setting is and changes nothing; CodeBook refuses the change anyway. The switch
+itself, the factory's autonomy level, the kill switch, emergency revoke and who merges finished work stay yours, on the
+website.
+
 **New stories, and the next story.** How far the manager goes alone is the factory's own setting (Factory settings ›
 Controls; `manager_brief.goes_alone`):
 
@@ -247,7 +256,9 @@ Controls; `manager_brief.goes_alone`):
 | Its own stories, in a work order you approved | It confirms the stories it wrote for that work order and says so in one line. A new work order, or a story a person wrote, is asked first. | It starts the next ready story itself, up to the factory's limits, until nothing is ready. |
 | Any story it wrote | It confirms the stories it wrote, in any work order, and says so in one line. A story a person wrote is asked first. | The same. |
 
-It looks for the next ready story in the runs waiting here, the lines of open proposals and the board's Backlog. With
+It looks for the next ready story in the runs waiting here, the lines of open proposals and the board's Backlog. After
+each finished story it looks at the Backlog too, starts the stories that are ready as the factory's setting allows, and
+tells you which ones are parked and on what. With
 an older CodeBook that reports no setting, it asks "proceed?" before every new story, as before.
 
 **Tests run on a local copy.** A worker that needs the running app tests on a local copy it builds itself, never
