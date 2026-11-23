@@ -380,6 +380,64 @@ test('P2: a claim with no declared branch or worktree excuses nothing', async ($
   expect(sentBranchOf({ refs: [], isPlain: true }, null)).toBeNull()
 })
 
+test('P2: a bystander\'s refusal names the blocking runs, their holders and the way out', async ($, on) => {
+  // Two runs on the sandbox: 811 held by a sub-agent, 812 by the main conversation (a crew's lead).
+  const brief = { run_here: { repository: { name: 'bookbaghq/codebook-plugin-sandbox' } } }
+  const ran = world(on, {
+    cwd: '/work/session',
+    repoOf: () => ({ remotes: { origin: { fetch: [SANDBOX] } }, branch: 'main' }),
+    connector: (name, call) => (name === 'claim_work' ? { run: call.run, where: 'here', lease: { fence: 1 }, brief } : undefined),
+  })
+  await $.tool.call({ tool: OWN + 'claim_work', run: 811, agentId: 'worker-1' } as never)
+  await $.tool.call({ tool: OWN + 'claim_work', run: 812 } as never)
+  const got = await $.tool.call({ tool: 'Bash', command: 'git -C /Users/me/code/sandbox push origin main', agentId: 'track-j6' } as never)
+  const text = String(got.deny ?? got.text)
+  // What the earlier wording said is still said.
+  expect(text).toContain('bookbaghq/codebook-plugin-sandbox, which CodeBook run 811, 812 works on')
+  expect(text).toContain('Only that run\'s worker')
+  // Every blocking run, its repository and its holder.
+  expect(text).toContain('run 811 on bookbaghq/codebook-plugin-sandbox, held by agent worker-1')
+  expect(text).toContain('run 812 on bookbaghq/codebook-plugin-sandbox, held by the main conversation')
+  // The ways out.
+  expect(text).toContain('complete_work')
+  expect(text).toContain('its lease lapses')
+  expect(text).toContain('the main conversation, when it holds the run')
+  expect(text).toContain('declared branch, pushed from its declared worktree, goes through from any loop')
+  expect(ran).toEqual([])
+})
+
+test('P2: an unreadable command is refused with the one-command-at-a-time form', async ($, on) => {
+  const a = await held($, on, { remotes: { origin: { fetch: [SANDBOX] } }, branch: 'b' })
+  for (const command of [
+    'gh pr merge --repo bookbaghq/codebook-plugin-sandbox $(gh pr list --json number -q ".[0].number")',
+    'timeout 60 git push origin b',
+    'sh -c "git push origin b"',
+  ]) {
+    const text = await a.bash(command)
+    expect(text).toContain('cannot tell where this command pushes')
+    expect(text).toContain('git -C <checkout> push <remote> <branch>')
+    expect(text).toContain('gh pr create --repo <owner/name>')
+    expect(text).toContain('`for` or `while` loops, `$(…)` or backtick substitutions')
+    expect(text).toContain('run each `gh pr merge --repo <owner/name> <n>`, each push and each pull request as its own command')
+    expect(text).toContain('run 811 on bookbaghq/codebook-plugin-sandbox, held by the main conversation')
+  }
+  expect(a.ran).toEqual([])
+})
+
+test('P2: a worker\'s refusal names its declared branch and worktree', async ($, on) => {
+  const ran = runWorktree(on)
+  await $.tool.call({ tool: OWN + 'claim_work', run: 811, agentId: 'worker-1' } as never)
+  // Before declare_work: it says none is declared, and how to declare it.
+  const before = await $.tool.call({ tool: 'Bash', command: 'git push fork main', agentId: 'worker-1' } as never)
+  expect(String(before.deny ?? before.text)).toContain('the factory allows bookbaghq/codebook-plugin-sandbox')
+  expect(String(before.deny ?? before.text)).toContain('Run 811 has no declared branch or worktree yet: call declare_work')
+  await $.tool.call({ ...DECLARE, agentId: 'worker-1' } as never)
+  const after = await $.tool.call({ tool: 'Bash', command: 'git push fork main', agentId: 'worker-1' } as never)
+  expect(String(after.deny ?? after.text)).toContain('the factory allows bookbaghq/codebook-plugin-sandbox')
+  expect(String(after.deny ?? after.text)).toContain('Run 811\'s declared branch is codebook/57-x in ~/code/sandbox-57.')
+  expect(ran).toEqual([])
+})
+
 /** #143: CodeBook's answers carry the lease, shaped like app.codebook.work's; the clock starts at T0. */
 const T0 = Date.parse('2026-11-23T19:00:00.000Z')
 const leaseAt = (ms: number) => ({ fence: 2, expires_at: new Date(T0 + ms).toISOString(), seconds: 3600, heartbeat_every_seconds: 1200 })

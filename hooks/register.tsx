@@ -170,6 +170,28 @@ async function isOwnPush($: EngineInterface, held: CodebookClaim[], target: Targ
   return true
 }
 
+/** Each held run as a refusal names it (#145): "run 811 on acme/payments, held by agent worker-1" or "… by the main conversation". */
+function holdersOf(claims: CodebookClaim[]): string {
+  return claims
+    .map(one => `run ${one.run} on ${one.repos.length > 0 ? one.repos.join(', ') : 'no repository'}, held by ${one.agentId ? `agent ${one.agentId}` : 'the main conversation'}`)
+    .join('; ')
+}
+
+/** What a loop refused a held run's repository can do about it (#145). */
+const WAYS_OUT = 'Ways out: the holder finishes the run with complete_work, or its lease lapses, or the holder makes this push itself (the main conversation, when it holds the run). The run\'s declared branch, pushed from its declared worktree, goes through from any loop. Retrying the same command changes nothing.'
+
+/** What to do instead of a command the guard cannot read (#145): one push, pull request or merge per command. */
+const ONE_AT_A_TIME = 'The guard cannot read `for` or `while` loops, `$(…)` or backtick substitutions, subshells, or wrappers such as timeout and xargs: run each `gh pr merge --repo <owner/name> <n>`, each push and each pull request as its own command.'
+
+/** A worker's runs, with the branch and worktree each declared (#145): where its own pushes go through. */
+function declaredOf(claims: CodebookClaim[]): string {
+  return claims
+    .map(one => one.branch && one.worktree
+      ? `Run ${one.run}'s declared branch is ${one.branch} in ${one.worktree}.`
+      : `Run ${one.run} has no declared ${one.worktree ? 'branch' : one.branch ? 'worktree' : 'branch or worktree'} yet: call declare_work with them.`)
+    .join(' ')
+}
+
 /** The answers that carry a run's renewed lease (#143). */
 const RENEWS = new Set(['heartbeat_work', 'run_note', 'run_artifact'])
 
@@ -292,7 +314,7 @@ export const register: Register = (on, options) => {
     const reading = readCommand(String(e.command ?? ''))
     const runs = lease.runs.join(', ')
     if (reading === null) {
-      return { deny: `CodeBook: the repository guard cannot tell where this command pushes or opens a pull request, so it was not run while CodeBook run ${runs} is worked here. Run the push on its own, plainly: git -C <checkout> push <remote> <branch>, and open the pull request with gh pr create --repo <owner/name>.` }
+      return { deny: `CodeBook: the repository guard cannot tell where this command pushes or opens a pull request, so it was not run while CodeBook run ${runs} is worked here (${holdersOf(held)}). Run the push on its own, plainly: git -C <checkout> push <remote> <branch>, and open the pull request with gh pr create --repo <owner/name>. ${ONE_AT_A_TIME}` }
     }
     const say = (why: string) => ({ deny: `CodeBook: the repository guard did not run this while CodeBook run ${runs} is worked here: ${why}` })
     // The person's own shell aliases and functions (`gp` for `git push fork`), probed once every ten minutes.
@@ -317,12 +339,14 @@ export const register: Register = (on, options) => {
         const what = target.kind === 'push' ? `git push to ${target.remote ?? 'the branch\'s default remote'}` : 'gh pr create'
         const where = repo ?? 'a repository the guard could not tell'
         if (lease.kind === 'bystander') {
+          const blocking = repo === null ? held : held.filter(one => one.repos.includes(repo))
           return { deny: repo === null
-            ? `CodeBook: ${what} reaches ${where}, and CodeBook run ${runs} is worked in this session on ${lease.held.join(', ')}, so the guard cannot tell it is not one of those. Push with a GitHub address or remote it can read, plainly: git -C <checkout> push <remote> <branch>.`
-            : `CodeBook: ${what} reaches ${where}, which CodeBook run ${held.filter(one => one.repos.includes(repo)).map(one => one.run).join(', ')} works on in this session. Only that run's worker (the agent that claimed it) pushes there while it is held; any other repository is not the guard's.` }
+            ? `CodeBook: ${what} reaches ${where}, and CodeBook run ${runs} is worked in this session on ${lease.held.join(', ')}, so the guard cannot tell it is not one of those. Push with a GitHub address or remote it can read, plainly: git -C <checkout> push <remote> <branch>. Held: ${holdersOf(blocking)}.`
+            : `CodeBook: ${what} reaches ${where}, which CodeBook run ${blocking.map(one => one.run).join(', ')} works on in this session. Only that run's worker (the agent that claimed it) pushes there while it is held; any other repository is not the guard's. Held: ${holdersOf(blocking)}. ${WAYS_OUT}` }
         }
         const may = lease.allowed.length > 0 ? lease.allowed.join(', ') : 'no repository (its brief names none)'
-        return { deny: `CodeBook: ${what} reaches ${where}. While CodeBook run ${runs} is worked here, the factory allows ${may}.` }
+        const own = held.filter(one => lease.runs.includes(one.run))
+        return { deny: `CodeBook: ${what} reaches ${where}. While CodeBook run ${runs} is worked here, the factory allows ${may}. ${declaredOf(own)}` }
       }
     }
     return next(e)
