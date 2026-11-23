@@ -841,6 +841,44 @@ test('scripts: no false alarms for array pushes, pushd or docker push; a script 
   expect(await a.bash("printf 'git push fork' > new.sh && sh new.sh")).not.toBe('')
 })
 
+test('P6: a script body whose only push is a method call is not refused', async ($, on) => {
+  // The manager's own edits on 23 Nov, while a run was held: a python3 script in a quoted here-document.
+  const a = await held($, on, { remotes: { origin: { fetch: [SANDBOX] } }, branch: 'b' })
+  const python = "python3 - <<'EOF'\nimport json\nitems = []\nitems.push(x)\nlist.push(x)\nprint(json.dumps(items))\nEOF"
+  expect(await a.bash(python)).toBe('')
+  const node = "cd /work/sandbox && node - <<'EOF'\nconst lines = []\nlines.push('a')\nlines.push ('b')\nEOF"
+  expect(await a.bash(node)).toBe('')
+  expect(a.ran).toEqual([python, node])
+  // Read as nothing push-like: no targets, and the command is not refused when the guard cannot read the rest.
+  expect(readCommand(python)?.pushLike).toBe(false)
+  expect(readCommand(python)?.targets).toEqual([])
+})
+
+test('P6: a method call named push in an inline script is not refused', async ($, on) => {
+  const a = await held($, on, { remotes: { origin: { fetch: [SANDBOX] } }, branch: 'b' })
+  expect(await a.bash("node -e 'const arr = []; arr.push(1); console.log(arr)'")).toBe('')
+  expect(await a.bash('node -e "out.push (2)"')).toBe('')
+  expect(await a.bash("python3 -c 'stack = []; stack.push(1)'")).toBe('')
+  expect(a.ran.length).toBe(3)
+  // Push-like words that are not a method call still count: read word by word, and refused when they cannot be read.
+  expect(readCommand('pushd lib')?.pushLike).toBe(true)
+  expect(readCommand("node -e 'arr.push'")).toBeNull()
+  expect(readCommand('git push')?.pushLike).toBe(true)
+})
+
+test('P6: a script that really pushes is still refused', async ($, on) => {
+  const a = await held($, on, { remotes: { origin: { fetch: [SANDBOX] } }, branch: 'b' })
+  expect(await a.bash('sh -c "git push other"')).toContain('cannot tell where this command pushes')
+  expect(await a.bash("python3 - <<'EOF'\nimport subprocess\nitems.push(1)\nsubprocess.run(['git', 'push', 'other'])\nEOF")).toContain('cannot tell where this command pushes')
+  expect(await a.bash("bash <<'EOF'\ngit push other\nEOF")).toContain('cannot tell where this command pushes')
+  expect(await a.bash("node -e 'arr.push(1); require(\"child_process\").execSync(\"gh pr create --fill\")'")).toContain('cannot tell where this command pushes')
+  // A script the command writes from a here-document, then runs: what it will say cannot be read now.
+  expect(await a.bash("cat > /work/sandbox/d.sh <<'EOF'\nlist.push(1)\ngit push other\nEOF\nsh /work/sandbox/d.sh")).not.toBe('')
+  expect(a.ran).toEqual([])
+  // sh -c "git push other" reads as unreadable, as before.
+  expect(targetsOf('sh -c "git push other"')).toBeNull()
+})
+
 test('expansions, functions and eval around git or gh cannot be read and are refused; env is read through', async () => {
   // env is read through: its GH_REPO is that gh's.
   expect(readCommand('env GH_REPO=x/y gh pr create')?.targets).toEqual([{ kind: 'pr', cwd: null, repo: 'x/y' }])

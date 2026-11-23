@@ -118,8 +118,10 @@ export function mayReach(lease: Lease, repo: string | null): boolean {
 /**
  * Anything that might push, open a pull request or change where a push goes. A command without any of these is not
  * read at all (`git log`, `npm test`); one with any of them is read word by word, and what cannot be read is refused.
+ * A method call named push (`list.push(x)`, `arr.push (1)`: a dot right before it, a `(` after it) is not push-like
+ * by itself (#144): `pushd`, `git push`, `"push"`, `git-push` and `list.push` without a call still are.
  */
-const PUSH_LIKE = /\bpush|send-pack|\bpr\s+(?:create|new|merge)\b|\bpulls\b|createpullrequest|\bmutation\b|\bgh\b[^\n]*\bapi\b|set-url|\bremote\.|\burl\.|insteadof|\bGIT_\w+/i
+const PUSH_LIKE = /(?:(?<!\.)\bpush|\bpush(?!\s*\())|send-pack|\bpr\s+(?:create|new|merge)\b|\bpulls\b|createpullrequest|\bmutation\b|\bgh\b[^\n]*\bapi\b|set-url|\bremote\.|\burl\.|insteadof|\bGIT_\w+/i
 
 /** Whether text (a command, an alias's expansion, a script's body) might push or open a pull request. */
 export function isPushLike(text: string): boolean {
@@ -193,10 +195,11 @@ const HEREDOC = /(?<!<)<<(?!<)(-?)\s*(?:'([^'\n]+)'|"([^"\n]+)"|\\([A-Za-z_][A-Z
  * delimiter expands `$(...)` and backticks in its body, so a body with either keeps a `$(` for targetsOf to refuse;
  * and a push-like body fed to a shell or another program that runs it (`bash <<'EOF'`) is commands: unreadable.
  */
-function stripHeredocs(command: string): { text: string; isRun: boolean } {
+function stripHeredocs(command: string): { text: string; isRun: boolean; bodyPushes: boolean } {
   const lines = command.split('\n')
   const out: string[] = []
   let isRun = false
+  let bodyPushes = false
   for (let at = 0; at < lines.length; at++) {
     const line = lines[at] ?? ''
     out.push(line)
@@ -210,12 +213,15 @@ function stripHeredocs(command: string): { text: string; isRun: boolean } {
         body.push(next)
       }
       const text = body.join('\n')
+      // A body that reads as a git push or a pull request (a script the command writes, then perhaps runs) keeps the
+      // command push-like; any other body is only text (#144).
+      if (scriptPushes(text)) bodyPushes = true
       if (quoted === undefined && /\$\(|`/.test(text)) out.push('$(')
       else if (PUSH_LIKE.test(text) && !readsAsText(line, start.index ?? 0)) isRun = true
     }
   }
   const text = out.join('\n').replace(/\$\(\s*cat\s+<<-?\s*(?:'[^'\n]+'|"[^"\n]+"|\\[A-Za-z_][A-Za-z0-9_]*)\s*\n\s*\)/g, 'BODY')
-  return { text, isRun }
+  return { text, isRun, bodyPushes }
 }
 
 /** Whether the here-document starting at `at` on `line` goes to programs that only read it (cat, tee, gh, git). */
@@ -658,7 +664,10 @@ export function targetsOf(full: string): Target[] | null {
  * reading, with the checks found so far.
  */
 export function readCommand(full: string): Reading | null {
-  const pushLike = PUSH_LIKE.test(full)
+  // Push-like is decided on the command without its here-documents' bodies (#144): a python3 script's `list.push(x)` or
+  // a pull request's description is text. A body that is run, or that reads as a push, still counts.
+  const { text: command, isRun, bodyPushes } = stripHeredocs(full)
+  const pushLike = isRun || bodyPushes || PUSH_LIKE.test(command)
   const checks: Check[] = []
   const targets: Target[] = []
   // What cannot be read is refused when it pushes, or when a shell function or eval wraps git or gh: a function body
@@ -667,7 +676,6 @@ export function readCommand(full: string): Reading | null {
   const programs: string[] = []
   const merges: Merge[] = []
   const unreadable = (): Reading | null => (pushLike || hidesGit ? null : { targets: [], checks, programs, pushLike, merges: [] })
-  const { text: command, isRun } = stripHeredocs(full)
   if (pushLike && (isRun || /\$\(|`|<\(|>\(/.test(command))) return null
   const simple = simpleCommands(command)
   if (simple === null) return unreadable()
