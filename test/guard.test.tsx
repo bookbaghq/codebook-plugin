@@ -70,7 +70,7 @@ type World = {
 const out = (stdout: string, exitCode = 0) => ({ value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
 
 /** process.run as git, gh, head and the shell answer it in `w`. */
-function answer(w: World, argv: string[]) {
+function answer(w: World, argv: readonly string[]) {
   if (argv[0] === 'git' && argv[1] === '-C') {
     const repo = w.repoOf(argv[2] ?? '')
     const rest = argv.slice(3)

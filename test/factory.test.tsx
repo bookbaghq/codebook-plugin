@@ -315,8 +315,8 @@ test('backlog pages are read-only, followable, scoped to the selected workflow, 
   expect((await $.command.run(typed('backlog Payments --workflow wf12 --offset 35'))).text).toContain('No stories at offset 35. Start again: /factory backlog k3Vb9QmZ --workflow wf12')
   expect((await $.command.run(typed('backlog Payments --workflow "Empty workflow"'))).text).toContain('No stories in this backlog.')
   expect(calls.map(c => c.tool)).toEqual(Array(4).fill('factory_board'))
-  expect(calls[0].args).toEqual({ factory: 'Platform Payments', workflow: 'Release QA', backlog_offset: 0 })
-  expect(calls[1].args).toEqual({ factory: 'k3Vb9QmZ', workflow: 'wf12', backlog_offset: 15 })
+  expect(calls[0]?.args).toEqual({ factory: 'Platform Payments', workflow: 'Release QA', backlog_offset: 0 })
+  expect(calls[1]?.args).toEqual({ factory: 'k3Vb9QmZ', workflow: 'wf12', backlog_offset: 15 })
   expect([...prompts, ...filled]).toEqual([])
 })
 

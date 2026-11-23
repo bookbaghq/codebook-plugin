@@ -89,3 +89,10 @@ jobs:
             throw "Unexpected scoped backlog: $backlog"
           }
           Write-Host 'Verified installed Factory commands through the local connector on native Windows.'
+      - name: Type-check the hooks and tests against this Claude Code's declarations
+        shell: pwsh
+        run: |
+          # After the steps above: a Claude Code session writes its claude-code.d.ts beside its plugin-authoring skill.
+          $env:CLAUDE_BIN = Join-Path $env:RUNNER_TEMP 'factory-plugin-cli/node_modules/.bin/claude.cmd'
+          node --test test/typecheck.mjs
+          exit $LASTEXITCODE

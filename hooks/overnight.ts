@@ -8,7 +8,7 @@ export function overnightArguments(words: string[]): { args: string[]; limits: L
   const args: string[] = []
   const limits: Limits = {}
   for (let i = 0; i < words.length; i++) {
-    const word = words[i]
+    const word = words[i]!
     if (word === '--here') return { error: 'Overnight work runs in CodeBook. Use /factory run --here for work on this computer.' }
     if (word === '--cloud') continue
     if (!word.startsWith('--')) { args.push(word); continue }
