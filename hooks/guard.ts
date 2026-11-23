@@ -402,7 +402,57 @@ export function isRiskyGitVar(name: string): boolean {
   return name.startsWith('GIT_') && !HARMLESS_GIT_VARS.test(name)
 }
 
-type GitRead = { push?: { cwd: string | null; remote: string | null }; isUnreadable?: boolean; changesRemotes?: boolean; alias?: { cwd: string | null; name: string } }
+/**
+ * What a `git push` sends, beside where it goes (#142): the refspecs after its repository, and whether it uses only
+ * options that send nothing more than them (`-u`, `-q`, `-v`, `-n`, …). `--all`, `--mirror`, `--tags`, `--delete`, a
+ * force, a push option or any other option makes it not plain: such a push is never a run's own.
+ */
+export type PushSpec = { refs: string[]; isPlain: boolean }
+
+/** `git push` options that send nothing beyond the refspecs named (or the current branch). */
+const PLAIN_PUSH_OPTIONS = new Set(['-u', '--set-upstream', '-q', '--quiet', '-v', '--verbose', '--progress', '--no-progress', '-n', '--dry-run', '--porcelain'])
+
+/** Each push target's spec, kept beside the target so that the targets keep their shape. */
+const PUSH_SPECS = new WeakMap<Target, PushSpec>()
+
+/** The refspecs and options of a push target that readCommand read, or null for any other target. */
+export function pushSpecOf(target: Target): PushSpec | null {
+  return target.kind === 'push' ? PUSH_SPECS.get(target) ?? null : null
+}
+
+function readPushSpec(rest: string[]): PushSpec {
+  const words: string[] = []
+  let isPlain = true
+  let isAfterDashes = false
+  for (const word of rest) {
+    if (!isAfterDashes && word === '--') isAfterDashes = true
+    else if (!isAfterDashes && word.startsWith('-')) isPlain = isPlain && PLAIN_PUSH_OPTIONS.has(word)
+    else words.push(word)
+  }
+  return { refs: words.slice(1), isPlain }
+}
+
+/**
+ * The one branch a plain push sends (`current` is the folder's branch, for no refspec or `HEAD`), or null when it sends
+ * anything else: several branches, a tag or other ref, a deletion, a forced or wildcard refspec, or nothing it can tell.
+ */
+export function sentBranchOf(spec: PushSpec, current: string | null): string | null {
+  if (!spec.isPlain) return null
+  if (spec.refs.length === 0) return current
+  let sent: string | null = null
+  for (const ref of spec.refs) {
+    const parts = ref.split(':')
+    if (parts.length > 2 || parts.some(part => part === '') || ref.startsWith('+') || ref.includes('*')) return null
+    let branch = parts[1] ?? parts[0] ?? ''
+    if (branch === 'HEAD') branch = current ?? ''
+    branch = branch.replace(/^refs\/heads\//, '')
+    if (branch === '' || branch.startsWith('refs/') || (sent !== null && sent !== branch)) return null
+    sent = branch
+  }
+  return sent
+}
+
+type GitRead = { push?: { cwd: string | null; remote: string | null }; spec?: PushSpec; isUnreadable?: boolean; changesRemotes?: boolean; alias?: { cwd: string | null; name: string } }
 
 /** One `git …` command: its push (folder and repository), or that it changes remotes, or that it cannot be read. */
 function readGit(argv: string[], cwd: string | null): GitRead {
@@ -440,7 +490,7 @@ function readGit(argv: string[], cwd: string | null): GitRead {
     }
     // The repository on the command line wins over --repo (`git push --repo=<a> <b>` pushes to <b>). None named: git's
     // own choice from the branch's configuration (pushRemote, pushDefault, the branch's remote, origin), read later.
-    return { push: { cwd: here, remote: positional ?? repoFlag ?? null } }
+    return { push: { cwd: here, remote: positional ?? repoFlag ?? null }, spec: readPushSpec(rest) }
   }
   if (sub === 'send-pack') return { isUnreadable: true }
   if (sub === 'remote' && ['add', 'set-url', 'rename', 'remove', 'rm'].includes(rest[0] ?? '')) return { changesRemotes: true }
@@ -656,7 +706,9 @@ export function readCommand(full: string): Reading | null {
       if (read.alias) checks.push({ kind: 'git-alias', ...read.alias, isLost })
       if (read.push) {
         if (isLost) return unreadable()
-        targets.push({ kind: 'push', ...read.push })
+        const target: Target = { kind: 'push', ...read.push }
+        if (read.spec) PUSH_SPECS.set(target, read.spec)
+        targets.push(target)
       }
       continue
     }
