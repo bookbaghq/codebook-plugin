@@ -104,6 +104,12 @@ export type CodebookClaim = {
   branch?: string
   /** The folder the run works in, as declare_work said (`~/…` or absolute). */
   worktree?: string
+  /**
+   * When the run's lease runs out (ms since the epoch), from the claim_work answer's `lease.expires_at`, renewed by a
+   * later one in a heartbeat_work, run_note or run_artifact answer. Past it the claim blocks nothing and is dropped.
+   * Absent: the answer carried no lease, and only complete_work ends the claim.
+   */
+  expiresAt?: number
 }
 
 /** A repository's checkout on this computer, as CodeBook last answered it (`you.local_code`, a claim's `local`). */

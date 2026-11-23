@@ -9,7 +9,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { CodebookActive, CodebookCheckout, CodebookClaim, CodebookLink, CodebookMode, CodebookStory, CodebookWatch } from '../types'
 import { call, words } from './connector'
-import { claimOf, leaseOf, mayReach, readCommand } from './guard'
+import { claimOf, expiresOf, leaseOf, liveClaims, mayReach, readCommand } from './guard'
 import type { Target } from './guard'
 import { checkOne, checkShellWords, folderOf, ownPushOf, reaches, shellState } from './resolve'
 import { adoptCheckout, askAtStart, askBefore, checkoutLine, contextBlock, outsideCommand, promptNote, sweepCheckouts } from './checkout'
@@ -170,6 +170,23 @@ async function isOwnPush($: EngineInterface, held: CodebookClaim[], target: Targ
   return true
 }
 
+/** The answers that carry a run's renewed lease (#143). */
+const RENEWS = new Set(['heartbeat_work', 'run_note', 'run_artifact'])
+
+/**
+ * The claims whose lease has not run out, by the engine's clock; the ones that have are dropped from the list (#143), so a
+ * lease that ran out, a run finished elsewhere or a stopped sub-agent no longer blocks pushes for the rest of the session.
+ */
+async function heldNow($: EngineInterface): Promise<{ held: CodebookClaim[]; now: number }> {
+  // The engine's clock (a test sets it); this computer's when the engine has none to give.
+  let now: number
+  try { now = await $.clock.now() } catch { now = Date.now() }
+  const all = await read($, claims)
+  const live = liveClaims(all, now)
+  if (live.length !== all.length) await update($, claims, list => liveClaims(list, now))
+  return { held: live, now }
+}
+
 /** A connector result as a tool call answers it: the structured payload, else its text as JSON. */
 function payloadOf(ran: { result?: unknown; text?: string }): unknown {
   const structured = (ran.result as { structuredContent?: unknown } | undefined)?.structuredContent
@@ -206,7 +223,7 @@ export const register: Register = (on, options) => {
     const tool = String(e.tool)
     if (!tool.startsWith(OWN_TOOLS) || ran.deny !== undefined || ran.isError) return ran
     const name = tool.slice(OWN_TOOLS.length)
-    const data = payloadOf(ran) as { run?: number; brief?: unknown; recorded?: boolean } | null
+    const data = payloadOf(ran) as { run?: number; brief?: unknown; recorded?: boolean; lease?: unknown } | null
     // Where each repository's code is on this computer, for /factory status.
     const local = checkoutsOf(name, data)
     if (local !== null) await update($, checkouts, list => mergeCheckouts(list, local))
@@ -218,8 +235,15 @@ export const register: Register = (on, options) => {
     // loop that declares (#142: a claim recorded for the wrong loop, or with none, is adopted by the agent doing the
     // work), a report ends the claim. A declaration with no agentId (the main conversation) leaves the claim's loop as it is.
     if (name === 'claim_work' && typeof data?.run === 'number') {
-      const claim: CodebookClaim = claimOf(data.run, data.brief, e.agentId)
+      const claim: CodebookClaim = claimOf(data.run, data.brief, e.agentId, data.lease)
       await update($, claims, list => [...list.filter(one => one.run !== claim.run), claim])
+    }
+    // A renewed lease (#143): a heartbeat_work, run_note or run_artifact answer that carries a later expires_at keeps
+    // the claim in force that much longer. A missing or earlier one changes nothing.
+    if (RENEWS.has(name) && typeof data?.run === 'number') {
+      const run = data.run
+      const expiresAt = expiresOf(data.lease)
+      if (expiresAt !== undefined) await update($, claims, list => list.map(one => (one.run === run && (one.expiresAt === undefined || expiresAt > one.expiresAt) ? { ...one, expiresAt } : one)))
     }
     if (name === 'declare_work') {
       const asked = e as { run?: unknown; worktree?: unknown; branch?: unknown }
@@ -262,8 +286,8 @@ export const register: Register = (on, options) => {
   // the session reaches anything but the repositories held runs work on. With no run held it stands aside. It only
   // ever refuses.
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
-    const held = await read($, claims)
-    const lease = leaseOf(held, e.agentId)
+    const { held, now } = await heldNow($)
+    const lease = leaseOf(held, e.agentId, now)
     if (lease.kind === 'free') return next(e)
     const reading = readCommand(String(e.command ?? ''))
     const runs = lease.runs.join(', ')
@@ -314,8 +338,8 @@ export const register: Register = (on, options) => {
     if (below.decision === 'deny' || !/\bpush\b|\bpr\s+(?:create|new|merge)\b/.test(command)) return below
     // While this loop holds a run, the repository guard decides: its pushes are the station's own. Another loop's push
     // is asked about as it would be with nothing held (and the guard still refuses it a held run's repository).
-    const held = await read($, claims)
-    if (leaseOf(held, (e as { agentId?: string }).agentId).kind === 'worker') return below
+    const { held, now } = await heldNow($)
+    if (leaseOf(held, (e as { agentId?: string }).agentId, now).kind === 'worker') return below
     const reading = readCommand(command)
     const reaches: Reach[] = []
     if (reading === null) reaches.push({ what: 'push', dir: await $.session.cwd() })

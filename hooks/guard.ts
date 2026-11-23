@@ -60,12 +60,28 @@ export function allowedOf(brief: unknown): string[] {
  * absent on the main conversation), and the story's key and branch from `run_here.card_reference`, which a proof run
  * looks for its worktree by (proof.ts).
  */
-export function claimOf(run: number, brief: unknown, agentId: string | undefined): CodebookClaim {
+export function claimOf(run: number, brief: unknown, agentId: string | undefined, lease?: unknown): CodebookClaim {
   const reference = (brief as { run_here?: { card_reference?: { key?: unknown; branch?: unknown } } } | null)?.run_here?.card_reference
   const text = (value: unknown) => (typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined)
   const key = text(reference?.key)
   const branch = text(reference?.branch)
-  return { run, repos: allowedOf(brief), ...(agentId ? { agentId } : {}), ...(key ? { key } : {}), ...(branch ? { branch } : {}) }
+  const expiresAt = expiresOf(lease)
+  return { run, repos: allowedOf(brief), ...(agentId ? { agentId } : {}), ...(key ? { key } : {}), ...(branch ? { branch } : {}), ...(expiresAt !== undefined ? { expiresAt } : {}) }
+}
+
+/**
+ * When a lease runs out, from an answer's `lease` (`{ expires_at: "2026-11-23T19:41:57.260Z", … }`), in ms since the
+ * epoch; undefined when the answer carries none that can be read (#143).
+ */
+export function expiresOf(lease: unknown): number | undefined {
+  const at = (lease as { expires_at?: unknown } | null | undefined)?.expires_at
+  const ms = typeof at === 'string' ? Date.parse(at) : typeof at === 'number' ? at : NaN
+  return Number.isFinite(ms) ? ms : undefined
+}
+
+/** The claims whose lease has not run out at `now`. A claim with no known lease never runs out by time (#143). */
+export function liveClaims(claims: CodebookClaim[], now: number): CodebookClaim[] {
+  return claims.filter(one => one.expiresAt === undefined || one.expiresAt > now)
 }
 
 /**
@@ -82,7 +98,9 @@ export type Lease =
   | { kind: 'worker'; runs: number[]; allowed: string[] }
   | { kind: 'bystander'; runs: number[]; held: string[] }
 
-export function leaseOf(claims: CodebookClaim[], agentId: string | undefined): Lease {
+export function leaseOf(all: CodebookClaim[], agentId: string | undefined, now: number = Date.now()): Lease {
+  // A claim whose lease ran out (the run went back to waiting, was finished elsewhere, or its agent stopped) holds nothing.
+  const claims = liveClaims(all, now)
   if (claims.length === 0) return { kind: 'free' }
   const loop = agentId || undefined
   const own = claims.filter(one => (one.agentId || undefined) === loop)

@@ -2,7 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 
 import type { On } from 'claude-code'
 
-import { allowedOf, claimOf, leaseOf, mayReach, pushSpecOf, readCommand, repoOf, sentBranchOf, targetsOf } from '../hooks/guard'
+import { allowedOf, claimOf, expiresOf, leaseOf, mayReach, pushSpecOf, readCommand, repoOf, sentBranchOf, targetsOf } from '../hooks/guard'
 import { checkoutsOf } from '../hooks/local'
 import { forgetShell } from '../hooks/resolve'
 
@@ -62,6 +62,8 @@ type World = {
   files?: Record<string, string>
   ghAliases?: string
   ghExtensions?: string
+  /** The connector's answer to one of its tools (its name without the prefix), in place of the stand-in's. */
+  connector?: (name: string, call: Record<string, unknown>) => unknown
 }
 const out = (stdout: string, exitCode = 0) => ({ value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
 
@@ -134,7 +136,8 @@ function world(on: On, w: World, repo = 'bookbaghq/codebook-plugin-sandbox', loc
       return { result: { stdout: '', stderr: '', interrupted: false } as never }
     }
     const repository = local ? { name: repo, local } : { name: repo }
-    const data = tool === OWN + 'claim_work' ? { run: 811, where: 'here', lease: { fence: 1 }, brief: { run_here: { repository } } } : { recorded: true, run: 811 }
+    const data = (tool.startsWith(OWN) ? w.connector?.(tool.slice(OWN.length), e as never) : undefined)
+      ?? (tool === OWN + 'claim_work' ? { run: 811, where: 'here', lease: { fence: 1 }, brief: { run_here: { repository } } } : { recorded: true, run: 811 })
     return { result: { structuredContent: data } as never, text: JSON.stringify(data) }
   })
   return ran
@@ -375,6 +378,91 @@ test('P2: a claim with no declared branch or worktree excuses nothing', async ($
   expect(sentBranchOf({ refs: ['refs/tags/v1'], isPlain: true }, null)).toBeNull()
   expect(sentBranchOf({ refs: ['a', 'b'], isPlain: true }, null)).toBeNull()
   expect(sentBranchOf({ refs: [], isPlain: true }, null)).toBeNull()
+})
+
+/** #143: CodeBook's answers carry the lease, shaped like app.codebook.work's; the clock starts at T0. */
+const T0 = Date.parse('2026-11-23T19:00:00.000Z')
+const leaseAt = (ms: number) => ({ fence: 2, expires_at: new Date(T0 + ms).toISOString(), seconds: 3600, heartbeat_every_seconds: 1200 })
+function leased(on: On, answers: Record<string, unknown>) {
+  const ran = world(on, { cwd: '/work/session', repoOf: () => ({ remotes: { origin: { fetch: [SANDBOX] } }, branch: 'main' }), connector: name => answers[name] })
+  const clock = mock.clock(on, { now: T0 })
+  return { ran, clock }
+}
+const CLAIMED = (lease: unknown) => ({ run: 811, where: 'here', lease, brief: { run_here: { repository: { name: 'bookbaghq/codebook-plugin-sandbox' } } } })
+
+test('P3: a claim whose lease has expired no longer blocks a push', async ($, on) => {
+  const answers: Record<string, unknown> = { claim_work: CLAIMED(leaseAt(60_000)) }
+  const { ran, clock } = leased(on, answers)
+  await $.tool.call({ tool: OWN + 'claim_work', run: 811, agentId: 'worker-1' } as never)
+  const held = await $.tool.call({ tool: 'Bash', command: 'git push origin main' } as never)
+  expect(String(held.deny ?? held.text)).toContain('which CodeBook run 811 works on')
+  // The lease runs out (the run went back to waiting, or its sub-agent stopped): another loop pushes there again.
+  await clock.advance(60_001)
+  await $.tool.call({ tool: 'Bash', command: 'git push origin main' } as never)
+  expect(ran).toEqual(['git push origin main'])
+  // And the claim is gone: a later answer for that run does not bring it back, and its old worker is held to nothing.
+  answers.heartbeat_work = { run: 811, lease: leaseAt(600_000) }
+  await $.tool.call({ tool: OWN + 'heartbeat_work', run: 811, fence: 2, agentId: 'worker-1' } as never)
+  await $.tool.call({ tool: 'Bash', command: 'git push origin main' } as never)
+  await $.tool.call({ tool: 'Bash', command: 'git push fork main', agentId: 'worker-1' } as never)
+  expect(ran.length).toBe(3)
+})
+
+test('P3: a heartbeat renews the claim\'s lease', async ($, on) => {
+  const answers: Record<string, unknown> = { claim_work: CLAIMED(leaseAt(60_000)), heartbeat_work: { run: 811, lease: leaseAt(120_000) } }
+  const { ran, clock } = leased(on, answers)
+  await $.tool.call({ tool: OWN + 'claim_work', run: 811, agentId: 'worker-1' } as never)
+  await $.tool.call({ tool: OWN + 'heartbeat_work', run: 811, fence: 2, agentId: 'worker-1' } as never)
+  // An answer with an earlier expires_at does not shorten it.
+  answers.run_note = { run: 811, lease: leaseAt(30_000) }
+  await $.tool.call({ tool: OWN + 'run_note', run: 811, fence: 2, text: 'x', agentId: 'worker-1' } as never)
+  // Past the first expiry the claim is still in force.
+  await clock.advance(90_000)
+  const held = await $.tool.call({ tool: 'Bash', command: 'git push origin main' } as never)
+  expect(String(held.deny ?? held.text)).toContain('which CodeBook run 811 works on')
+  // A run_artifact answer renews it too; past the last expiry it lapses.
+  answers.run_artifact = { run: 811, lease: leaseAt(150_000) }
+  await $.tool.call({ tool: OWN + 'run_artifact', run: 811, fence: 2, kind: 'test_report', title: 'x', agentId: 'worker-1' } as never)
+  await clock.advance(40_000)
+  const still = await $.tool.call({ tool: 'Bash', command: 'git push origin main' } as never)
+  expect(String(still.deny ?? still.text)).toContain('which CodeBook run 811 works on')
+  await clock.advance(20_001)
+  await $.tool.call({ tool: 'Bash', command: 'git push origin main' } as never)
+  expect(ran).toEqual(['git push origin main'])
+})
+
+test('P3: a claim without a lease is not dropped by time', async ($, on) => {
+  const { ran, clock } = leased(on, { claim_work: CLAIMED({ fence: 1 }) })
+  await $.tool.call({ tool: OWN + 'claim_work', run: 811, agentId: 'worker-1' } as never)
+  await clock.advance(7_200_000)
+  const held = await $.tool.call({ tool: 'Bash', command: 'git push origin main' } as never)
+  expect(String(held.deny ?? held.text)).toContain('which CodeBook run 811 works on')
+  expect(ran.length).toBe(0)
+  // Only its report ends it.
+  await $.tool.call({ tool: OWN + 'complete_work', run: 811, fence: 1, outcome: 'pass', summary: 'ok', agentId: 'worker-1' } as never)
+  await $.tool.call({ tool: 'Bash', command: 'git push origin main' } as never)
+  expect(ran.length).toBe(1)
+  // Reading an answer's lease: an ISO time, a number, or nothing that can be read.
+  expect(expiresOf({ expires_at: '2026-11-23T19:41:57.260Z' })).toBe(Date.parse('2026-11-23T19:41:57.260Z'))
+  expect(expiresOf({ expires_at: 'soon' })).toBeUndefined()
+  expect(expiresOf(undefined)).toBeUndefined()
+})
+
+test('P3: a live claim still blocks a bystander\'s push', async ($, on) => {
+  const { ran, clock } = leased(on, { claim_work: CLAIMED(leaseAt(60_000)) })
+  await $.tool.call({ tool: OWN + 'claim_work', run: 811, agentId: 'worker-1' } as never)
+  await clock.advance(59_000)
+  const main = await $.tool.call({ tool: 'Bash', command: 'git push origin main' } as never)
+  expect(String(main.deny ?? main.text)).toContain('which CodeBook run 811 works on')
+  const other = await $.tool.call({ tool: 'Bash', command: 'gh pr create --draft --repo bookbaghq/codebook-plugin-sandbox', agentId: 'track-j6' } as never)
+  expect(String(other.deny ?? other.text)).toContain('Only that run\'s worker')
+  // Its own worker still pushes there.
+  await $.tool.call({ tool: 'Bash', command: 'git push origin main', agentId: 'worker-1' } as never)
+  expect(ran).toEqual(['git push origin main'])
+  // leaseOf reads the same: live before expires_at, free after it.
+  const claim = { run: 811, repos: ['bookbaghq/codebook-plugin-sandbox'], agentId: 'worker-1', expiresAt: T0 + 60_000 }
+  expect(leaseOf([claim], undefined, T0 + 59_000).kind).toBe('bystander')
+  expect(leaseOf([claim], undefined, T0 + 60_000).kind).toBe('free')
 })
 
 test('/factory status shows where each repository is on this computer, checked now', async ($, on) => {
