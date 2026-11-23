@@ -122,6 +122,9 @@ request (ask Claude for it: `propose_agents_block`). Codex reads `AGENTS.md` at 
 start of every run.
 In a trial with the Codex CLI, the block made Codex ask CodeBook first (and stop and ask you when CodeBook was not
 connected); the connector's instructions alone did not. So add the block to each repository a factory works on.
+Codex has no plugin, so the manager's rules below ("What the manager decides, and what it asks you") reach it from
+CodeBook itself: the `AGENTS.md` block, and what `checkout_factory` and `manager_brief` answer. What Codex does
+follows the server's text, not this plugin's.
 
 ## The two run modes
 
@@ -192,7 +195,8 @@ share a port or database can fail each other: lower the number if that happens.
 
 **Who is working on what.** Each code worker tells CodeBook its branch, worktree and the files it expects to change. Two
 cards touching the same files say so on both cards and in the chat, before they meet at merge; neither is stopped, because
-the list is an estimate. You decide whether one waits. If it does, its run stops, keeps its branch, and starts afresh once
+the list is an estimate. The manager decides whether one waits (the one further along goes first) and says so in one
+line. If one waits, its run stops, keeps its branch, and starts afresh once
 the other is merged: merge order is on the factory, not written in a story.
 
 ### Code on your computer
@@ -204,10 +208,10 @@ folder", for example `~/code`). Only you see it, and nothing secret is stored.
 
 Before any research or station, the manager checks each repository (step 0 of the skill): the folder is there, it is a
 git checkout whose `origin` is that repository, and git can reach it (`git ls-remote`), then fetches. If no folder is
-set, it offers this session's folder when that is a checkout of the repository, or asks you for one and saves it for
-you. A missing folder: it offers to `git clone` it there, and clones only on your yes. A folder that is not a git
+set, it uses this session's folder when that is a checkout of the repository and says so, or asks you for one and
+saves it for you. A missing folder: it offers to `git clone` it there, and clones only on your yes. A folder that is not a git
 checkout, or has another `origin`: it says so and asks what to do. It never deletes, moves or overwrites a folder.
-Setting this up is not factory work, so it needs no story, only your yes.
+Setting this up is not factory work, so it needs no story; cloning and adding a remote need your yes.
 
 Each worker checks the same before it works and reports **blocked**, with what to fix, when the folder is missing or
 wrong; it never falls back to the session's folder. Code stations work in a worktree next to the checkout,
@@ -218,28 +222,70 @@ Claude chat and ChatGPT on the web cannot reach your computer: stations that cha
 CodeBook's cloud. Codex can work in a checkout, but Run here, the pane and the question before a push are this
 plugin's: from Codex, the factory's stations are started in CodeBook's cloud.
 
+### What the manager decides, and what it asks you
+
+The manager decides how the work gets delivered. It says what it decided in one line, and never asks you about it:
+whether to split a story, the order stories merge in, which story a fix belongs in, which agent or model works a
+station, and whether to retry a failed run (two retries for the same cause, then it says what blocks the story and
+takes the next one).
+
+It asks you only for these: spending money, touching production data, deleting things, secrets and keys, a real
+outside account that no stand-in can replace, and a merge where the factory keeps a person's station. Everything else
+about delivering the work it decides itself. What you want built is still yours to say: the story writer may ask
+about the scope and what "done" looks like, and writes down what it assumed.
+
+A change to the factory itself (an agent, a station, a limit) is offered in one sentence and made on your yes; the
+work carries on meanwhile. These rules are CodeBook's own sentences, copied word for word from its server, and where
+`manager_brief.rules` words one differently, the server wins.
+
+**New stories, and the next story.** How far the manager goes alone is the factory's own setting (Factory settings ›
+Controls; `manager_brief.goes_alone`):
+
+| Level | New stories | When a story finishes |
+| --- | --- | --- |
+| Ask before every new story (the default) | It shows you each one with its criteria and asks "proceed?". | It says which story is ready next and asks "proceed?". |
+| Its own stories, in a work order you approved | It confirms the stories it wrote for that work order and says so in one line. A new work order, or a story a person wrote, is asked first. | It starts the next ready story itself, up to the factory's limits, until nothing is ready. |
+| Any story it wrote | It confirms the stories it wrote, in any work order, and says so in one line. A story a person wrote is asked first. | The same. |
+
+It looks for the next ready story in the runs waiting here, the lines of open proposals and the board's Backlog. With
+an older CodeBook that reports no setting, it asks "proceed?" before every new story, as before.
+
+**Tests run on a local copy.** A worker that needs the running app tests on a local copy it builds itself, never
+against production. It builds and starts the app from its own worktree, on free ports, with a throwaway database,
+seeds it, and creates its own test accounts and organisations there, with stand-ins for sign-in and for outside
+services. Never your own running app, ports, database or checkout. A story that can be finished with a stand-in, a
+recorded response or a contract test is finished that way, and the card says what was not checked. Only a real
+outside account that no stand-in can replace is asked for, with the offer to skip that one check.
+
+**No recipe.** A check or a proof that cannot run because the repository has no recipe does not stop there: the
+manager reads the repository and proposes the recipe (`run_recipe_change`). Where the factory lets it go alone the
+recipe is saved and the check runs again; otherwise it asks you to save it under Factory settings → Proof runs.
+Passing a check by hand is the last resort.
+
 ### What the manager does with a new issue
 
 1. **The story writer goes first.** Claude sends the factory's story writer (its business analyst) to look into the
-   issue as a sub-agent, with that agent's own skill. It only reads. Its questions come back to Claude, which asks you
-   one at a time in the chat, with the likely answers, and passes your answers back. Then it writes the stories.
-2. **No story writer?** Claude says so plainly and offers: it writes the stories itself this time, or you add one. To
-   add one it looks at the agents your organization already has, then the marketplace (asking "OK to use …?"), then
-   writes a new one; then it installs it, adds its station first in the flow and sets its model (Sonnet by default).
-   Each change is asked first, and the first one asks Bookbag for one more permission ("Change your factories' agents
-   and stations").
-3. **A story writer that cannot research** writes research stories first; Claude adds a Research agent the same way,
-   whose findings go on its card, and the story writer reads them to write the stories that fix the issue.
-4. **"Proceed?"**, then the stations, as above.
+   issue as a sub-agent, with that agent's own skill. It only reads. Its questions about what you want come back to
+   Claude, which asks you in the chat with the likely answers; what the request, the code and the board already
+   answer it does not ask, and writes into the story as an assumption. Then it writes the stories.
+2. **No story writer?** Claude says so in one line, writes the stories itself this time, and offers to add one. On
+   your yes it looks at the agents your organization already has, then the marketplace, then writes a new one; it
+   says which it picked, installs it, adds its station first in the flow and sets its model (Sonnet by default). The
+   first change asks Bookbag for one more permission ("Change your factories' agents and stations").
+3. **A story writer that cannot research**: this time a read-only sub-agent researches for it. Claude offers to add a
+   Research agent; once there, its findings go on its card and the story writer reads them to write the stories.
+4. **"Proceed?"** where the factory's setting for new stories says to ask, then the stations, as above.
 
 On the board, Claude can also move and edit any card (`move_card`, `update_card`), ask you something on a card
-(`ask_person`), and set a station's model (`set_station_model`, after your yes). It deletes a card (`delete_card`)
+(`ask_person`: one of the six things, or what you want, never how to deliver it), and set a station's model
+(`set_station_model`, after your yes). It deletes a card (`delete_card`)
 only after "proceed?", and CodeBook refuses unless the card's exact title is given.
 
 **The rest of the factory.** Claude can also read and use the factory's other screens: work orders (plan, replan,
 edit), test runs, operations (pause and resume,
-alerts), a story's outcome (report a production problem) and the dashboard. Anything that spends, reaches outside CodeBook or
-changes the factory waits for your yes; the kill switch and autonomy stay on the website.
+alerts), a story's outcome (report a production problem) and the dashboard. The order of a work order's items is the
+manager's to decide. Anything that spends, deletes or changes the factory waits for your yes; the kill switch and
+autonomy stay on the website.
 
 **Models.** Each station's agent runs on the Claude model CodeBook picks for it: the station's own when it is a Claude
 model, otherwise Sonnet (or this session's model for a station that writes code). A station that asks for another
@@ -375,8 +421,9 @@ On your computer that program is this plugin.
 | --- | --- |
 | `.mcp.json` | The CodeBook connector (`https://app.codebook.work/mcp`), with no credentials. |
 | `hooks/` | The Factory pane, `/factory` and the repository guard (a Claude Code hooks module): `register.tsx`, `pane.tsx`, `factory.ts`, `connector.ts`, `guard.ts`, `resolve.ts` (what git and gh decide for a push), `checkout.ts` (a checkout that knows its factory: the lookup, the note for the session and the question before a push), `local.ts` (the checkouts `/factory status` shows), and `art.ts` (the illustrations, small WebP). |
-| `skills/factory-manager/` | The manager skill Run here follows: the code on your computer, stories, "proceed?", stations, people, narration. |
-| `agents/factory-worker.md` | The sub-agent that works one station run here as that station's agent. |
+| `skills/factory-manager/` | The manager skill Run here follows: the code on your computer, stories, "proceed?", stations, what it decides and the six things it asks a person, taking the next story, narration. |
+| `agents/factory-worker.md` | The sub-agent that works one station run here as that station's agent, testing on a local copy of the app it builds itself. |
+| `test/rule-texts.mjs` | Checks, with plain Node, that the skill and the agent carry CodeBook's rule sentences word for word, and that nothing tells the manager to ask about a split, an order or a retry. |
 | `hooks/proof.ts` | Proof runs: the repository's checks, run here boxed and reported by the plugin itself. |
 | `hooks/egress.ts` | A proof run's list of allowed hosts: reading the list, and the filtering proxy and forwarder that enforce it. |
 | `types/index.d.ts` | The pane's state contract. |
@@ -388,8 +435,12 @@ On your computer that program is this plugin.
 ```bash
 claude plugin validate .
 claude plugin test .
+node --test test/rule-texts.mjs
 claude --plugin-dir .
 ```
+
+`claude plugin test` loads code files only, so the checks on what the skill and the agent say (`test/rule-texts.mjs`)
+run with Node.
 
 `scripts/art.sh <folder of PNGs>` rebuilds `hooks/art.ts` from the illustrations.
 
