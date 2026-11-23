@@ -2,7 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 
 import type { On } from 'claude-code'
 
-import { allowedOf, claimOf, leaseOf, mayReach, readCommand, repoOf, targetsOf } from '../hooks/guard'
+import { allowedOf, claimOf, leaseOf, mayReach, pushSpecOf, readCommand, repoOf, sentBranchOf, targetsOf } from '../hooks/guard'
 import { checkoutsOf } from '../hooks/local'
 import { forgetShell } from '../hooks/resolve'
 
@@ -284,6 +284,97 @@ test('P2: the lease is the claiming loop\'s: leaseOf and mayReach', async () => 
   expect(claimOf(811, { run_here: { repository: { name: 'acme/payments' }, card_reference: { key: 'VF-29', branch: 'codebook/VF-29-run-811' } } }, 'worker-1'))
     .toEqual({ run: 811, repos: ['acme/payments'], agentId: 'worker-1', key: 'VF-29', branch: 'codebook/VF-29-run-811' })
   expect(claimOf(812, { run_here: { repository: null } }, undefined)).toEqual({ run: 812, repos: [] })
+})
+
+/**
+ * #142: the factory's checkout (on main), a run's worktree beside it (on the run's branch) and another folder of the
+ * same repository (on the run's branch too), all pushing to the sandbox.
+ */
+function runWorktree(on: On) {
+  const branchOf = (dir: string) => (dir === '/Users/me/code/sandbox' ? 'main' : 'codebook/57-x')
+  return world(on, { cwd: '/work/session', repoOf: (dir) => ({ remotes: { origin: { fetch: [SANDBOX] } }, branch: branchOf(dir) }) }, 'bookbaghq/codebook-plugin-sandbox',
+    { path: '~/code', mode: 'clone_into', checkout_path: '~/code/sandbox' })
+}
+
+const DECLARE = { tool: OWN + 'declare_work', run: 811, fence: 1, repository: 'bookbaghq/codebook-plugin-sandbox', worktree: '~/code/sandbox-57', branch: 'codebook/57-x' }
+
+test('P2: a claim without a loop does not block the worker that pushes its own declared branch from its own worktree', async ($, on) => {
+  const ran = runWorktree(on)
+  // Run 1157: the claim was recorded with no agentId (the main conversation's, or 0.24.1's), and so was its declaration.
+  await $.tool.call({ tool: OWN + 'claim_work', run: 811 } as never)
+  await $.tool.call(DECLARE as never)
+  // The sub-agent that does the work pushes the run's branch from the run's worktree: named, as HEAD, or the current one.
+  await $.tool.call({ tool: 'Bash', command: 'git -C /Users/me/code/sandbox-57 push -u origin codebook/57-x', agentId: 'worker-1' } as never)
+  await $.tool.call({ tool: 'Bash', command: 'cd ~/code/sandbox-57 && git push origin HEAD', agentId: 'worker-1' } as never)
+  await $.tool.call({ tool: 'Bash', command: 'cd "$HOME/code/sandbox-57" && git push', agentId: 'worker-1' } as never)
+  await $.tool.call({ tool: 'Bash', command: 'git -C ~/code/sandbox-57 push origin HEAD:refs/heads/codebook/57-x', agentId: 'worker-1' } as never)
+  expect(ran.length).toBe(4)
+})
+
+test('P2: declare_work re-attributes the run\'s claim to the loop that declares it', async ($, on) => {
+  const ran = runWorktree(on)
+  // Claimed by one loop (or by none), declared by the sub-agent that works it: the lease is now that sub-agent's.
+  await $.tool.call({ tool: OWN + 'claim_work', run: 811, agentId: 'old-loop' } as never)
+  await $.tool.call({ ...DECLARE, agentId: 'worker-1' } as never)
+  // As the run's worker it opens the pull request too, which an own push never excuses for a bystander.
+  await $.tool.call({ tool: 'Bash', command: 'cd ~/code/sandbox-57 && gh pr create --draft --title "SD-57"', agentId: 'worker-1' } as never)
+  expect(ran.length).toBe(1)
+  // The loop that claimed it no longer holds it: it is a bystander to the run's repository.
+  const old = await $.tool.call({ tool: 'Bash', command: 'cd ~/code/sandbox-57 && gh pr create --draft', agentId: 'old-loop' } as never)
+  expect(String(old.deny ?? old.text)).toContain('Only that run\'s worker')
+  // A declaration from the main conversation (no agentId) leaves the claim with its loop.
+  await $.tool.call(DECLARE as never)
+  await $.tool.call({ tool: 'Bash', command: 'git -C ~/code/sandbox-57 push origin codebook/57-y', agentId: 'worker-1' } as never)
+  expect(ran.length).toBe(2)
+  // A claim with no loop at all is adopted by the first loop that declares work for it.
+  await $.tool.call({ tool: OWN + 'claim_work', run: 811 } as never)
+  await $.tool.call({ ...DECLARE, agentId: 'worker-2' } as never)
+  await $.tool.call({ tool: 'Bash', command: 'git -C ~/code/sandbox-57 push origin codebook/57-y', agentId: 'worker-2' } as never)
+  expect(ran.length).toBe(3)
+})
+
+test('P2: a bystander is still refused the held repository, a different branch and a different folder', async ($, on) => {
+  const ran = runWorktree(on)
+  await $.tool.call({ tool: OWN + 'claim_work', run: 811, agentId: 'worker-1' } as never)
+  await $.tool.call({ ...DECLARE, agentId: 'worker-1' } as never)
+  const refused = async (command: string) => {
+    const got = await $.tool.call({ tool: 'Bash', command, agentId: 'track-j6' } as never)
+    return String(got.deny ?? got.text)
+  }
+  // Another branch of the held repository, from the run's worktree.
+  expect(await refused('git -C ~/code/sandbox-57 push origin codebook/57-y')).toContain('Only that run\'s worker')
+  // The declared branch from another folder (the factory's checkout).
+  expect(await refused('git -C ~/code/sandbox push origin codebook/57-x')).toContain('Only that run\'s worker')
+  // A pull request from the run's worktree.
+  expect(await refused('cd ~/code/sandbox-57 && gh pr create --draft --title "SD-57"')).toContain('Only that run\'s worker')
+  // More than the declared branch, or not plainly: a second branch, tags, a force, a deletion.
+  expect(await refused('git -C ~/code/sandbox-57 push origin codebook/57-x codebook/57-y')).toContain('Only that run\'s worker')
+  expect(await refused('git -C ~/code/sandbox-57 push --tags origin codebook/57-x')).toContain('Only that run\'s worker')
+  expect(await refused('git -C ~/code/sandbox-57 push --force origin codebook/57-x')).toContain('Only that run\'s worker')
+  expect(await refused('git -C ~/code/sandbox-57 push origin +codebook/57-x')).toContain('Only that run\'s worker')
+  expect(await refused('git -C ~/code/sandbox-57 push origin :codebook/57-x')).toContain('Only that run\'s worker')
+  expect(ran.length).toBe(0)
+  // The run's own branch from its own worktree goes through, from any loop.
+  await $.tool.call({ tool: 'Bash', command: 'git -C ~/code/sandbox-57 push origin codebook/57-x', agentId: 'track-j6' } as never)
+  expect(ran.length).toBe(1)
+})
+
+test('P2: a claim with no declared branch or worktree excuses nothing', async ($, on) => {
+  const ran = runWorktree(on)
+  await $.tool.call({ tool: OWN + 'claim_work', run: 811 } as never)
+  const got = await $.tool.call({ tool: 'Bash', command: 'git -C ~/code/sandbox-57 push -u origin codebook/57-x', agentId: 'worker-1' } as never)
+  expect(String(got.deny ?? got.text)).toContain('Only that run\'s worker')
+  expect(ran.length).toBe(0)
+  // What a push sends, as the guard reads it.
+  const spec = (command: string) => pushSpecOf((targetsOf(command) ?? [])[0] ?? { kind: 'pr', cwd: null, repo: null })
+  expect(spec('git push -u origin a b')).toEqual({ refs: ['a', 'b'], isPlain: true })
+  expect(spec('git push --all origin')).toEqual({ refs: [], isPlain: false })
+  expect(sentBranchOf({ refs: [], isPlain: true }, 'codebook/57-x')).toBe('codebook/57-x')
+  expect(sentBranchOf({ refs: ['HEAD'], isPlain: true }, 'codebook/57-x')).toBe('codebook/57-x')
+  expect(sentBranchOf({ refs: ['main:refs/heads/codebook/57-x'], isPlain: true }, null)).toBe('codebook/57-x')
+  expect(sentBranchOf({ refs: ['refs/tags/v1'], isPlain: true }, null)).toBeNull()
+  expect(sentBranchOf({ refs: ['a', 'b'], isPlain: true }, null)).toBeNull()
+  expect(sentBranchOf({ refs: [], isPlain: true }, null)).toBeNull()
 })
 
 test('/factory status shows where each repository is on this computer, checked now', async ($, on) => {

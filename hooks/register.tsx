@@ -10,7 +10,8 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { CodebookActive, CodebookCheckout, CodebookClaim, CodebookLink, CodebookMode, CodebookStory, CodebookWatch } from '../types'
 import { call, words } from './connector'
 import { claimOf, leaseOf, mayReach, readCommand } from './guard'
-import { checkOne, checkShellWords, folderOf, reaches, shellState } from './resolve'
+import type { Target } from './guard'
+import { checkOne, checkShellWords, folderOf, ownPushOf, reaches, shellState } from './resolve'
 import { adoptCheckout, askAtStart, askBefore, checkoutLine, contextBlock, outsideCommand, promptNote, sweepCheckouts } from './checkout'
 import type { Reach } from './checkout'
 import { checkoutLines, checkoutsOf, mergeCheckouts } from './local'
@@ -160,6 +161,15 @@ const OWN_READS = new Set(
   ),
 )
 
+/** Whether every repository a push reaches is a held run's, and the push is that run's own (ownPushOf). */
+async function isOwnPush($: EngineInterface, held: CodebookClaim[], target: Target): Promise<boolean> {
+  if (target.kind !== 'push' || held.length === 0) return false
+  const found = await reaches($, target, (await shellState($)).env)
+  if (!Array.isArray(found) || found.length === 0) return false
+  for (const repo of found) if ((await ownPushOf($, held, target, repo)) === null) return false
+  return true
+}
+
 /** A connector result as a tool call answers it: the structured payload, else its text as JSON. */
 function payloadOf(ran: { result?: unknown; text?: string }): unknown {
   const structured = (ran.result as { structuredContent?: unknown } | undefined)?.structuredContent
@@ -204,7 +214,9 @@ export const register: Register = (on, options) => {
     try { await adoptCheckout($, name, e, data) } catch { /* the next prompt asks again */ }
     if (OWN_READS.has(tool)) return ran
     // The guard's list: a claim brings its brief's repositories and the loop that holds it (its lease is that loop's,
-    // not the whole session's), a declaration its worktree and branch (where its proof runs), a report ends the claim.
+    // not the whole session's), a declaration its worktree and branch (where its proof runs) and moves the claim to the
+    // loop that declares (#142: a claim recorded for the wrong loop, or with none, is adopted by the agent doing the
+    // work), a report ends the claim. A declaration with no agentId (the main conversation) leaves the claim's loop as it is.
     if (name === 'claim_work' && typeof data?.run === 'number') {
       const claim: CodebookClaim = claimOf(data.run, data.brief, e.agentId)
       await update($, claims, list => [...list.filter(one => one.run !== claim.run), claim])
@@ -216,7 +228,8 @@ export const register: Register = (on, options) => {
       const said = (one: unknown, other: unknown) => (typeof one === 'string' && one.trim() ? one.trim() : typeof other === 'string' && other.trim() ? other.trim() : undefined)
       const worktree = said(recorded?.recorded?.worktree, asked.worktree)
       const branch = said(recorded?.recorded?.branch, asked.branch)
-      if (Number.isSafeInteger(run)) await update($, claims, list => list.map(one => (one.run === run ? { ...one, ...(worktree ? { worktree } : {}), ...(branch ? { branch } : {}) } : one)))
+      const loop = e.agentId || undefined
+      if (Number.isSafeInteger(run)) await update($, claims, list => list.map(one => (one.run === run ? { ...one, ...(worktree ? { worktree } : {}), ...(branch ? { branch } : {}), ...(loop ? { agentId: loop } : {}) } : one)))
     }
     if (name === 'complete_work' && typeof data?.run === 'number') {
       const run = data.run
@@ -275,6 +288,8 @@ export const register: Register = (on, options) => {
       if (!Array.isArray(found)) return { deny: `CodeBook: the repository guard did not run this while CodeBook run ${runs} is worked here: ${found.deny}` }
       for (const repo of found) {
         if (mayReach(lease, repo)) continue
+        // A held run's own push (#142): its declared branch from its declared worktree, whichever loop makes it.
+        if ((await ownPushOf($, held, target, repo)) !== null) continue
         const what = target.kind === 'push' ? `git push to ${target.remote ?? 'the branch\'s default remote'}` : 'gh pr create'
         const where = repo ?? 'a repository the guard could not tell'
         if (lease.kind === 'bystander') {
@@ -299,12 +314,17 @@ export const register: Register = (on, options) => {
     if (below.decision === 'deny' || !/\bpush\b|\bpr\s+(?:create|new|merge)\b/.test(command)) return below
     // While this loop holds a run, the repository guard decides: its pushes are the station's own. Another loop's push
     // is asked about as it would be with nothing held (and the guard still refuses it a held run's repository).
-    if (leaseOf(await read($, claims), (e as { agentId?: string }).agentId).kind === 'worker') return below
+    const held = await read($, claims)
+    if (leaseOf(held, (e as { agentId?: string }).agentId).kind === 'worker') return below
     const reading = readCommand(command)
     const reaches: Reach[] = []
     if (reading === null) reaches.push({ what: 'push', dir: await $.session.cwd() })
     else {
-      for (const target of reading.targets) reaches.push({ what: target.kind, dir: await folderOf($, target.cwd) })
+      for (const target of reading.targets) {
+        // A held run's own push (#142) comes from that run, whichever loop makes it: not asked about.
+        if (await isOwnPush($, held, target)) continue
+        reaches.push({ what: target.kind, dir: await folderOf($, target.cwd) })
+      }
       for (const merge of reading.merges) reaches.push({ what: 'merge', dir: await folderOf($, merge.cwd) })
     }
     if (reaches.length === 0) return below

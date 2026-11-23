@@ -18,7 +18,8 @@
 
 import type { EngineInterface } from 'claude-code'
 
-import { HOME_PREFIX, isPushLike, isRiskyGitVar, readCommand, repoOf, scriptPushes } from './guard'
+import type { CodebookClaim } from '../types'
+import { HOME_PREFIX, isPushLike, isRiskyGitVar, pushSpecOf, readCommand, repoOf, scriptPushes, sentBranchOf } from './guard'
 import type { Check, Target } from './guard'
 
 /** A reason to refuse, as the person reads it after "CodeBook: ". */
@@ -199,6 +200,41 @@ async function pushReaches($: EngineInterface, dir: string, remote: string): Pro
   if (isAddress(remote)) return [repoOf(await rewritten($, dir, remote))]
   const urls = lines(await gitIn($, dir, ['remote', 'get-url', '--push', '--all', remote]))
   return urls.length > 0 ? urls.map(url => repoOf(url)) : [null]
+}
+
+/** A folder's git toplevel (a worktree's own folder), as git resolves it, or null when it is not a git checkout. */
+async function topOf($: EngineInterface, dir: string): Promise<string | null> {
+  return lines(await gitIn($, dir, ['rev-parse', '--show-toplevel']))[0] ?? null
+}
+
+/**
+ * The held run a push is the own push of (#142), or null: it reaches one of the run's repositories, runs in the run's
+ * declared worktree (the same git toplevel) and sends exactly the run's declared branch. Whichever loop makes that push
+ * may make it, so a claim recorded for the wrong loop never blocks the agent doing the work. A claim with no declared
+ * worktree or branch excuses nothing, and neither does a pull request, a push that is not plain (pushSpecOf) or one with
+ * no refspec that git's configuration may send further (push.default other than simple or current, remote.<name>.push).
+ */
+export async function ownPushOf($: EngineInterface, claims: CodebookClaim[], target: Target, repo: string | null): Promise<number | null> {
+  const spec = pushSpecOf(target)
+  if (repo === null || spec === null || !spec.isPlain) return null
+  const declared = claims.filter(one => one.worktree && one.branch && one.repos.includes(repo))
+  if (declared.length === 0) return null
+  const dir = await folderOf($, target.cwd)
+  const top = await topOf($, dir)
+  if (top === null) return null
+  if (spec.refs.length === 0) {
+    const mode = ((await configValue($, dir, 'push.default')) ?? 'simple').toLowerCase()
+    if (mode !== 'simple' && mode !== 'current') return null
+    if (lines(await gitIn($, dir, ['config', '--get-regexp', '^remote\\..*\\.push$'])).length > 0) return null
+  }
+  const current = lines(await gitIn($, dir, ['symbolic-ref', '--quiet', '--short', 'HEAD']))[0] ?? null
+  const sent = sentBranchOf(spec, current)
+  if (sent === null) return null
+  for (const claim of declared) {
+    if (claim.branch !== sent) continue
+    if ((await topOf($, await folderOf($, claim.worktree ?? null))) === top) return claim.run
+  }
+  return null
 }
 
 /**
