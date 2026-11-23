@@ -64,6 +64,8 @@ type World = {
   ghExtensions?: string
   /** The connector's answer to one of its tools (its name without the prefix), in place of the stand-in's. */
   connector?: (name: string, call: Record<string, unknown>) => unknown
+  /** What `$.store` holds when the test starts (what earlier sessions left there). */
+  stored?: Record<string, unknown>
 }
 const out = (stdout: string, exitCode = 0) => ({ value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
 
@@ -125,7 +127,7 @@ function answer(w: World, argv: string[]) {
 function world(on: On, w: World, repo = 'bookbaghq/codebook-plugin-sandbox', local: unknown = null) {
   const ran: string[] = []
   forgetShell()
-  mock.store(on)
+  mock.store(on, w.stored)
   on('session.cwd', () => ({ value: w.cwd }))
   on('env.get', (_, e) => ({ value: (e as { name?: string }).name === 'HOME' ? '/Users/me' : (e as { name?: string }).name === 'SHELL' ? '/bin/zsh' : undefined }) as never)
   on('process.run', (_, e) => answer(w, e.argv) as never)
@@ -436,6 +438,69 @@ test('P2: a worker\'s refusal names its declared branch and worktree', async ($,
   expect(String(after.deny ?? after.text)).toContain('the factory allows bookbaghq/codebook-plugin-sandbox')
   expect(String(after.deny ?? after.text)).toContain('Run 811\'s declared branch is codebook/57-x in ~/code/sandbox-57.')
   expect(ran).toEqual([])
+})
+
+/**
+ * #146: sessions by id. The engine's atoms are the host's for the process, which goes on under a new id after a /clear
+ * or a resume, and a new process (claude --resume) starts with none: only the session's id tells sessions apart.
+ */
+function sessions(on: On, stored?: Record<string, unknown>) {
+  const at = { session: 'session-a' }
+  const ran = world(on, { cwd: '/work/session', repoOf: () => ({ remotes: { origin: { fetch: [SANDBOX] } }, branch: 'main' }), ...(stored ? { stored } : {}) })
+  on('session.id', () => ({ value: at.session }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('command.register', () => ({ value: { command: 'factory' } }))
+  return { ran, at }
+}
+
+test('P4: another session\'s claims do not block this session\'s push', async ($, on) => {
+  const { ran, at } = sessions(on)
+  // Session A's factory worker claims run 811 on the sandbox.
+  await $.tool.call({ tool: OWN + 'claim_work', run: 811, agentId: 'worker-1' } as never)
+  const inA = await $.tool.call({ tool: 'Bash', command: 'git push origin main' } as never)
+  expect(String(inA.deny ?? inA.text)).toContain('which CodeBook run 811 works on')
+  // Session B (another manager, or this process after a /clear) pushes there: A's run is not B's to respect.
+  at.session = 'session-b'
+  await $.tool.call({ tool: 'Bash', command: 'git push origin main' } as never)
+  await $.tool.call({ tool: 'Bash', command: 'gh pr create --draft --repo bookbaghq/codebook-plugin-sandbox', agentId: 'track-j6' } as never)
+  expect(ran).toEqual(['git push origin main', 'gh pr create --draft --repo bookbaghq/codebook-plugin-sandbox'])
+  // B's own claim binds only B.
+  await $.tool.call({ tool: OWN + 'claim_work', run: 811, agentId: 'worker-2' } as never)
+  const inB = await $.tool.call({ tool: 'Bash', command: 'git push origin main' } as never)
+  expect(String(inB.deny ?? inB.text)).toContain('held by agent worker-2')
+  expect(ran.length).toBe(2)
+})
+
+test('P4: a resumed session keeps its own claims', async ($, on) => {
+  // What session A left in the plugin's store before its process ended, and an old session's leftover.
+  const T = Date.now()
+  const { ran, at } = sessions(on, {
+    'claims-1:session-a': { at: T, claims: [{ run: 811, repos: ['bookbaghq/codebook-plugin-sandbox'], agentId: 'worker-1' }] },
+    'claims-1:session-old': { at: T - 31 * 24 * 3600 * 1000, claims: [{ run: 700, repos: ['bookbaghq/codebook-app'], agentId: 'worker-9' }] },
+  })
+  // claude --resume: a new process, the same id. Its claim still holds.
+  const resumed = await $.tool.call({ tool: 'Bash', command: 'git push origin main' } as never)
+  expect(String(resumed.deny ?? resumed.text)).toContain('run 811 on bookbaghq/codebook-plugin-sandbox, held by agent worker-1')
+  // Away to another session and back: still its own.
+  at.session = 'session-b'
+  await $.tool.call({ tool: 'Bash', command: 'git push origin main' } as never)
+  at.session = 'session-a'
+  const back = await $.tool.call({ tool: 'Bash', command: 'git push origin main' } as never)
+  expect(String(back.deny ?? back.text)).toContain('which CodeBook run 811 works on')
+  expect(ran).toEqual(['git push origin main'])
+  // Its report ends the claim.
+  await $.tool.call({ tool: OWN + 'complete_work', run: 811, fence: 1, outcome: 'pass', summary: 'ok', agentId: 'worker-1' } as never)
+  await $.tool.call({ tool: 'Bash', command: 'git push origin main' } as never)
+  expect(ran.length).toBe(2)
+  // A session gone for longer than KEEP_SESSION_MS is cleared when another session starts: resuming it finds nothing held.
+  at.session = 'session-old'
+  const old = await $.tool.call({ tool: 'Bash', command: 'git push https://github.com/bookbaghq/codebook-app.git main' } as never)
+  expect(String(old.deny ?? old.text)).toContain('run 700 on bookbaghq/codebook-app, held by agent worker-9')
+  at.session = 'session-a'
+  await $.session.start({ cwd: '/work/session', surface: 'cli', isInteractive: true } as never)
+  at.session = 'session-old'
+  await $.tool.call({ tool: 'Bash', command: 'git push https://github.com/bookbaghq/codebook-app.git main' } as never)
+  expect(ran.length).toBe(3)
 })
 
 /** #143: CodeBook's answers carry the lease, shaped like app.codebook.work's; the clock starts at T0. */
