@@ -26,6 +26,19 @@ type World = {
   refusedLog?: string
   /** What the proxy prints before it ends: `ready …` by default. */
   proxySays?: string
+  /**
+   * The repository's working trees on this computer, by folder (P1): the commit and branch each has checked out. With
+   * them, git answers by the folder it is asked in, and `worktree list` names them all; `.` is the session's folder.
+   */
+  folders?: Record<string, { head: string; branch: string | null; origin?: string; time?: number }>
+  /** The session's folder when `folders` is given. */
+  session?: string
+  /** Each branch's tip on origin (`refs/remotes/origin/<branch>`); a branch left out is not on origin. */
+  tips?: Record<string, string>
+  /** The commit CodeBook names for the waiting proof (null, as today's CodeBook queues a model's request). */
+  commit?: string | null
+  /** What claim_work answers as the run's brief. */
+  brief?: unknown
 }
 
 /** The engine, CodeBook and this computer, as one world; what ran, what was claimed and what was reported come back. */
@@ -50,6 +63,32 @@ function world(on: On, w: World) {
     if (argv[0] === 'cat' && argv[1]?.includes('/.codebook/proof/egress-')) return out(w.refusedLog ?? '', w.refusedLog === undefined ? 1 : 0) as never
     if (argv[0] === '/usr/bin/sandbox-exec' && argv.at(-1) === '/usr/bin/true') return out('') as never
     if (argv[0] === '/usr/bin/bwrap' && argv.at(-1) === '/bin/true') return out('') as never
+    if (argv[0] === 'git' && w.folders && argv[1] === '-C') {
+      const asked = argv[2] === '.' ? (w.session ?? '/work/session') : String(argv[2])
+      const folder = w.folders[asked]
+      const rest = argv.slice(3).join(' ')
+      if (rest.startsWith('worktree add') || rest.startsWith('worktree remove')) return out('') as never
+      if (rest.startsWith('rev-parse --verify --quiet refs/remotes/origin/')) {
+        const branch = rest.slice('rev-parse --verify --quiet refs/remotes/origin/'.length)
+        const tip = branch === 'main' ? BASE : w.tips?.[branch]
+        return (tip ? out(`${tip}\n`) : out('', 1)) as never
+      }
+      if (rest.startsWith('fetch')) return out('') as never
+      if (!folder) return out('', 128) as never
+      if (rest === 'rev-parse --show-toplevel') return out(`${asked}\n`) as never
+      if (rest === 'remote get-url origin') return out(`${folder.origin ?? 'git@github.com:acme/payments.git'}\n`) as never
+      if (rest === 'rev-parse HEAD') return out(`${folder.head}\n`) as never
+      if (rest === 'status --porcelain') return out(w.dirty ? ' M src/refund.js\n' : '') as never
+      if (rest === 'symbolic-ref --short -q HEAD') return (folder.branch ? out(`${folder.branch}\n`) : out('', 1)) as never
+      if (rest === 'log -1 --format=%ct HEAD') return out(`${folder.time ?? 0}\n`) as never
+      if (rest === 'worktree list --porcelain') {
+        // Every folder of the same origin is one repository's working tree.
+        const same = Object.entries(w.folders).filter(([, one]) => (one.origin ?? '') === (folder.origin ?? ''))
+        return out(same.map(([path, one]) => `worktree ${path}\nHEAD ${one.head}\n${one.branch ? `branch refs/heads/${one.branch}` : 'detached'}\n`).join('\n')) as never
+      }
+      if (rest.startsWith('diff --quiet')) return out('', w.lockfilesDiffer ? 1 : 0) as never
+      return out('') as never
+    }
     if (argv[0] === 'git') {
       if (joined.includes('rev-parse --show-toplevel')) return out(`${DIR}\n`) as never
       if (joined.includes('remote get-url origin')) return out(`${w.origin ?? 'git@github.com:acme/payments.git'}\n`) as never
@@ -81,11 +120,15 @@ function world(on: On, w: World) {
   const answer = (tool: string, args: Record<string, unknown>) =>
     tool === 'claim_proof'
       ? args.peek
-        ? { waiting: w.waiting === false ? [] : [{ proof: 70, repository: 'acme/payments', default_branch: 'main', commands: ['test'], commit: null }] }
+        ? { waiting: w.waiting === false ? [] : [{ proof: 70, repository: 'acme/payments', default_branch: 'main', commands: ['test'], commit: w.commit ?? null }] }
         : { proof: 70, token: TOKEN, report_url: REPORT, report_path: '/kanban/api/proof/report', repository: { id: 5, full_name: 'acme/payments', default_branch: 'main' }, expected_commit: null, recipe: { revision: 2, install: 'npm ci', network: 'loopback', ...(w.recipe ?? {}) }, steps }
       : tool === 'request_proof'
-        ? { proof: 70, where: 'here', commands: [{ name: 'test', status: 'queued' }] }
-        : { ok: true }
+        ? { proof: 70, where: 'here', repository: 'acme/payments', commands: [{ name: 'test', status: 'queued' }] }
+        : tool === 'claim_work'
+          ? { run: args.run, where: 'here', lease: { fence: 1 }, brief: w.brief ?? null }
+          : tool === 'declare_work'
+            ? { run: args.run, recorded: { repository: args.repository ?? null, branch: args.branch ?? null, worktree: args.worktree ?? null, files: [] }, overlaps: [] }
+            : { ok: true }
   on('mcp.call', (_, e) => {
     mcp.push({ tool: e.tool, args: e.args ?? {} })
     const data = answer(e.tool, e.args ?? {})
@@ -354,4 +397,95 @@ test('boxedArgv: a list without a proxy tells the command nothing; "full" never 
   expect(boxedArgv({ ...base, network: 'full', egress: { kind: 'tcp', port: 18601 } }).some(one => one.startsWith('HTTPS_PROXY='))).toBe(false)
   expect(boxedArgv({ ...base, network: 'hosts', egress: { kind: 'tcp', port: 18601 } })).toContain('HTTPS_PROXY=http://127.0.0.1:18601')
   expect(bubblewrapArgs({ dirs: [DIR], hidden: [], network: 'hosts' })).toContain('--unshare-net')
+})
+
+// ── Where a proof runs: the run's worktree at its pull request's head (P1) ─────────────────────────────────────────────
+
+const OWNER = '/Users/me/code/payments'
+const TREE = '/Users/me/code/payments-29'
+const BRANCH = 'codebook/VF-29-run-731'
+const PR_HEAD = 'c'.repeat(40)
+/** The brief of run 731 (Vibeforce WO-29's shape): the owner's checkout saved for the repository, the story's key and branch. */
+const BRIEF_731 = { run_here: { repository: { name: 'acme/payments', url: 'https://github.com/acme/payments', local: { path: '~/code', mode: 'existing', checkout_path: '~/code/payments' } }, card_reference: { key: 'VF-29', branch: BRANCH } } }
+/** The owner's checkout on main, and the worker's worktree beside it on the run's branch, pushed. */
+const SEEN_731 = { [OWNER]: { head: BASE, branch: 'main' }, [TREE]: { head: PR_HEAD, branch: BRANCH } }
+const ranIn = (w: { processes: string[][] }) => w.processes.filter(argv => argv.includes('/bin/sh') && argv.at(-1)?.includes('npm test')).map(argv => /^cd "([^"]+)"/.exec(argv.at(-1) ?? '')?.[1])
+
+test('P1: a worker\'s proof runs in its declared worktree at the pull request\'s head, not in the owner\'s checkout on main', async ($, on) => {
+  const w = world(on, { folders: SEEN_731, tips: { [BRANCH]: PR_HEAD }, brief: BRIEF_731, results: { 'head:npm test': { exit: 0, output: 'ok 1 - a\n' } } })
+  // The worker is a sub-agent: it claims, says its worktree, commits and pushes, then asks.
+  await $.tool.call({ tool: `${OWN}claim_work`, run: 731, agentId: 'worker-1' } as never)
+  await $.tool.call({ tool: `${OWN}declare_work`, run: 731, fence: 1, repository: 'acme/payments', branch: BRANCH, worktree: '~/code/payments-29', files: ['src/'], agentId: 'worker-1' } as never)
+  const asked = await $.tool.call({ tool: `${OWN}request_proof`, story: '6KjN', run: 731, agentId: 'worker-1' } as never)
+  expect(ranIn(w)).toEqual([TREE])
+  expect(w.reports.map(one => [one.body.run, one.body.commit])).toEqual([[71, PR_HEAD]])
+  // The pull request's head was read from origin, the branch fetched first.
+  expect(w.processes.some(argv => argv.join(' ') === `git -C ${TREE} fetch --quiet origin ${BRANCH}`)).toBe(true)
+  const told = (asked.context ?? []).join('\n')
+  expect(told).toContain('test: passed, 3 tests read at ccccccc')
+  expect(told).not.toContain('Not the pull request\'s head')
+})
+
+test('P1: with no declared worktree (a QA run), the worktree whose branch carries the story\'s key is found at its head', async ($, on) => {
+  // QA's own brief names its own run's branch, which no folder has; the developer's worktree is on run 731's branch.
+  const qa = { run_here: { ...BRIEF_731.run_here, card_reference: { key: 'VF-29', branch: 'codebook/VF-29-run-735' } } }
+  const folders = { ...SEEN_731, '/Users/me/code/payments-2': { head: 'd'.repeat(40), branch: 'codebook/VF-2-run-600' } }
+  const w = world(on, { folders, tips: { [BRANCH]: PR_HEAD, 'codebook/VF-2-run-600': 'd'.repeat(40) }, brief: qa, results: { 'head:npm test': { exit: 0, output: 'ok 1 - a\n' } } })
+  await $.tool.call({ tool: `${OWN}claim_work`, run: 735, agentId: 'qa-1' } as never)
+  await $.tool.call({ tool: `${OWN}request_proof`, story: '6KjN', run: 735, agentId: 'qa-1' } as never)
+  // VF-2's worktree is not VF-29's: the key is matched whole.
+  expect(ranIn(w)).toEqual([TREE])
+  expect(w.reports[0]?.body.commit).toBe(PR_HEAD)
+})
+
+test('P1: a worker that names no run is placed by the run its own loop holds', async ($, on) => {
+  const w = world(on, { folders: SEEN_731, tips: { [BRANCH]: PR_HEAD }, brief: BRIEF_731, results: { 'head:npm test': { exit: 0, output: 'ok 1 - a\n' } } })
+  await $.tool.call({ tool: `${OWN}claim_work`, run: 731, agentId: 'worker-1' } as never)
+  await $.tool.call({ tool: `${OWN}request_proof`, story: '6KjN', agentId: 'worker-1' } as never)
+  expect(ranIn(w)).toEqual([TREE])
+})
+
+test('P1: when no worktree of the run is on this computer, nothing runs in the owner\'s checkout and the proof stays waiting', async ($, on) => {
+  const w = world(on, { folders: { [OWNER]: { head: BASE, branch: 'main' } }, brief: BRIEF_731, results: { 'head:npm test': { exit: 0, output: 'ok 1 - a\n' } } })
+  await $.tool.call({ tool: `${OWN}claim_work`, run: 731, agentId: 'worker-1' } as never)
+  const asked = await $.tool.call({ tool: `${OWN}request_proof`, story: '6KjN', run: 731, agentId: 'worker-1' } as never)
+  expect(ranIn(w)).toEqual([])
+  // Not taken: claim_proof was only peeked, so the proof is still waiting for a later /factory prove.
+  expect(w.mcp.filter(one => one.tool === 'claim_proof' && one.args.peek !== true).length).toBe(0)
+  expect(w.reports.length).toBe(0)
+  const told = (asked.context ?? []).join('\n')
+  expect(told).toContain('nothing ran')
+  expect(told).toContain(`${OWNER} (main at bbbbbbb) is not the pull request's head`)
+})
+
+test('P1: a worktree on the run\'s branch that is not at its pushed head runs only when it is the run\'s own, and says so', async ($, on) => {
+  const local = 'e'.repeat(40)
+  const w = world(on, { folders: { [OWNER]: { head: BASE, branch: 'main' }, [TREE]: { head: local, branch: BRANCH } }, tips: { [BRANCH]: PR_HEAD }, brief: BRIEF_731, results: { 'head:npm test': { exit: 0, output: 'ok 1 - a\n' } } })
+  await $.tool.call({ tool: `${OWN}claim_work`, run: 731, agentId: 'worker-1' } as never)
+  // Without a declaration the worktree is not known to be the run's: refused.
+  const before = await $.tool.call({ tool: `${OWN}request_proof`, story: '6KjN', run: 731, agentId: 'worker-1' } as never)
+  expect(ranIn(w)).toEqual([])
+  expect((before.context ?? []).join('\n')).toContain(`is at eeeeeee and origin/${BRANCH}, the pull request's head, at ccccccc`)
+  // Declared, it runs there, and the summary says it proves no pull request's head.
+  await $.tool.call({ tool: `${OWN}declare_work`, run: 731, fence: 1, branch: BRANCH, worktree: TREE, files: [], agentId: 'worker-1' } as never)
+  const after = await $.tool.call({ tool: `${OWN}request_proof`, story: '6KjN', run: 731, agentId: 'worker-1' } as never)
+  expect(ranIn(w)).toEqual([TREE])
+  expect((after.context ?? []).join('\n')).toContain('Not the pull request\'s head')
+})
+
+test('P1: a commit CodeBook names is run where it is checked out, even from /factory prove', async ($, on) => {
+  on('command.register', () => ({ value: { command: 'factory' } }))
+  const w = world(on, { folders: SEEN_731, session: OWNER, commit: PR_HEAD, results: { 'head:npm test': { exit: 0, output: 'ok 1 - a\n' } } })
+  const done = await $.command.run({ command: 'factory', args: 'prove 70', origin: { kind: 'human' } } as never)
+  expect(ranIn(w)).toEqual([TREE])
+  expect(String(done.text)).toContain('at ccccccc')
+})
+
+test('P1: a commit CodeBook names that no folder has checked out is never run in the owner\'s checkout', async ($, on) => {
+  on('command.register', () => ({ value: { command: 'factory' } }))
+  const none = world(on, { folders: { [OWNER]: { head: BASE, branch: 'main' } }, session: OWNER, commit: PR_HEAD, results: {} })
+  const refused = await $.command.run({ command: 'factory', args: 'prove 70', origin: { kind: 'human' } } as never)
+  expect(ranIn(none)).toEqual([])
+  expect(String(refused.text)).toContain('no checkout or worktree of it on this computer has that commit checked out')
+  expect(none.reports.length).toBe(0)
 })

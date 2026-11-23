@@ -9,7 +9,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { CodebookActive, CodebookCheckout, CodebookClaim, CodebookLink, CodebookMode, CodebookStory, CodebookWatch } from '../types'
 import { call, words } from './connector'
-import { allowedOf, readCommand } from './guard'
+import { claimOf, leaseOf, mayReach, readCommand } from './guard'
 import { checkOne, checkShellWords, folderOf, reaches, shellState } from './resolve'
 import { adoptCheckout, askAtStart, askBefore, checkoutLine, contextBlock, outsideCommand, promptNote, sweepCheckouts } from './checkout'
 import type { Reach } from './checkout'
@@ -35,7 +35,7 @@ import { backlogText, backlogUsage } from './backlog'
 import { orderReport, type WorkOrderReport } from './work-order-report'
 import { overnightArguments, overnightRequest, overnightUsage } from './overnight'
 import { drawPane, PANE } from './pane'
-import { runProof, waitingProofs } from './proof'
+import { hintOf, runProof, waitingProofs } from './proof'
 
 // The pane's values, declared again here: the engine reads state only through atoms written in the same file.
 // Keep each tag as factory.ts has it.
@@ -203,10 +203,20 @@ export const register: Register = (on, options) => {
     // What CodeBook said about a repository's factory, or that the person's own switch for it changed (checkout.ts).
     try { await adoptCheckout($, name, e, data) } catch { /* the next prompt asks again */ }
     if (OWN_READS.has(tool)) return ran
-    // The guard's list: a claim brings its brief's repositories, a report ends the claim.
+    // The guard's list: a claim brings its brief's repositories and the loop that holds it (its lease is that loop's,
+    // not the whole session's), a declaration its worktree and branch (where its proof runs), a report ends the claim.
     if (name === 'claim_work' && typeof data?.run === 'number') {
-      const claim: CodebookClaim = { run: data.run, repos: allowedOf(data.brief) }
+      const claim: CodebookClaim = claimOf(data.run, data.brief, e.agentId)
       await update($, claims, list => [...list.filter(one => one.run !== claim.run), claim])
+    }
+    if (name === 'declare_work') {
+      const asked = e as { run?: unknown; worktree?: unknown; branch?: unknown }
+      const recorded = (data as { run?: unknown; recorded?: { worktree?: unknown; branch?: unknown } } | null)
+      const run = typeof recorded?.run === 'number' ? recorded.run : Number(asked.run)
+      const said = (one: unknown, other: unknown) => (typeof one === 'string' && one.trim() ? one.trim() : typeof other === 'string' && other.trim() ? other.trim() : undefined)
+      const worktree = said(recorded?.recorded?.worktree, asked.worktree)
+      const branch = said(recorded?.recorded?.branch, asked.branch)
+      if (Number.isSafeInteger(run)) await update($, claims, list => list.map(one => (one.run === run ? { ...one, ...(worktree ? { worktree } : {}), ...(branch ? { branch } : {}) } : one)))
     }
     if (name === 'complete_work' && typeof data?.run === 'number') {
       const run = data.run
@@ -220,7 +230,11 @@ export const register: Register = (on, options) => {
       if (typeof asked === 'number') {
         let told: string
         try {
-          told = (await runProof($, { proof: asked, known: await read($, checkouts), hosts: proofHosts })).text
+          // The run that asked (its `run`, else the run this loop holds): its worktree, at its pull request's head, is
+          // where the proof runs, never the person's own checkout on another branch (P1).
+          const repository = (data as { repository?: unknown } | null)?.repository
+          const hint = hintOf(await read($, claims), (e as { run?: unknown }).run, e.agentId, typeof repository === 'string' ? repository : null)
+          told = (await runProof($, { proof: asked, known: await read($, checkouts), hosts: proofHosts, hint })).text
         } catch (error) {
           told = `The CodeBook plugin could not run proof ${asked} here: ${error instanceof Error ? error.message : String(error)}. It is still waiting; /factory prove tries again.`
         }
@@ -230,14 +244,16 @@ export const register: Register = (on, options) => {
     return ran
   }).catch(($, e, next) => (next.called ? next(e) : String(e.tool) === OWN_CLAIM ? { deny: CLAIM_REFUSED } : next(e)))
 
-  // The repository guard (G5 decision 6): while this session works a CodeBook run, pushes and pull requests reach only
-  // the repositories its brief lists. Outside CodeBook work it stands aside. It only ever refuses.
+  // The repository guard (G5 decision 6), per run (P2): a run's lease is the agent loop's that claimed it. That loop
+  // (the station's worker) pushes and opens pull requests only in the repositories its brief lists; any other loop of
+  // the session reaches anything but the repositories held runs work on. With no run held it stands aside. It only
+  // ever refuses.
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
     const held = await read($, claims)
-    if (held.length === 0) return next(e)
-    const allowed = [...new Set(held.flatMap(one => one.repos))]
+    const lease = leaseOf(held, e.agentId)
+    if (lease.kind === 'free') return next(e)
     const reading = readCommand(String(e.command ?? ''))
-    const runs = held.map(one => one.run).join(', ')
+    const runs = lease.runs.join(', ')
     if (reading === null) {
       return { deny: `CodeBook: the repository guard cannot tell where this command pushes or opens a pull request, so it was not run while CodeBook run ${runs} is worked here. Run the push on its own, plainly: git -C <checkout> push <remote> <branch>, and open the pull request with gh pr create --repo <owner/name>.` }
     }
@@ -258,10 +274,15 @@ export const register: Register = (on, options) => {
       const found = await reaches($, target, env)
       if (!Array.isArray(found)) return { deny: `CodeBook: the repository guard did not run this while CodeBook run ${runs} is worked here: ${found.deny}` }
       for (const repo of found) {
-        if (repo !== null && allowed.includes(repo)) continue
+        if (mayReach(lease, repo)) continue
         const what = target.kind === 'push' ? `git push to ${target.remote ?? 'the branch\'s default remote'}` : 'gh pr create'
         const where = repo ?? 'a repository the guard could not tell'
-        const may = allowed.length > 0 ? allowed.join(', ') : 'no repository (its brief names none)'
+        if (lease.kind === 'bystander') {
+          return { deny: repo === null
+            ? `CodeBook: ${what} reaches ${where}, and CodeBook run ${runs} is worked in this session on ${lease.held.join(', ')}, so the guard cannot tell it is not one of those. Push with a GitHub address or remote it can read, plainly: git -C <checkout> push <remote> <branch>.`
+            : `CodeBook: ${what} reaches ${where}, which CodeBook run ${held.filter(one => one.repos.includes(repo)).map(one => one.run).join(', ')} works on in this session. Only that run's worker (the agent that claimed it) pushes there while it is held; any other repository is not the guard's.` }
+        }
+        const may = lease.allowed.length > 0 ? lease.allowed.join(', ') : 'no repository (its brief names none)'
         return { deny: `CodeBook: ${what} reaches ${where}. While CodeBook run ${runs} is worked here, the factory allows ${may}.` }
       }
     }
@@ -276,8 +297,9 @@ export const register: Register = (on, options) => {
     const command = String((e.input as { command?: unknown } | null)?.command ?? '')
     const below = await next(e)
     if (below.decision === 'deny' || !/\bpush\b|\bpr\s+(?:create|new|merge)\b/.test(command)) return below
-    // While a run is held, the repository guard below decides: its pushes are the station's own.
-    if ((await read($, claims)).length > 0) return below
+    // While this loop holds a run, the repository guard decides: its pushes are the station's own. Another loop's push
+    // is asked about as it would be with nothing held (and the guard still refuses it a held run's repository).
+    if (leaseOf(await read($, claims), (e as { agentId?: string }).agentId).kind === 'worker') return below
     const reading = readCommand(command)
     const reaches: Reach[] = []
     if (reading === null) reaches.push({ what: 'push', dir: await $.session.cwd() })

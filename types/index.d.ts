@@ -93,7 +93,18 @@ export type CodebookWatch = {
 }
 
 /** A CodeBook run this session holds, and the repositories its brief lets it change (`owner/name`). */
-export type CodebookClaim = { run: number; repos: string[] }
+export type CodebookClaim = {
+  run: number
+  repos: string[]
+  /** The agent loop that claimed it (the call's `agentId`): only that loop holds the run's lease. Absent: the main conversation. */
+  agentId?: string
+  /** The story's key (`card_reference.key`, e.g. `VF-29`): the pull request's branch contains it. */
+  key?: string
+  /** The branch the run works on: what declare_work said, else the brief's `card_reference.branch`. */
+  branch?: string
+  /** The folder the run works in, as declare_work said (`~/…` or absolute). */
+  worktree?: string
+}
 
 /** A repository's checkout on this computer, as CodeBook last answered it (`you.local_code`, a claim's `local`). */
 export type CodebookCheckout = {
