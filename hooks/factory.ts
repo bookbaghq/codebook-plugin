@@ -46,7 +46,7 @@ export const STORE_SESSION = 'session-1:'
 /** The keys every session used to share, before 0.14.0. */
 const STORE_SHARED_BEFORE = ['active-1', 'watched-1']
 /** A session not seen for this long has gone: its key is removed by the next session to start. */
-const KEEP_SESSION_MS = 30 * 24 * 3600 * 1000
+export const KEEP_SESSION_MS = 30 * 24 * 3600 * 1000
 
 type KeptSession = { at: number; active: CodebookActive | null; watched: CodebookWatch[] }
 

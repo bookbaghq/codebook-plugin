@@ -28,6 +28,7 @@ import {
   startRequest,
   STORE_MODE,
   restoreSession,
+  KEEP_SESSION_MS,
   takePollSoon,
   unfollow,
 } from './factory'
@@ -200,13 +201,65 @@ const RENEWS = new Set(['heartbeat_work', 'run_note', 'run_artifact'])
  * lease that ran out, a run finished elsewhere or a stopped sub-agent no longer blocks pushes for the rest of the session.
  */
 async function heldNow($: EngineInterface): Promise<{ held: CodebookClaim[]; now: number }> {
-  // The engine's clock (a test sets it); this computer's when the engine has none to give.
-  let now: number
-  try { now = await $.clock.now() } catch { now = Date.now() }
-  const all = await read($, claims)
+  const now = await nowOf($)
+  const all = await readClaims($)
   const live = liveClaims(all, now)
-  if (live.length !== all.length) await update($, claims, list => liveClaims(list, now))
+  if (live.length !== all.length) await updateClaims($, list => liveClaims(list, now))
   return { held: live, now }
+}
+
+/** The engine's clock (a test sets it); this computer's when the engine has none to give. */
+async function nowOf($: EngineInterface): Promise<number> {
+  try { return await $.clock.now() } catch { return Date.now() }
+}
+
+/**
+ * The runs THIS session holds, under the session's own id in the plugin's store (#146). The engine's atoms are the
+ * host's for the process: shared by every session id the process goes on under (after a /clear or a resume) and gone
+ * for a new process, so one session's runs blocked another's pushes and a `claude --resume` forgot its own. As
+ * factory.ts keeps what a session follows: a session reads and writes only its own key, a resumed one (the same id)
+ * finds its claims, and a session gone for KEEP_SESSION_MS is cleared by the next one to start.
+ */
+const STORE_CLAIMS = 'claims-1:'
+type KeptClaims = { at: number; claims: CodebookClaim[] }
+
+async function claimsKey($: EngineInterface): Promise<string> {
+  // A host that cannot name the session (a test harness without one): one key for the process, as the atom was.
+  let id = 'process'
+  try { id = (await $.session.id()) || id } catch { /* the process's key */ }
+  return `${STORE_CLAIMS}${id}`
+}
+
+async function readClaims($: EngineInterface): Promise<CodebookClaim[]> {
+  const kept = (await $.store.get(await claimsKey($))) as Partial<KeptClaims> | undefined
+  if (Array.isArray(kept?.claims)) return kept.claims.filter(one => typeof one?.run === 'number' && Array.isArray(one.repos))
+  // Claims an earlier version kept in the process's atom: the first session to look adopts them, once.
+  const before = await read($, claims)
+  if (before.length === 0) return []
+  await update($, claims, () => [])
+  await writeClaims($, before)
+  return before
+}
+
+async function writeClaims($: EngineInterface, list: CodebookClaim[]): Promise<void> {
+  const key = await claimsKey($)
+  if (list.length === 0) await $.store.delete(key)
+  else await $.store.set(key, { at: await nowOf($), claims: list } satisfies KeptClaims)
+}
+
+async function updateClaims($: EngineInterface, change: (list: CodebookClaim[]) => CodebookClaim[]): Promise<void> {
+  await writeClaims($, change(await readClaims($)))
+}
+
+/** At session start: the claims of sessions not seen for KEEP_SESSION_MS (or kept in no shape this code reads) go. */
+async function sweepClaims($: EngineInterface): Promise<void> {
+  const now = await nowOf($)
+  const own = await claimsKey($)
+  for (const key of await $.store.keys()) {
+    if (!key.startsWith(STORE_CLAIMS) || key === own) continue
+    const other = (await $.store.get(key)) as Partial<KeptClaims> | undefined
+    if (typeof other?.at !== 'number' || now - other.at > KEEP_SESSION_MS) await $.store.delete(key)
+  }
 }
 
 /** A connector result as a tool call answers it: the structured payload, else its text as JSON. */
@@ -258,14 +311,14 @@ export const register: Register = (on, options) => {
     // work), a report ends the claim. A declaration with no agentId (the main conversation) leaves the claim's loop as it is.
     if (name === 'claim_work' && typeof data?.run === 'number') {
       const claim: CodebookClaim = claimOf(data.run, data.brief, e.agentId, data.lease)
-      await update($, claims, list => [...list.filter(one => one.run !== claim.run), claim])
+      await updateClaims($, list => [...list.filter(one => one.run !== claim.run), claim])
     }
     // A renewed lease (#143): a heartbeat_work, run_note or run_artifact answer that carries a later expires_at keeps
     // the claim in force that much longer. A missing or earlier one changes nothing.
     if (RENEWS.has(name) && typeof data?.run === 'number') {
       const run = data.run
       const expiresAt = expiresOf(data.lease)
-      if (expiresAt !== undefined) await update($, claims, list => list.map(one => (one.run === run && (one.expiresAt === undefined || expiresAt > one.expiresAt) ? { ...one, expiresAt } : one)))
+      if (expiresAt !== undefined) await updateClaims($, list => list.map(one => (one.run === run && (one.expiresAt === undefined || expiresAt > one.expiresAt) ? { ...one, expiresAt } : one)))
     }
     if (name === 'declare_work') {
       const asked = e as { run?: unknown; worktree?: unknown; branch?: unknown }
@@ -275,11 +328,11 @@ export const register: Register = (on, options) => {
       const worktree = said(recorded?.recorded?.worktree, asked.worktree)
       const branch = said(recorded?.recorded?.branch, asked.branch)
       const loop = e.agentId || undefined
-      if (Number.isSafeInteger(run)) await update($, claims, list => list.map(one => (one.run === run ? { ...one, ...(worktree ? { worktree } : {}), ...(branch ? { branch } : {}), ...(loop ? { agentId: loop } : {}) } : one)))
+      if (Number.isSafeInteger(run)) await updateClaims($, list => list.map(one => (one.run === run ? { ...one, ...(worktree ? { worktree } : {}), ...(branch ? { branch } : {}), ...(loop ? { agentId: loop } : {}) } : one)))
     }
     if (name === 'complete_work' && typeof data?.run === 'number') {
       const run = data.run
-      await update($, claims, list => list.filter(one => one.run !== run))
+      await updateClaims($, list => list.filter(one => one.run !== run))
     }
     await adopt($, name, data)
     // A proof the model asked for is run here and now, by the plugin: the commands, the sandbox and the report are
@@ -292,7 +345,7 @@ export const register: Register = (on, options) => {
           // The run that asked (its `run`, else the run this loop holds): its worktree, at its pull request's head, is
           // where the proof runs, never the person's own checkout on another branch (P1).
           const repository = (data as { repository?: unknown } | null)?.repository
-          const hint = hintOf(await read($, claims), (e as { run?: unknown }).run, e.agentId, typeof repository === 'string' ? repository : null)
+          const hint = hintOf(await readClaims($), (e as { run?: unknown }).run, e.agentId, typeof repository === 'string' ? repository : null)
           told = (await runProof($, { proof: asked, known: await read($, checkouts), hosts: proofHosts, hint })).text
         } catch (error) {
           told = `The CodeBook plugin could not run proof ${asked} here: ${error instanceof Error ? error.message : String(error)}. It is still waiting; /factory prove tries again.`
@@ -406,6 +459,8 @@ export const register: Register = (on, options) => {
     })
     // Which factory works on this folder's repository, asked now so the first prompt need not wait (never awaited, never fatal).
     try { await sweepCheckouts($) } catch { /* next session */ }
+    // The claims of sessions gone for KEEP_SESSION_MS (#146).
+    try { await sweepClaims($) } catch { /* the next session sweeps */ }
     void askAtStart($, e.cwd).catch(() => null)
     const storedMode = await $.store.get(STORE_MODE)
     if (storedMode === 'here' || storedMode === 'cloud') await update($, mode, () => storedMode)
