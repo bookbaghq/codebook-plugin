@@ -145,6 +145,10 @@ declare module 'claude-code' {
       sendingBack: boolean
       notice: string | null
       claims: Shaped<CodebookClaim[]>
+      /** The plugin version this session's skills and agents were loaded from (read at session start). */
+      startVersion: string | null
+      /** The running version the session was last told about, so the notice is given once per change. */
+      noticedVersion: string | null
       checkouts: Shaped<CodebookCheckout[]>
       trail: Shaped<CodebookTrail | null>
       watched: Shaped<CodebookWatch[]>

@@ -52,6 +52,10 @@ const link = atom({ plugin: 'codebook', key: 'link' } as const, { state: 'idle' 
 const watched = atom({ plugin: 'codebook', key: 'watched' } as const, [] as CodebookWatch[], { shape: 'watched-1' })
 const claims = atom({ plugin: 'codebook', key: 'claims' } as const, [] as CodebookClaim[], { shape: 'claims-1' })
 const checkouts = atom({ plugin: 'codebook', key: 'checkouts' } as const, [] as CodebookCheckout[], { shape: 'checkouts-1' })
+// The version the session started on, and the last one it was told about (#147). Atoms outlive a hot reload of the
+// hooks, which is what a mid-session `claude plugin update` does; the skills and agents stay as loaded at the start.
+const startVersion = atom({ plugin: 'codebook', key: 'startVersion' } as const, null as string | null)
+const noticedVersion = atom({ plugin: 'codebook', key: 'noticedVersion' } as const, null as string | null)
 
 const POLL_MS = 4000
 const QUIET_POLL_MS = 30000
@@ -109,7 +113,36 @@ async function statusText($: EngineInterface): Promise<{ text: string; context?:
   const followed = await storyText($)
   // Whether the folder this session is in is a factory's checkout (checkout.ts).
   const here = await checkoutLine($).catch(() => null)
-  return { ...followed, text: [followed.text, here ?? '', code].filter(Boolean).join('\n\n') }
+  // While the hooks run another version than the skills and agents were loaded from (#147).
+  const versions = (await versionMismatch($).catch(() => null))?.line ?? ''
+  return { ...followed, text: [versions, followed.text, here ?? '', code].filter(Boolean).join('\n\n') }
+}
+
+/** The plugin's version as its files say now, from `.claude-plugin/plugin.json` (the engine names no version). */
+async function versionNow($: EngineInterface): Promise<string | null> {
+  try {
+    const version = (JSON.parse(await $.fs.read(`${$.plugin.root}/.claude-plugin/plugin.json`)) as { version?: unknown }).version
+    return typeof version === 'string' && version.trim() !== '' ? version.trim() : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * When the running hooks are another version than the session started on (#147): both versions and the line that says
+ * so. A session whose start version was never read (it started on a version without this code) takes the running one
+ * as its start, and says nothing.
+ */
+async function versionMismatch($: EngineInterface): Promise<{ now: string; start: string; line: string } | null> {
+  const now = await versionNow($)
+  if (now === null) return null
+  const start = await read($, startVersion)
+  if (start === null) {
+    await update($, startVersion, () => now)
+    return null
+  }
+  if (start === now) return null
+  return { now, start, line: `CodeBook plugin: this session's hooks are now version ${now}, but its skills and agents were loaded from version ${start}. Run /reload-plugins (or restart Claude Code) so they match.` }
 }
 
 async function storyText($: EngineInterface): Promise<{ text: string; context?: string[] }> {
@@ -448,7 +481,17 @@ export const register: Register = (on, options) => {
     if (e.command) return next(e)
     let note: string | null = null
     try { note = await promptNote($, 2000) } catch { note = null }
-    return next(note === null ? e : { ...e, context: [...(e.context ?? []), note] })
+    // A mid-session plugin update (#147): one line, on the first prompt after each change.
+    let versions: string | null = null
+    try {
+      const mismatch = await versionMismatch($)
+      if (mismatch !== null && (await read($, noticedVersion)) !== mismatch.now) {
+        versions = mismatch.line
+        await update($, noticedVersion, () => mismatch.now)
+      }
+    } catch { versions = null }
+    const added = [note, versions].filter((one): one is string => one !== null)
+    return next(added.length === 0 ? e : { ...e, context: [...(e.context ?? []), ...added] })
   }).catch(($, e, next) => next(e))
 
   on('session.start', async ($, e, next) => {
@@ -461,6 +504,10 @@ export const register: Register = (on, options) => {
     try { await sweepCheckouts($) } catch { /* next session */ }
     // The claims of sessions gone for KEEP_SESSION_MS (#146).
     try { await sweepClaims($) } catch { /* the next session sweeps */ }
+    // The version this session's skills and agents load from now (#147); a later prompt compares the hooks' to it.
+    const started = await versionNow($)
+    await update($, startVersion, () => started)
+    await update($, noticedVersion, () => null)
     void askAtStart($, e.cwd).catch(() => null)
     const storedMode = await $.store.get(STORE_MODE)
     if (storedMode === 'here' || storedMode === 'cloud') await update($, mode, () => storedMode)

@@ -162,7 +162,7 @@ function engine(on: On, at: { now: At; asks58?: boolean; session?: string; store
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('prompt.submit', (_, e) => {
     prompts.push(e.text)
-    return { text: e.text }
+    return { text: e.text, context: e.context } as never
   })
   on('ui.log', (_, e) => {
     logged.push(e.text)
@@ -757,4 +757,68 @@ test('a call on a story that looks finished is caught up within the short poll, 
   await $.tool.call({ tool: 'mcp__plugin_codebook_codebook__send_back', story: 'st_57' } as never)
   await clock.advance(5000)
   expect(polled()).toBe(before + 1)
+})
+
+/** #147: the plugin's files, as `.claude-plugin/plugin.json` says its version; a test moves it as an update would. */
+function versioned(on: On, version: { now: string }) {
+  on('fs.read', (_, e) => (String((e as { path?: unknown }).path).endsWith('/.claude-plugin/plugin.json')
+    ? { value: JSON.stringify({ name: 'codebook', version: version.now }) }
+    : { error: 'ENOENT' }) as never)
+}
+const contextOf = async ($: { prompt: { submit: (e: never) => Promise<unknown> } }, text = 'go on') =>
+  (((await $.prompt.submit({ text } as never)) as { context?: string[] }).context ?? []).filter(line => line.startsWith('CodeBook plugin:'))
+
+test('P5: a mid-session plugin update is named on the next prompt', async ($, on) => {
+  engine(on, { now: 'build' })
+  const version = { now: '0.24.1' }
+  versioned(on, version)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  // claude plugin update in the middle of the session: the hooks are reloaded from 0.27.0, the skills are not.
+  version.now = '0.27.0'
+  const lines = await contextOf($)
+  expect(lines.length).toBe(1)
+  expect(lines[0]).toContain('hooks are now version 0.27.0')
+  expect(lines[0]).toContain('loaded from version 0.24.1')
+  expect(lines[0]).toContain('/reload-plugins')
+})
+
+test('P5: the version notice is given once and never when the versions match', async ($, on) => {
+  engine(on, { now: 'build' })
+  const version = { now: '0.27.0' }
+  versioned(on, version)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  // The same version: nothing, prompt after prompt.
+  expect(await contextOf($)).toEqual([])
+  expect(await contextOf($)).toEqual([])
+  // One update: one line, on the first prompt after it only.
+  version.now = '0.28.0'
+  expect((await contextOf($)).length).toBe(1)
+  expect(await contextOf($)).toEqual([])
+  // Another update: told again, once.
+  version.now = '0.29.0'
+  const again = await contextOf($)
+  expect(again.length).toBe(1)
+  expect(again[0]).toContain('hooks are now version 0.29.0')
+  expect(await contextOf($)).toEqual([])
+  // A new session starts on what it loads: nothing to say.
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  expect(await contextOf($)).toEqual([])
+})
+
+test('P5: /factory status shows a version mismatch', async ($, on) => {
+  engine(on, { now: 'build' })
+  const version = { now: '0.24.1' }
+  versioned(on, version)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  expect((await $.command.run(typed('status'))).text).not.toContain('CodeBook plugin:')
+  version.now = '0.27.0'
+  // While it lasts, even after the prompt's notice was given.
+  await contextOf($)
+  const status = (await $.command.run(typed('status'))).text
+  expect(status).toContain('hooks are now version 0.27.0')
+  expect(status).toContain('loaded from version 0.24.1')
+  expect(status).toContain('/reload-plugins')
+  // After a restart on the new version, it is gone.
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  expect((await $.command.run(typed('status'))).text).not.toContain('CodeBook plugin:')
 })
