@@ -295,16 +295,50 @@ On your computer that program is this plugin.
   bubblewrap (`bwrap`) on Linux. It can write only in the checkout, in `~/.codebook/proof` and in the temporary folders;
   it cannot read `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`, `~/.docker`, `~/.config/gh`, `~/.claude`, `~/.netrc` or
   `~/.npmrc`; it gets a short list of environment variables (`PATH`, `HOME` and a few more), not your session's; and it
-  reaches only the computer itself unless the recipe says its checks need the network. With no sandbox on the computer
-  the command still runs, and the story says it was not boxed.
+  reaches only the computer itself unless the recipe says its checks need the network, or a list of allowed hosts
+  names more (below). With no sandbox on the computer the command still runs, and the story says it was not boxed.
+- **Allowed hosts.** Between "the computer itself" and "everything" is a list: the hosts a repository's checks may
+  reach, and no others. You keep yours in the plugin's `proof_hosts` option (its row in `/config`, or
+  `claude plugin configure codebook` in a terminal), separated by commas; the recipe's own
+  `hosts` are added when CodeBook sends them. An entry is a host name (`registry.npmjs.org`), a host and port
+  (`git.example.com:8443`), every name under a domain (`*.githubusercontent.com`, not the domain itself), or an address
+  (`93.184.215.14`, `[2606:4700::6810:84e5]:443`). With no port an entry allows 443 and 80. A name on your own network
+  or a private address is written `private:git.lan`. Refused, and said in the summary: `*`, `*.com` and any wildcard
+  that is not the first label, an address range (`10.0.0.0/8`), a URL (`https://…`), a port outside 1–65535, the
+  computer itself (always reachable, as before) and more than 64 entries. A recipe that says `full` keeps the whole
+  network, as before.
+- **How the list is enforced.** Neither sandbox can name a host (Seatbelt's network rules take only `localhost` or `*`,
+  and bubblewrap has a network or none), so a run with a list keeps the box it has with no network and the plugin
+  starts a small filtering proxy outside it, the only way out: on macOS on `127.0.0.1` (a port the system picks); on
+  Linux on a socket in `~/.codebook/proof`, reached through a forwarder inside the box's own network on its
+  `127.0.0.1:3128`. Each command is told the proxy (`HTTPS_PROXY`, `HTTP_PROXY`, and the spellings npm, yarn and Node
+  read). The proxy lets through CONNECT (https, git over https) and plain http to a host and port on the list, resolves
+  the name itself and connects to that address, refuses a name that resolves to a private, loopback or link-local
+  address unless the entry says `private:`, and answers anything else 403. CodeBook is told the list each result ran
+  with, and the summary names the hosts the proxy refused. The proxy needs Node.js on your `PATH`; without it the run
+  reaches the computer itself only, and says so.
 - **Failures that were already there.** When a check fails, the plugin runs it again on the default branch in a separate
   worktree under `~/.codebook/proof/baseline`, so CodeBook can say which failures are new. Your checkout is never
   switched, stashed or reset. Dependencies are linked from your checkout when both commits pin the same ones; otherwise
   the recipe's install line runs in that worktree, with the network.
 - **Commit first.** A run on uncommitted changes is recorded and proves no commit.
-- **Limits.** One command runs for at most ten minutes. The network is the computer itself or everything; a list of
-  allowed hosts is not built. The sandbox limits a repository's test code; it does not make a forged report impossible
-  for a model that set out to send one from your shell, which is why a factory can also require its own runner.
+- **Limits.** One command runs for at most ten minutes. The sandbox limits a repository's test code; it does not make a
+  forged report impossible for a model that set out to send one from your shell, which is why a factory can also
+  require its own runner. The list of allowed hosts:
+  - works for programs that use an HTTP proxy (curl, git over https, npm, yarn, pip, Node's `fetch` with the variable
+    the plugin sets). Anything else (git over ssh, a database or a raw socket to an outside host, a program that
+    ignores the proxy variables) reaches nothing beyond the computer: the sandbox refuses it, list or not;
+  - is decided by the name the program asks the proxy for, and the address the proxy itself resolves. It does not read
+    inside TLS, so an allowed host is allowed whole (every path on it), and `*.example.com` is every name under it; a
+    public suffix such as `*.co.uk` is not known as one and is not refused;
+  - leaves "the computer itself" as it is today: on macOS anything listening on this computer's loopback (the proxy
+    among them, and any other local proxy or service); on Linux the box's own loopback only;
+  - keeps the proxy on `127.0.0.1` while a run lasts (macOS), where another program of yours could use it too; it reaches
+    only the listed hosts;
+  - does not apply to the baseline's install line (Failures that were already there), which has the network, as
+    before;
+  - is not enforced on a computer with no sandbox: the command is told the proxy and may ignore it, and the summary
+    says the run was not boxed.
 - **Auto mode** needs `mcp__plugin_codebook_codebook__claim_proof` in `permissions.allow` (below). The plugin refuses that
   tool to Claude whatever your settings say: it is the plugin's own call, and its answer holds the token the result is
   reported with.
@@ -318,7 +352,8 @@ On your computer that program is this plugin.
   And, for the folder a session is in, when it is a git checkout: the repository's host and `owner/name`, to ask which
   of your factories work on it. Never the address as git holds it (it can carry a token), the folder's path or any file.
   And, for a proof run: each command's exit code, the last million characters of its output, a hash of it, the commit
-  and whether the checkout had uncommitted changes (see Proof runs).
+  and whether the checkout had uncommitted changes, and, when the run had a list of allowed hosts, that list (see Proof
+  runs).
 - **To your repository's git remote (for example GitHub)**: the branch and the draft pull request, with your own
   `git` and `gh` credentials.
 - **Nothing else.** The plugin has no servers of its own, no analytics, and no keys in this repository. Your code
@@ -333,6 +368,7 @@ On your computer that program is this plugin.
 | `skills/factory-manager/` | The manager skill Run here follows: the code on your computer, stories, "proceed?", stations, people, narration. |
 | `agents/factory-worker.md` | The sub-agent that works one station run here as that station's agent. |
 | `hooks/proof.ts` | Proof runs: the repository's checks, run here boxed and reported by the plugin itself. |
+| `hooks/egress.ts` | A proof run's list of allowed hosts: reading the list, and the filtering proxy and forwarder that enforce it. |
 | `types/index.d.ts` | The pane's state contract. |
 | `test/` | Tests for `claude plugin test`. |
 | `.claude-plugin/` | The plugin manifest, the marketplace file and the icon. |

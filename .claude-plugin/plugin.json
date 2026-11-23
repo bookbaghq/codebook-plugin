@@ -1,7 +1,7 @@
 {
   "name": "codebook",
   "displayName": "CodeBook",
-  "version": "0.26.0",
+  "version": "0.27.0",
   "description": "Run CodeBook factories from Claude Code: the CodeBook connector, a live Factory pane beside the chat, /factory, a session that knows when its folder is a factory's checkout and manages it, a factory-worker agent that works run-here stations in your checkout, proof runs the plugin makes and reports itself.",
   "author": {
     "name": "Bookbag",
@@ -18,6 +18,15 @@
     "bookbag"
   ],
   "types": "./types/index.d.ts",
+  "userConfig": {
+    "proof_hosts": {
+      "type": "string",
+      "title": "Hosts proof runs may reach",
+      "description": "Hosts a proof run's checks may reach beyond this computer, separated by commas: example.com, *.example.com, example.com:8443, private:git.lan. Empty: the computer itself only, unless the repository's recipe asks for the whole network.",
+      "default": "",
+      "required": false
+    }
+  },
   "privacyPolicyUrl": "https://codebook.work/privacy",
   "icon": "./.claude-plugin/icon.png"
 }
