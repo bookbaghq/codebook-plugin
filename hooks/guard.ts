@@ -3,6 +3,8 @@
 // pull requests it would make and name the repository each one reaches; register.tsx decides. What they cannot read
 // with confidence they answer `null`, and the guard refuses rather than guesses.
 
+import type { CodebookClaim } from '../types'
+
 /**
  * One push or pull request a command would make, and how to find the repository it reaches. A push's `remote` is null
  * when the command names none: git then picks it from the branch's configuration (resolve.ts reads it as git does).
@@ -51,6 +53,48 @@ export function allowedOf(brief: unknown): string[] {
     })
     .filter((name): name is string => name !== null)
   return [...new Set(names)]
+}
+
+/**
+ * The claim a `claim_work` answer makes for the loop that called it: the run, its repositories, the loop (`agentId`,
+ * absent on the main conversation), and the story's key and branch from `run_here.card_reference`, which a proof run
+ * looks for its worktree by (proof.ts).
+ */
+export function claimOf(run: number, brief: unknown, agentId: string | undefined): CodebookClaim {
+  const reference = (brief as { run_here?: { card_reference?: { key?: unknown; branch?: unknown } } } | null)?.run_here?.card_reference
+  const text = (value: unknown) => (typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined)
+  const key = text(reference?.key)
+  const branch = text(reference?.branch)
+  return { run, repos: allowedOf(brief), ...(agentId ? { agentId } : {}), ...(key ? { key } : {}), ...(branch ? { branch } : {}) }
+}
+
+/**
+ * Who may push where while runs are held (P2). The guard is per run, not per session: a run's lease belongs to the
+ * agent loop that claimed it.
+ *
+ *   - `worker`: this loop holds runs. It may reach their repositories and nothing else (it is a station's worker).
+ *   - `bystander`: this loop holds none, while other loops of the session do. It may reach any repository except the
+ *     ones those runs work on (it has no lease there); a repository no held run works on is its own business.
+ *   - `free`: nothing is held. The guard stands aside.
+ */
+export type Lease =
+  | { kind: 'free' }
+  | { kind: 'worker'; runs: number[]; allowed: string[] }
+  | { kind: 'bystander'; runs: number[]; held: string[] }
+
+export function leaseOf(claims: CodebookClaim[], agentId: string | undefined): Lease {
+  if (claims.length === 0) return { kind: 'free' }
+  const loop = agentId || undefined
+  const own = claims.filter(one => (one.agentId || undefined) === loop)
+  if (own.length > 0) return { kind: 'worker', runs: own.map(one => one.run), allowed: [...new Set(own.flatMap(one => one.repos))] }
+  return { kind: 'bystander', runs: claims.map(one => one.run), held: [...new Set(claims.flatMap(one => one.repos))] }
+}
+
+/** Whether a loop with this lease may reach `repo` (null: a repository the guard could not tell, never allowed). */
+export function mayReach(lease: Lease, repo: string | null): boolean {
+  if (lease.kind === 'free') return true
+  if (repo === null) return false
+  return lease.kind === 'worker' ? lease.allowed.includes(repo) : !lease.held.includes(repo)
 }
 
 /**

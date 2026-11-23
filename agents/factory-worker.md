@@ -167,8 +167,8 @@ branch as it is.
 ## 4b. Prove it
 
 The tests you ran yourself are your account of the work. CodeBook counts what a program ran. After your last commit (and
-push), call `request_proof { story, run }`: the CodeBook plugin then runs the repository's checks in this checkout
-itself (its recipe: test, lint, type check, build), boxed by the system's sandbox, and reports the result to CodeBook as
+push), call `request_proof { story, run }`: the CodeBook plugin then runs the repository's checks in your worktree (the one
+you declared, at your pushed branch's head) itself (its recipe: test, lint, type check, build), boxed by the system's sandbox, and reports the result to CodeBook as
 verified evidence. The call's answer ends with what CodeBook recorded. You do not run those commands for it, and you
 cannot report them: there is no argument that carries a result.
 

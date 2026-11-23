@@ -149,9 +149,11 @@ it asks you, and the pane says so under Approve. A person approves a merge only 
 CodeBook keeps no factory-wide approval switch (approval rules live in MadeBook, and with MadeBook linked a merge waits
 for its `madebook/compliance` check). A factory whose policy keeps work in CodeBook refuses Run here.
 
-**Only the factory's repositories change.** While a CodeBook run is held in the session, the plugin refuses any
-`git push` or `gh pr create` that reaches a repository the run's brief does not list (and CodeBook refuses to link a
-pull request from anywhere else). The guard reads each command in its own folder (`git -C <folder>`, `cd <folder> &&`,
+**Only the factory's repositories change.** While a CodeBook run is held, the plugin refuses its worker (the agent
+that claimed it) any `git push` or `gh pr create` that reaches a repository the run's brief does not list, and refuses
+everyone else in the session a push or pull request to the repositories held runs work on: only a run's worker has its
+lease (and CodeBook refuses to link a pull request from anywhere else). The rest of the session is not held back: a
+push to a repository no held run works on goes through, as with no run held. The guard reads each command in its own folder (`git -C <folder>`, `cd <folder> &&`,
 `gh … --repo`), so pushes from your checkout and its worktrees go through and anything else is refused. A push it cannot
 attribute with confidence (through a wrapper such as `timeout` or `xargs`, a subshell, a shell or script, git
 configuration or a remote changed in the same command, or a `gh api` write to pull requests) is refused too, with the
@@ -286,10 +288,18 @@ CodeBook counts a check as proven when a program ran it and reported the result 
 On your computer that program is this plugin.
 
 - **An agent asks, the plugin runs.** When Claude calls `request_proof` for a story, the plugin takes the proof from
-  CodeBook, runs the repository's checks in your checkout (the recipe under Factory settings → Proof runs: test, lint,
+  CodeBook, runs the repository's checks in the run's worktree at its pull request's head (below), or, with no run,
+  in your checkout (the recipe under Factory settings → Proof runs: test, lint,
   type check, build), and sends CodeBook each command's exit code, its output, a SHA-256 of that output, the commit that
   was checked out and whether anything was uncommitted. The story then shows the command as **Verified · run on a
   person's computer**. Claude reads what CodeBook recorded; it never writes the result.
+- **Where it runs.** The plugin picks the folder, not CodeBook. For a run's proof it looks at every working tree of the
+  repository on this computer (your checkout and its worktrees): the worktree the run declared (`declare_work`), one
+  on the run's branch, or one whose branch names the story (`VF-29`), and runs in the one whose commit is its branch's
+  tip on origin, the pull request's head (fetched first). When none is at the head, only the run's own declared
+  worktree runs, and the summary says it proves no pull request's head; your checkout on another branch never runs in
+  its place, and the proof stays waiting. When CodeBook names the commit, the working tree that has it checked out
+  runs, or nothing does.
 - **`/factory prove`** runs a proof that is waiting, such as the one "Try it" queues from Factory settings → Proof runs.
 - **Boxed.** Each command runs under the system's sandbox where there is one: Seatbelt (`sandbox-exec`) on macOS,
   bubblewrap (`bwrap`) on Linux. It can write only in the checkout, in `~/.codebook/proof` and in the temporary folders;

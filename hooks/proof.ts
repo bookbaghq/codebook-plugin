@@ -18,7 +18,7 @@
 
 import type { EngineInterface } from 'claude-code'
 
-import type { CodebookCheckout } from '../types'
+import type { CodebookCheckout, CodebookClaim } from '../types'
 import { call } from './connector'
 import { FORWARD_PORT, forwarderSource, parseHosts, proxyEnvironment, proxySource, ruleText } from './egress'
 import type { HostRule } from './egress'
@@ -45,7 +45,14 @@ export type ProofWork = {
   recipe?: { revision: number; install: string; network: string; hosts?: unknown } | null
   steps?: ProofStep[]
 }
-export type ProofWaiting = { proof: number; repository: string; commands: string[]; commit: string | null; default_branch?: string }
+/**
+ * A proof waiting for this computer, as `claim_proof { peek }` answers it. `commit` is the commit CodeBook wants proven
+ * (today's CodeBook queues a model's request_proof with none). `run`, `branch` and `worktree` are what a newer CodeBook
+ * may send of the run that asked (its declare_work); the plugin reads them when they are there.
+ */
+export type ProofWaiting = { proof: number; repository: string; commands: string[]; commit: string | null; default_branch?: string; run?: number | null; branch?: string | null; worktree?: string | null }
+/** What this session knows of the run that asked for a proof: its worktree and branch (declare_work), the story's key and branch (its brief). */
+export type ProofHint = { run: number | null; worktree?: string; branch?: string; key?: string }
 export type Sandbox = { kind: 'seatbelt' | 'bubblewrap' | 'none'; bin: string | null }
 /** Where a boxed command's way out is: the proxy's port on this computer (macOS), or its socket and the forwarder that reaches it (Linux). */
 export type Egress = { kind: 'tcp'; port: number } | { kind: 'unix'; socket: string; node: string }
@@ -283,6 +290,134 @@ export async function checkoutFor($: EngineInterface, repository: string, known:
   return null
 }
 
+/**
+ * The run a request_proof call is for, as this session holds it: the `run` the call named, else the run the calling
+ * loop holds for that repository. Null when the session knows nothing of where that run works.
+ */
+export function hintOf(claims: CodebookClaim[], run: unknown, agentId: string | undefined, repository: string | null): ProofHint | null {
+  const number = Number(run)
+  const named = Number.isSafeInteger(number) && number > 0 ? claims.find(one => one.run === number) : undefined
+  const wanted = repository ? slugOf(repository) : null
+  const loop = agentId || undefined
+  const held = named ?? claims.filter(one => (one.agentId || undefined) === loop).find(one => wanted === null || one.repos.length === 0 || one.repos.includes(wanted))
+  if (!held || (!held.worktree && !held.branch && !held.key)) return null
+  return { run: held.run, ...(held.worktree ? { worktree: held.worktree } : {}), ...(held.branch ? { branch: held.branch } : {}), ...(held.key ? { key: held.key } : {}) }
+}
+
+/** One working tree of a repository on this computer: its folder, the commit it has checked out and its branch. */
+type Tree = { path: string; head: string; branch: string | null }
+
+/** The working trees of the repository `top` belongs to (the main checkout and every linked worktree), as git lists them. */
+async function treesOf($: EngineInterface, top: string): Promise<Tree[]> {
+  const listed = await quiet($, ['git', '-C', top, 'worktree', 'list', '--porcelain'])
+  const trees: (Tree & { gone: boolean })[] = []
+  if (listed.exitCode === 0) {
+    let at: (Tree & { gone: boolean }) | null = null
+    for (const line of listed.stdout.split('\n')) {
+      if (line.startsWith('worktree ')) trees.push((at = { path: line.slice('worktree '.length).trim(), head: '', branch: null, gone: false }))
+      else if (at && line.startsWith('HEAD ')) at.head = line.slice('HEAD '.length).trim().toLowerCase()
+      else if (at && line.startsWith('branch ')) at.branch = line.slice('branch '.length).trim().replace(/^refs\/heads\//, '')
+      else if (at && (line === 'bare' || line.startsWith('prunable'))) at.gone = true
+    }
+  }
+  const kept = trees.filter(one => !one.gone && /^[0-9a-f]{40,64}$/.test(one.head)).map(({ path, head, branch }) => ({ path, head, branch }))
+  if (kept.some(one => one.path === top)) return kept
+  // An older git, or a list that did not name this folder: the folder itself, as it stands.
+  const head = (await quiet($, ['git', '-C', top, 'rev-parse', 'HEAD'])).stdout.trim().toLowerCase()
+  const branch = (await quiet($, ['git', '-C', top, 'symbolic-ref', '--short', '-q', 'HEAD'])).stdout.trim()
+  return /^[0-9a-f]{40,64}$/.test(head) ? [...kept, { path: top, head, branch: branch || null }] : kept
+}
+
+const NOT_HERE = (repository: string) => `A proof run for ${repository} is waiting, and its code is not in this session's folder or in a folder CodeBook knows on this computer. Open Claude Code in its checkout, or save the folder (Factory settings → Your computer), then run /factory prove.`
+
+/**
+ * The folder a proof runs in (P1): the claiming run's own worktree at its pull request's head, never the person's
+ * checkout on another branch.
+ *
+ *   - CodeBook named the commit (`commit`): the working tree of the repository that has it checked out (the run's own
+ *     first), else nothing runs.
+ *   - The session knows the run (`hint`: its declared worktree, its branch, the story's key): among the repository's
+ *     working trees (the declared one, those on the run's branch, those whose branch carries the story's key), the one
+ *     whose commit is its branch's tip on origin, the pull request's head. With none at the tip, only the run's own
+ *     declared worktree runs (and the summary says what ran is not the head); the person's checkout never does.
+ *   - Neither (/factory prove for "Try it", an older flow): the saved checkout, else this session's folder, as before.
+ */
+export async function proofFolder(
+  $: EngineInterface,
+  { repository, known, hint, commit, proof }: { repository: string; known: CodebookCheckout[]; hint: ProofHint | null; commit: string | null; proof: number },
+): Promise<{ dir: string; notes: string[] } | { refused: string }> {
+  const want = commit && /^[0-9a-f]{7,64}$/i.test(commit.trim()) ? commit.trim().toLowerCase() : null
+  if (hint === null && want === null) {
+    const dir = await checkoutFor($, repository, known)
+    return dir === null ? { refused: NOT_HERE(repository) } : { dir, notes: [] }
+  }
+  const home = (await $.env.get('HOME')) ?? ''
+  const expand = (path: string) => path.replace(/^~(?=\/|$)/, home)
+  const wanted = repository.toLowerCase()
+  const isOurs = async (dir: string): Promise<string | null> => {
+    const top = await quiet($, ['git', '-C', dir, 'rev-parse', '--show-toplevel'])
+    if (top.exitCode !== 0) return null
+    const origin = await quiet($, ['git', '-C', dir, 'remote', 'get-url', 'origin'])
+    return origin.exitCode === 0 && slugOf(origin.stdout) === wanted ? top.stdout.trim() : null
+  }
+  const declared = hint?.worktree ? await isOurs(expand(hint.worktree)) : null
+  const saved = known.filter(one => one.repository.toLowerCase() === wanted && one.checkoutPath !== null).map(one => expand(one.checkoutPath ?? ''))
+  const tops: string[] = []
+  for (const dir of [...(declared ? [declared] : []), ...saved, '.']) {
+    const top = dir === declared ? declared : await isOurs(dir)
+    if (top !== null && !tops.includes(top)) tops.push(top)
+  }
+  if (tops.length === 0) return { refused: NOT_HERE(repository) }
+  // Every working tree of the repository on this computer, but the plugin's own baseline worktrees.
+  const trees: Tree[] = []
+  for (const top of tops) for (const tree of await treesOf($, top)) if (!trees.some(one => one.path === tree.path) && !tree.path.startsWith(`${home}/.codebook/proof/`)) trees.push(tree)
+  const describe = (tree: Tree) => `${tree.path} (${tree.branch ?? 'no branch'} at ${tree.head.slice(0, 7)})`
+  const checkouts = tops.filter(top => top !== declared).map(top => trees.find(one => one.path === top)).filter((one): one is Tree => one !== undefined)
+  const keyed = hint?.key ? new RegExp(`(?:^|[^A-Za-z0-9])${hint.key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![0-9])`, 'i') : null
+  const rank = (tree: Tree) => (declared !== null && tree.path === declared ? 0 : hint?.branch && tree.branch === hint.branch ? 1 : keyed && tree.branch && keyed.test(tree.branch) ? 2 : 3)
+  const byRank = (a: Tree, b: Tree) => rank(a) - rank(b)
+
+  if (want !== null) {
+    const at = trees.filter(tree => tree.head.startsWith(want) || want.startsWith(tree.head)).sort(byRank)[0]
+    if (at) return { dir: at.path, notes: [] }
+    return { refused: `Proof ${proof} is for commit ${want.slice(0, 7)} of ${repository}, and no checkout or worktree of it on this computer has that commit checked out (${trees.slice(0, 4).map(describe).join('; ') || 'none found'}), so nothing ran. Check the commit out in the run's worktree, then run /factory prove ${proof}.` }
+  }
+
+  const matches = trees.filter(tree => rank(tree) < 3)
+  const run = hint?.run ? `run ${hint.run}` : 'the run that asked'
+  if (matches.length === 0) {
+    const looked = [hint?.worktree ? `its worktree ${hint.worktree}${declared === null ? ' is not a checkout of it' : ''}` : null, hint?.branch ? `branch ${hint.branch}` : null, hint?.key ? `a branch naming ${hint.key}` : null].filter(Boolean).join(', ')
+    const where = checkouts.map(describe).join('; ')
+    return { refused: `Proof ${proof} is for ${run} of ${repository}, and no working tree of it on this computer is that run's (${looked}), so nothing ran. ${where ? `Your checkout ${where} is not the pull request's head, and the proof never runs there in its place.` : ''} Say the run's worktree with declare_work (worktree, branch), push its branch, then ask for the proof again (or /factory prove ${proof}).`.replace(/\s+/g, ' ').trim() }
+  }
+  // The pull request's head is its branch as origin has it: fetched now, once per branch.
+  const tips = new Map<string, string | null>()
+  for (const branch of [...new Set(matches.map(tree => tree.branch).filter((one): one is string => one !== null))]) {
+    const where = matches.find(tree => tree.branch === branch)?.path ?? '.'
+    await quiet($, ['git', '-C', where, 'fetch', '--quiet', 'origin', branch], undefined, 20000)
+    const tip = (await quiet($, ['git', '-C', where, 'rev-parse', '--verify', '--quiet', `refs/remotes/origin/${branch}`])).stdout.trim().toLowerCase()
+    tips.set(branch, /^[0-9a-f]{40,64}$/.test(tip) ? tip : null)
+  }
+  const tipOf = (tree: Tree) => (tree.branch ? (tips.get(tree.branch) ?? null) : null)
+  const pushed = matches.filter(tree => tipOf(tree) === tree.head).sort(byRank)
+  if (pushed.length > 1 && rank(pushed[0] as Tree) === rank(pushed[1] as Tree)) {
+    // Two of the same rank at their tips (the story's branches of two runs): the newest commit is the run's work.
+    const when = new Map<string, number>()
+    for (const tree of pushed) when.set(tree.path, Number((await quiet($, ['git', '-C', tree.path, 'log', '-1', '--format=%ct', 'HEAD'])).stdout.trim()) || 0)
+    pushed.sort((a, b) => byRank(a, b) || (when.get(b.path) ?? 0) - (when.get(a.path) ?? 0))
+  }
+  const best = pushed[0]
+  if (best) return { dir: best.path, notes: [] }
+  // Nothing is at its pull request's head. The run's own declared worktree still runs, and says so; nothing else does.
+  const own = matches.find(tree => declared !== null && tree.path === declared)
+  const offHead = (tree: Tree) => {
+    const tip = tipOf(tree)
+    return tree.branch === null ? `${tree.path} has no branch checked out` : tip === null ? `${tree.branch} is not on origin yet` : `${tree.path} is at ${tree.head.slice(0, 7)} and origin/${tree.branch}, the pull request's head, at ${tip.slice(0, 7)}`
+  }
+  if (own) return { dir: own.path, notes: [`  Not the pull request's head: ${offHead(own)}, so this proves no pull request's head. Push, then ask for the proof again.`] }
+  return { refused: `Proof ${proof} is for ${run} of ${repository}, and no working tree of it on this computer is at its pull request's head (${matches.slice(0, 3).map(offHead).join('; ')}), so nothing ran. Push the branch, then ask for the proof again (or /factory prove ${proof}).` }
+}
+
 /** What is waiting for this person's computer, without taking any of it. */
 export async function waitingProofs($: EngineInterface): Promise<{ ok: true; waiting: ProofWaiting[] } | { ok: false; message: string }> {
   const peeked = await call<{ waiting?: ProofWaiting[] }>($, 'claim_proof', { peek: true })
@@ -310,16 +445,21 @@ export function summaryOf(repository: string, sandbox: Sandbox, outcomes: StepOu
  * CodeBook last told this session; `hosts` the person's own list of allowed hosts (the `proof_hosts` option). → the
  * summary, or why nothing ran.
  */
-export async function runProof($: EngineInterface, { proof = null, known = [], hosts = null }: { proof?: number | null; known?: CodebookCheckout[]; hosts?: unknown }): Promise<{ isRun: boolean; text: string }> {
+export async function runProof($: EngineInterface, { proof = null, known = [], hosts = null, hint = null }: { proof?: number | null; known?: CodebookCheckout[]; hosts?: unknown; hint?: ProofHint | null }): Promise<{ isRun: boolean; text: string }> {
   const peeked = await waitingProofs($)
   if (!peeked.ok) return { isRun: false, text: peeked.message }
   const target = proof === null ? peeked.waiting[0] : peeked.waiting.find(one => one.proof === proof)
   if (!target) return { isRun: false, text: proof === null ? 'No proof run is waiting for this computer.' : `Proof run ${proof} is not waiting for this computer (it may already have been run, or it was asked for someone else's).` }
 
-  const dir = await checkoutFor($, target.repository, known)
-  if (dir === null) {
-    return { isRun: false, text: `A proof run for ${target.repository} is waiting, and its code is not in this session's folder or in a folder CodeBook knows on this computer. Open Claude Code in its checkout, or save the folder (Factory settings → Your computer), then run /factory prove.` }
-  }
+  // Where the run that asked works (P1): what CodeBook says of it first, then what this session holds.
+  const sent = (value: unknown) => (typeof value === 'string' && value.trim() ? value.trim() : undefined)
+  const fromServer = { worktree: sent(target.worktree), branch: sent(target.branch) }
+  const asked: ProofHint | null = hint || fromServer.worktree || fromServer.branch
+    ? { ...hint, run: typeof target.run === 'number' ? target.run : (hint?.run ?? null), ...(fromServer.worktree ? { worktree: fromServer.worktree } : {}), ...(fromServer.branch ? { branch: fromServer.branch } : {}) }
+    : null
+  const placed = await proofFolder($, { repository: target.repository, known, hint: asked, commit: target.commit, proof: target.proof })
+  if ('refused' in placed) return { isRun: false, text: placed.refused }
+  const dir = placed.dir
 
   // The commit that is checked out, whether anything is uncommitted, and the default branch as this git knows it.
   const head = (await quiet($, ['git', '-C', dir, 'rev-parse', 'HEAD'])).stdout.trim()
@@ -346,7 +486,7 @@ export async function runProof($: EngineInterface, { proof = null, known = [], h
   const hidden: string[] = []
   if (sandbox.kind === 'bubblewrap') for (const name of SECRET_FOLDERS) if ((await quiet($, ['test', '-d', `${home}/${name}`])).exitCode === 0) hidden.push(`${home}/${name}`)
   const outcomes: StepOutcome[] = []
-  const notes: string[] = []
+  const notes: string[] = [...placed.notes]
   const reach = reachOf(work.recipe, hosts)
   for (const one of reach.refused.slice(0, 10)) notes.push(`  Left out of the allowed hosts (${one.from}): ${one.entry}, as ${one.reason}.`)
   // A list of hosts needs the proxy; without it the run reaches the computer itself alone, never more.

@@ -2,7 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 
 import type { On } from 'claude-code'
 
-import { allowedOf, readCommand, repoOf, targetsOf } from '../hooks/guard'
+import { allowedOf, claimOf, leaseOf, mayReach, readCommand, repoOf, targetsOf } from '../hooks/guard'
 import { checkoutsOf } from '../hooks/local'
 import { forgetShell } from '../hooks/resolve'
 
@@ -215,6 +215,75 @@ test('pushes from the factory checkout or its worktrees go through; other folder
   const pr = await $.tool.call({ tool: 'Bash', command: 'cd ~/code/sandbox && gh pr create --draft --repo other/repo' } as never)
   expect(String(pr.deny ?? pr.text)).toContain('other/repo')
   expect(ran.length).toBe(3)
+})
+
+/** Two repositories on this computer: the factory's (its checkout and worktrees) and one no CodeBook run works on. */
+function twoRepositories(on: On) {
+  const factory = /^\/Users\/me\/code\/sandbox(-\d+)?$/
+  const other = /^\/Users\/me\/code\/app$/
+  const remote = (dir: string) => (factory.test(dir) ? 'git@github.com:bookbaghq/codebook-plugin-sandbox.git' : other.test(dir) ? 'https://github.com/bookbaghq/codebook-app.git' : ELSEWHERE)
+  return world(on, { cwd: '/work/session', repoOf: (dir) => ({ remotes: { origin: { fetch: [remote(dir)] } }, branch: 'wave-j/j1' }) }, 'bookbaghq/codebook-plugin-sandbox',
+    { path: '~/code', mode: 'clone_into', checkout_path: '~/code/sandbox' })
+}
+
+test('P2: a held run\'s guard lets the same session push to an unrelated repository, and still refuses what it should', async ($, on) => {
+  const ran = twoRepositories(on)
+  // A factory-worker sub-agent claims run 811 on the sandbox (Vibeforce WO-29's runs on 22 Nov).
+  await $.tool.call({ tool: OWN + 'claim_work', run: 811, agentId: 'worker-1' } as never)
+
+  // The main conversation (Wave J's J1 and J6) pushes to and opens a pull request on a repository no held run works on.
+  await $.tool.call({ tool: 'Bash', command: 'git -C /Users/me/code/app push -u origin wave-j/j1' } as never)
+  await $.tool.call({ tool: 'Bash', command: 'cd /Users/me/code/app && gh pr create --draft --repo bookbaghq/codebook-app --title "J1"' } as never)
+  await $.tool.call({ tool: 'Bash', command: 'gh pr merge 12 --repo bookbaghq/codebook-app --squash' } as never)
+  // So does another sub-agent of the session.
+  await $.tool.call({ tool: 'Bash', command: 'git -C /Users/me/code/app push -u origin wave-j/j6', agentId: 'track-j6' } as never)
+  expect(ran).toEqual([
+    'git -C /Users/me/code/app push -u origin wave-j/j1',
+    'cd /Users/me/code/app && gh pr create --draft --repo bookbaghq/codebook-app --title "J1"',
+    'gh pr merge 12 --repo bookbaghq/codebook-app --squash',
+    'git -C /Users/me/code/app push -u origin wave-j/j6',
+  ])
+
+  // Without the run's lease, nobody pushes to the factory's repository: not the main conversation, not another agent.
+  const main = await $.tool.call({ tool: 'Bash', command: 'git -C ~/code/sandbox-57 push -u origin codebook/57-x' } as never)
+  expect(String(main.deny ?? main.text)).toContain('bookbaghq/codebook-plugin-sandbox, which CodeBook run 811 works on')
+  const pr = await $.tool.call({ tool: 'Bash', command: 'gh pr create --draft --repo bookbaghq/codebook-plugin-sandbox', agentId: 'track-j6' } as never)
+  expect(String(pr.deny ?? pr.text)).toContain('Only that run\'s worker')
+  // What the guard cannot attribute is still refused while a run is held, with the plain form to use.
+  const wrapped = await $.tool.call({ tool: 'Bash', command: 'timeout 60 git -C /Users/me/code/app push' } as never)
+  expect(String(wrapped.deny ?? wrapped.text)).toContain('cannot tell where this command pushes')
+  expect(ran.length).toBe(4)
+
+  // The run's own worker pushes its branch, and nothing outside its run's repository.
+  await $.tool.call({ tool: 'Bash', command: 'git -C /Users/me/code/sandbox-57 push -u origin codebook/57-x', agentId: 'worker-1' } as never)
+  expect(ran.length).toBe(5)
+  const out = await $.tool.call({ tool: 'Bash', command: 'git -C /Users/me/code/app push -u origin wave-j/j1', agentId: 'worker-1' } as never)
+  expect(String(out.deny ?? out.text)).toContain('the factory allows bookbaghq/codebook-plugin-sandbox')
+  const outPr = await $.tool.call({ tool: 'Bash', command: 'gh pr create --draft --repo bookbaghq/codebook-app', agentId: 'worker-1' } as never)
+  expect(String(outPr.deny ?? outPr.text)).toContain('bookbaghq/codebook-app')
+  expect(ran.length).toBe(5)
+
+  // Its report ends the lease: the factory's repository is anyone's again.
+  await $.tool.call({ tool: OWN + 'complete_work', run: 811, fence: 1, outcome: 'pass', summary: 'ok', agentId: 'worker-1' } as never)
+  await $.tool.call({ tool: 'Bash', command: 'git -C ~/code/sandbox-57 push -u origin codebook/57-x' } as never)
+  expect(ran.length).toBe(6)
+})
+
+test('P2: the lease is the claiming loop\'s: leaseOf and mayReach', async () => {
+  const held = [{ run: 811, repos: ['acme/payments'], agentId: 'worker-1' }, { run: 812, repos: ['acme/site'] }]
+  expect(leaseOf([], 'anyone')).toEqual({ kind: 'free' })
+  const worker = leaseOf(held, 'worker-1')
+  expect(worker).toEqual({ kind: 'worker', runs: [811], allowed: ['acme/payments'] })
+  expect([mayReach(worker, 'acme/payments'), mayReach(worker, 'acme/site'), mayReach(worker, 'bookbaghq/codebook-app'), mayReach(worker, null)]).toEqual([true, false, false, false])
+  // The main conversation claimed 812 itself (a crew's lead): it is that run's worker.
+  expect(leaseOf(held, undefined)).toEqual({ kind: 'worker', runs: [812], allowed: ['acme/site'] })
+  const other = leaseOf(held, 'track-j6')
+  expect(other).toEqual({ kind: 'bystander', runs: [811, 812], held: ['acme/payments', 'acme/site'] })
+  expect([mayReach(other, 'bookbaghq/codebook-app'), mayReach(other, 'acme/payments'), mayReach(other, 'acme/site'), mayReach(other, null)]).toEqual([true, false, false, false])
+  // A claim names its loop and the story's key and branch, for the proof that follows.
+  expect(claimOf(811, { run_here: { repository: { name: 'acme/payments' }, card_reference: { key: 'VF-29', branch: 'codebook/VF-29-run-811' } } }, 'worker-1'))
+    .toEqual({ run: 811, repos: ['acme/payments'], agentId: 'worker-1', key: 'VF-29', branch: 'codebook/VF-29-run-811' })
+  expect(claimOf(812, { run_here: { repository: null } }, undefined)).toEqual({ run: 812, repos: [] })
 })
 
 test('/factory status shows where each repository is on this computer, checked now', async ($, on) => {
