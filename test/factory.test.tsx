@@ -761,10 +761,25 @@ test('a call on a story that looks finished is caught up within the short poll, 
 
 /** #147: the plugin's files, as `.claude-plugin/plugin.json` says its version; a test moves it as an update would. */
 function versioned(on: On, version: { now: string }) {
-  on('fs.read', (_, e) => (String((e as { path?: unknown }).path).endsWith('/.claude-plugin/plugin.json')
+  on('fs.read', (_, e) => (String((e as { path?: unknown }).path).replace(/\\/g, '/').endsWith('/.claude-plugin/plugin.json')
     ? { value: JSON.stringify({ name: 'codebook', version: version.now }) }
     : { error: 'ENOENT' }) as never)
 }
+// The engine can supply a Windows root with either native or mixed separators.
+test('P5: the version-file double accepts POSIX, Windows and mixed paths', () => {
+  let read: (_: unknown, e: { path: string }) => unknown = () => null
+  const version = { now: '0.27.0' }
+  versioned(((_event: string, handler: typeof read) => { read = handler }) as On, version)
+  for (const path of [
+    '/plugins/codebook/.claude-plugin/plugin.json',
+    'C:\\plugins\\codebook\\.claude-plugin\\plugin.json',
+    'C:\\plugins\\codebook/.claude-plugin/plugin.json',
+  ]) {
+    expect(read(null, { path })).toEqual({ value: JSON.stringify({ name: 'codebook', version: version.now }) })
+  }
+  expect(read(null, { path: 'C:\\plugins\\codebook\\other.json' })).toEqual({ error: 'ENOENT' })
+})
+
 const contextOf = async ($: { prompt: { submit: (e: never) => Promise<unknown> } }, text = 'go on') =>
   (((await $.prompt.submit({ text } as never)) as { context?: string[] }).context ?? []).filter(line => line.startsWith('CodeBook plugin:'))
 
