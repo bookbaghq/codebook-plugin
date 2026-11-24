@@ -2,6 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 import { splitRun } from '../hooks/factory'
+import { CONTINUATION_STORE } from '../hooks/continuation'
 
 // A story in the "Payments" factory: Plan passed, Build waits for this person's runner, Review is a person (you).
 const BOARD = {
@@ -17,7 +18,7 @@ const BOARD = {
   ],
 }
 
-type At = 'build' | 'claimed' | 'review' | 'done' | 'asks' | 'escalated'
+type At = 'build' | 'claimed' | 'review' | 'done' | 'asks' | 'escalated' | 'blocked'
 const ASKED = 'Refund to the card, or as store credit?'
 /** A CodeBook from before §12.10: person stations carry no on_approve. */
 const older = { codebook: false }
@@ -47,6 +48,7 @@ function status(at: At): Record<string, unknown> {
     events: [{ id: 9005, kind: 'card.finished', occurred_at: '2026-11-01T10:09:00Z', station: 'Done' }],
     last_event: 9005,
   }
+  if (at === 'blocked') return { ...status('build'), run: { run: 811, state: 'blocked', where: 'here' }, events: [{ id: 9006, kind: 'run.blocked', run: 811 }], last_event: 9006 }
   const isBuild = at !== 'review'
   return {
     story: { story: '6KjN', reference: '#57', title: 'Let customers refund a payment' },
@@ -136,7 +138,8 @@ function status58(asks: boolean): Record<string, unknown> {
 }
 
 /** The engine beneath the plugin: a connected codebook server answering from the fixtures above. */
-function engine(on: On, at: { now: At; asks58?: boolean; session?: string; stored?: Record<string, unknown>; controls?: boolean; backlog?: boolean }) {
+type Lifecycle = { passed?: boolean; terminal?: boolean; events?: Record<string, unknown>[]; holdFeed?: Promise<void>; feedError?: boolean }
+function engine(on: On, at: { now: At; asks58?: boolean; done58?: boolean; session?: string; stored?: Record<string, unknown>; controls?: boolean; backlog?: boolean; lifecycle?: Lifecycle }) {
   const calls: Calls = []
   const prompts: string[] = []
   const filled: string[] = []
@@ -182,6 +185,16 @@ function engine(on: On, at: { now: At; asks58?: boolean; session?: string; store
     return { result: { content: [{ type: 'text', text: JSON.stringify(data) }], structuredContent: data }, text: JSON.stringify(data) }
   })
   function answer(tool: string, args: Record<string, unknown>) {
+    if (tool === 'factory_events') {
+      if (at.lifecycle?.feedError) return { error: { code: 'UNREACHABLE', message: 'Temporarily offline' } }
+      const events = (at.lifecycle?.events ?? []).filter(e => Number(e.id) > Number(args.after ?? 0))
+      return { events, last_event: events.at(-1)?.id ?? args.after ?? 0 }
+    }
+    if (tool === 'work_orders' && at.lifecycle) return {
+      order: 'wo7', work_order: { reference: 'WO-7', status: at.lifecycle.terminal ? 'done' : 'open' },
+      milestones: [{ milestone: 1, state: at.lifecycle.passed ? 'passed' : 'checking', check: { latest: { id: 91, status: at.lifecycle.passed ? 'passed' : 'running' } } }],
+    }
+
     if (tool === 'factory_board' && at.backlog && typeof args.backlog_offset === 'number') {
       const stories = Array.from({ length: 17 }, (_, i) => ({ story: `s${i + 1}`, reference: `#${i + 1}`, title: `Story ${i + 1}`,
         proposal: i === 0 ? { reference: 'WO-6', item: 3, waiting_for_proceed: true } : null }))
@@ -209,7 +222,7 @@ function engine(on: On, at: { now: At; asks58?: boolean; session?: string; store
           ? BOARD
           : tool === 'story_status'
             ? args.story === '7LmP'
-              ? status58(at.asks58 === true)
+              ? at.done58 ? { ...status58(false), finished: 'done', run: null, waiting: null, events: [{ id: 9007, kind: 'card.finished' }], last_event: 9007 } : status58(at.asks58 === true)
               : status(at.now)
             : tool === 'approve_station'
               ? { decided: 'approved', run: 812, next: 'Review approved; the story moves on.' }
@@ -223,13 +236,14 @@ function engine(on: On, at: { now: At; asks58?: boolean; session?: string; store
                       ? { proposal: { proposal: 'wo7', reference: 'WO-7', status: 'open' }, created: [{ item: 41, story: '6KjN', reference: '#57', title: 'Let customers refund a payment' }, { item: 42, story: '7LmP', reference: '#58', title: 'Refund email' }], skipped: [], waiting: [] }
                       : { error: { code: 'NOT_FOUND', message: 'no such tool here' } }
   }
-  on('mcp.call', (_, e) => {
+  on('mcp.call', async (_, e) => {
+    if (e.tool === 'factory_events' && at.lifecycle?.holdFeed) await at.lifecycle.holdFeed
     calls.push({ tool: e.tool, args: e.args })
     const data = answer(e.tool, e.args)
     const isError = typeof data === 'object' && data !== null && 'error' in data
     return { value: { content: [{ type: 'text', text: JSON.stringify(data) }], structuredContent: data, isError } }
   })
-  return { calls, prompts, filled, logged, clock, deleted }
+  return { calls, prompts, filled, logged, clock, deleted, kept }
 }
 
 /** What the person does with the request the pane offered: sends it, and Claude starts the story. */
@@ -288,7 +302,7 @@ test('the plugin itself sends nothing while it follows a story: the manager sess
   await clock.advance(5000)
   expect(prompts.length).toBe(0)
   // Only reads went to CodeBook from the plugin.
-  expect(calls.every(one => ['factory_board', 'story_status', 'story_trail', 'start_story'].includes(one.tool))).toBe(true)
+  expect(calls.every(one => ['factory_board', 'story_status', 'story_trail', 'factory_events', 'start_story'].includes(one.tool))).toBe(true)
 })
 
 test('Work it here offers the worker request for a station waiting here', async ($, on) => {
@@ -836,4 +850,105 @@ test('P5: /factory status shows a version mismatch', async ($, on) => {
   // After a restart on the new version, it is gone.
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   expect((await $.command.run(typed('status'))).text).not.toContain('CodeBook plugin:')
+})
+
+
+const continuationPrompts = (prompts: string[]) => prompts.filter(text => text.includes('continue eligible authorized work'))
+
+test('owned story completion wakes continuation once', async ($, on) => {
+  const at: { now: At; done58?: boolean; lifecycle: Lifecycle } = { now: 'build', lifecycle: {} }
+  const { prompts, clock } = engine(on, at)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: 'mcp__plugin_codebook_codebook__confirm_stories', proposal: 'wo7' } as never)
+  await clock.advance(5000)
+  at.now = 'done'
+  at.done58 = true
+  await clock.advance(5000)
+  const wakes = continuationPrompts(prompts)
+  expect(wakes.length).toBe(1)
+  expect(wakes[0]).toContain('#57 finished.')
+  expect(wakes[0]).toContain('#58 finished.')
+  await clock.advance(65000)
+  expect(continuationPrompts(prompts).length).toBe(1)
+  // A newly created story can finish before its first timer read; that completion is still new work for this session.
+  await $.command.run(typed('stop'))
+  await $.tool.call({ tool: 'mcp__plugin_codebook_codebook__confirm_stories', proposal: 'wo7' } as never)
+  await clock.advance(5000)
+  const fast = continuationPrompts(prompts).slice(1).join(' ')
+  expect(fast.split('#57 finished.').length - 1).toBe(1)
+  expect(fast.split('#58 finished.').length - 1).toBe(1)
+})
+
+test('owned milestone pass remains observable after its stories finish', async ($, on) => {
+  // This is the persisted shape left by the previous session after its stories finished.
+  const saved = { generation: 0, stories: {}, orders: { wo7: { factory: 'k3Vb9QmZ', reference: 'WO-7', passes: [] } },
+    feeds: { k3Vb9QmZ: 9007 }, pending: {}, nextFactory: 0, nextOrder: 0, checkedAt: 990000 }
+  const at = { now: 'done' as At, lifecycle: { passed: true, events: [{ id: 9008, kind: 'work_order.milestone_passed', work_order: { reference: 'WO-7' } }] },
+    stored: { [CONTINUATION_STORE + 'session-a']: { at: 999000, value: saved } } }
+  const { prompts, clock, calls, kept } = engine(on, at)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(5000)
+  expect(continuationPrompts(prompts).length).toBe(1)
+  expect(continuationPrompts(prompts)[0]).toContain('WO-7 milestone 1 passed')
+  expect(calls.filter(c => c.tool === 'story_status').length).toBe(0)
+  await clock.advance(65000)
+  expect(continuationPrompts(prompts).length).toBe(1)
+  const persisted = kept.get(CONTINUATION_STORE + 'session-a') as { value: { orders: { wo7: { passes: string[] } } } }
+  expect(persisted.value.orders.wo7.passes).toEqual(['1:91'])
+  expect(calls.filter(c => c.tool === 'factory_events').length).toBeLessThanOrEqual(3)
+  expect(calls.filter(c => c.tool === 'work_orders').length).toBeLessThanOrEqual(3)
+})
+
+test('blocked branch wakes a search for independent ready work', async ($, on) => {
+  const at: { now: At; lifecycle: Lifecycle } = { now: 'build', lifecycle: {} }
+  const { prompts, calls, clock } = engine(on, at)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await claudeStarts($)
+  at.now = 'blocked'
+  await clock.advance(5000)
+  expect(continuationPrompts(prompts).length).toBe(1)
+  expect(continuationPrompts(prompts)[0]).toContain('#57 is blocked; inspect independent ready work.')
+  expect(continuationPrompts(prompts)[0]).toContain('do not repeat unchanged blocked tests or proof requests')
+  await clock.advance(65000)
+  expect(continuationPrompts(prompts).length).toBe(1)
+  expect(calls.some(c => ['claim_work', 'request_proof', 'approve_station', 'confirm_stories'].includes(c.tool))).toBe(false)
+})
+
+test('continuation preserves approvals ownership and bounded wakeups', async ($, on) => {
+  const at: { now: At; lifecycle: Lifecycle; stored: Record<string, unknown> } = { now: 'build', lifecycle: {}, stored: {
+    [CONTINUATION_STORE + 'session-other']: { at: 999000, value: { orders: { wo8: { factory: 'foreign', reference: 'WO-8', passes: [] } } } },
+  } }
+  const { prompts, calls, clock, kept } = engine(on, at)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await claudeStarts($)
+  await clock.advance(5000)
+  at.lifecycle.events = [{ id: 9010, kind: 'card.finished', card: { key: 'not-owned' } }, { id: 9011, kind: 'work_order.milestone_passed', work_order: { reference: 'WO-8' } }]
+  await clock.advance(30000)
+  expect(continuationPrompts(prompts)).toEqual([])
+  at.lifecycle.feedError = true
+  await clock.advance(30000)
+  expect(continuationPrompts(prompts)).toEqual([])
+  at.lifecycle.feedError = false
+  at.now = 'done'
+  await clock.advance(5000)
+  const text = continuationPrompts(prompts)[0]!
+  expect(text).toContain('queued runs first, open proposals and the separate Backlog')
+  expect(text).toContain('current approvals, capacity, budgets and deadlines')
+  expect(text).toContain('suggest policy still asks before new unapproved stories')
+  expect(text).toContain("Leave other sessions' work alone")
+  expect(calls.some(c => c.args.factory === 'foreign' || c.args.order === 'wo8')).toBe(false)
+  // A read in flight at /factory stop must not restore state or submit a late wake.
+  let release!: () => void
+  at.lifecycle.holdFeed = new Promise<void>(resolve => { release = resolve })
+  await clock.advance(30000)
+  await $.command.run(typed('stop'))
+  const count = prompts.length
+  release()
+  await clock.advance(65000)
+  expect(prompts.length).toBe(count)
+  expect(kept.has(CONTINUATION_STORE + 'session-a')).toBe(false)
+  expect(kept.has(CONTINUATION_STORE + 'session-other')).toBe(true)
+  const afterStop = calls.length
+  await clock.advance(65000)
+  expect(calls.length).toBe(afterStop)
 })

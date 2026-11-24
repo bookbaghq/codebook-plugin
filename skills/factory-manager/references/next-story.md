@@ -1,6 +1,10 @@
 ## 4b. Take the next story
 
-Read when choosing the next ready story after a completed or stopped story, within current authorization.
+Read when choosing the next ready story after a completed or stopped story, a passed milestone, or a newly blocked
+branch, within current authorization. A plugin continuation notice is an observation, not approval: inspect the actual
+state below. Keep independent authorized work moving while a true blocker waits; do not repeat unchanged failed proof
+requests or tests. The owning session observes its unfinished orders after their current stories finish, so a later
+milestone can wake it. Duplicate observations stay quiet; `/factory stop` stops that session's observation.
 
 What happens when a story finishes is the factory's setting too (`manager_brief.goes_alone.next`, section 3):
 

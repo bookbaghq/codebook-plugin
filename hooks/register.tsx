@@ -9,6 +9,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { CodebookActive, CodebookCheckout, CodebookClaim, CodebookLink, CodebookMode, CodebookStory, CodebookWatch } from '../types'
 import { call, words } from './connector'
+import { continuationCurrent, continuationGeneration, flushContinuation, hasContinuation, pollContinuation, restoreContinuation, watchContinuation } from './continuation'
 import { claimOf, expiresOf, leaseOf, liveClaims, mayReach, readCommand } from './guard'
 import type { Target } from './guard'
 import { checkOne, checkShellWords, folderOf, ownPushOf, reaches, shellState } from './resolve'
@@ -69,22 +70,25 @@ async function tick($: EngineInterface): Promise<void> {
   if (isPolling) return
   const a = await read($, active)
   const others = await read($, watched)
-  if (a === null && others.length === 0) return
+  if (a === null && others.length === 0 && !await hasContinuation($)) return
   const s = await read($, story)
   const now = await $.clock.now()
   const isQuiet = (a === null || (s !== null && s.finished !== null)) && others.length === 0
-  if (now - lastPoll < POLL_MS - 200) return
+  if (now - lastPoll < POLL_MS - 200) { await flushContinuation($); return }
   const isAsked = takePollSoon()
-  if (isQuiet && !isAsked && now - lastPoll < QUIET_POLL_MS - 200) return
+  if (isQuiet && !isAsked && now - lastPoll < QUIET_POLL_MS - 200) { await flushContinuation($); return }
   isPolling = true
   try {
     lastPoll = now
     if (a !== null) await refresh($)
     await refreshWatched($)
+    const observation = await pollContinuation($)
+    if (observation) await setLink($, observation)
   } finally {
     isPolling = false
   }
   flushAsk($)
+  await flushContinuation($)
 }
 
 async function openPane($: EngineInterface): Promise<boolean> {
@@ -327,6 +331,7 @@ export const register: Register = (on, options) => {
   on('tool.call', async ($, e, next) => {
     // The model never takes a proof run: the answer holds the token its result is reported with (proof.ts).
     if (String(e.tool) === OWN_CLAIM && next.origin.plugin !== $.plugin.name) return { deny: CLAIM_REFUSED }
+    const generation = await continuationGeneration($)
     const ran = await next(e)
     const tool = String(e.tool)
     if (!tool.startsWith(OWN_TOOLS) || ran.deny !== undefined || ran.isError) return ran
@@ -367,7 +372,7 @@ export const register: Register = (on, options) => {
       const run = data.run
       await updateClaims($, list => list.filter(one => one.run !== run))
     }
-    await adopt($, name, data)
+    if (await continuationCurrent($, generation)) await adopt($, name, data)
     // A proof the model asked for is run here and now, by the plugin: the commands, the sandbox and the report are
     // proof.ts's, and the model reads only what CodeBook recorded. A failure to run it never fails the model's call.
     if (name === 'request_proof') {
@@ -512,6 +517,10 @@ export const register: Register = (on, options) => {
     const storedMode = await $.store.get(STORE_MODE)
     if (storedMode === 'here' || storedMode === 'cloud') await update($, mode, () => storedMode)
     await restoreSession($)
+    await restoreContinuation($)
+    const followed = await read($, active)
+    if (followed) await watchContinuation($, followed.story, followed.reference, followed.factory)
+    for (const one of await read($, watched)) await watchContinuation($, one.story, one.reference)
     $.clock.every(1000, () => {
       void tick($)
     })

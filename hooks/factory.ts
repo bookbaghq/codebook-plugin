@@ -16,6 +16,7 @@ import type {
   CodebookWatch,
 } from '../types'
 import { call } from './connector'
+import { adoptContinuation, continuationCurrent, continuationGeneration, observeContinuation, stopContinuation, watchContinuation } from './continuation'
 
 // Change a tag when that value's fields change: it declines what an earlier version stored.
 export const mode = atom({ plugin: 'codebook', key: 'mode' } as const, 'here' as CodebookMode)
@@ -94,6 +95,7 @@ type WireEvent = {
   subject?: string | null
   detail?: string | null
   outcome?: string | null
+  run?: number | null
   actor?: string | null
   card?: { reference?: number | string | null } | null
   who?: {
@@ -373,18 +375,23 @@ export function narration(e: WireEvent, reference: string): string | null {
 
 /** Asks story_status for the followed story and folds it into the pane's values. */
 export async function refresh($: EngineInterface): Promise<void> {
+  const generation = await continuationGeneration($)
   const a = await read($, active)
   if (a === null) return
   await loadBoard($, a)
+  if (!await continuationCurrent($, generation)) return
   const before = await read($, story)
   const args: Record<string, unknown> = { story: a.story, limit: 50 }
   if (a.factory) args.factory = a.factory
   if (a.workflow) args.workflow = a.workflow
   if (before?.lastEvent != null) args.after = before.lastEvent
   const got = await call<Status>($, 'story_status', args)
+  if (!await continuationCurrent($, generation)) return
   await setLink($, got)
   if (!got.ok) return
   const s = got.data
+  await observeContinuation($, a.story, s, generation)
+  if (!await continuationCurrent($, generation)) return
   const byStation = new Map(s.stations.map(one => [one.station, one]))
   const runsAt = new Map((s.run_location?.stations ?? []).map(one => [one.station, one.runs]))
   const fromBoard: BoardStation[] = board?.stations ?? s.stations.map(one => ({ station: one.station, name: one.name }))
@@ -450,6 +457,7 @@ export async function refresh($: EngineInterface): Promise<void> {
   }
   askOnce(before?.waitKey ?? null, wait)
   if (before === null || (s.last_event ?? null) !== (before.lastEvent ?? null)) await loadTrail($, s.story.story)
+  if (!await continuationCurrent($, generation)) return
   if (s.events.length > 0) {
     const rows: CodebookEvent[] = s.events.map(e => ({
       id: e.id,
@@ -487,13 +495,16 @@ export async function refresh($: EngineInterface): Promise<void> {
 let nextWatched = 0
 
 export async function refreshWatched($: EngineInterface): Promise<void> {
+  const generation = await continuationGeneration($)
   const list = await read($, watched)
   if (list.length === 0) return
   const one = list[nextWatched % list.length]!
   nextWatched = (nextWatched + 1) % Math.max(1, list.length)
   const got = await call<Status>($, 'story_status', { story: one.story, limit: 1 })
-  if (!got.ok) return
+  if (!got.ok || !await continuationCurrent($, generation)) return
   const s = got.data
+  await observeContinuation($, one.story, s, generation)
+  if (!await continuationCurrent($, generation)) return
   const wait = waitOf(s)
   askOnce(one.waitKey, wait)
   // Against the list as it is now: a story the person or Claude added while this poll ran stays.
@@ -540,6 +551,7 @@ async function loadTrail($: EngineInterface, storyId: string): Promise<void> {
 
 /** Starts following a story, in this session: the pane and the timer read it, and it is kept for this session's resume. */
 export async function follow($: EngineInterface, a: CodebookActive): Promise<void> {
+  await watchContinuation($, a.story, a.reference, a.factory)
   board = null
   await update($, active, () => a)
   await update($, story, () => null)
@@ -551,6 +563,8 @@ export async function follow($: EngineInterface, a: CodebookActive): Promise<voi
 }
 
 export async function unfollow($: EngineInterface): Promise<void> {
+  await stopContinuation($)
+  pendingAsks = []
   board = null
   await update($, watched, () => [])
   await update($, active, () => null)
@@ -653,6 +667,7 @@ export async function adopt($: EngineInterface, tool: string, data: unknown): Pr
   if (tool === 'start_story') {
     const s = data as Started | null
     if (!s?.story?.story) return
+    await watchContinuation($, s.story.story, s.story.reference, s.factory.factory, true)
     await follow($, {
       story: s.story.story,
       factory: s.factory.factory,
@@ -666,6 +681,7 @@ export async function adopt($: EngineInterface, tool: string, data: unknown): Pr
     return
   }
   if (tool === 'confirm_stories') {
+    await adoptContinuation($, data)
     type Created = { story: string; reference: string; title: string; url?: string }
     const created = (data as { created?: Created[] } | null)?.created ?? []
     const first = created[0]
