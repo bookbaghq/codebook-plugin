@@ -51,6 +51,19 @@ export const KEEP_SESSION_MS = 30 * 24 * 3600 * 1000
 
 type KeptSession = { at: number; active: CodebookActive | null; watched: CodebookWatch[] }
 
+// Stop invalidates the generation before waiting for older ownership writes to finish. Its final clear
+// therefore follows even a store write already in flight; an old adoption cannot repopulate resume state.
+let ownershipChanges = Promise.resolve()
+let stopping = 0
+async function changeOwnership<T>($: EngineInterface, generation: number, change: () => Promise<T>): Promise<T | undefined> {
+  const pending = ownershipChanges.catch(() => {}).then(async () => {
+    if (!await continuationCurrent($, generation)) return
+    return change()
+  })
+  ownershipChanges = pending.then(() => {}, () => {})
+  return pending
+}
+
 /** Saves what this session follows, under its own key; nothing followed removes the key. */
 async function keep($: EngineInterface): Promise<void> {
   const key = `${STORE_SESSION}${await $.session.id()}`
@@ -61,7 +74,7 @@ async function keep($: EngineInterface): Promise<void> {
 }
 
 /** At session start: what THIS session followed, if it is being resumed. Also clears the old shared keys and gone sessions. */
-export async function restoreSession($: EngineInterface): Promise<void> {
+export async function restoreSession($: EngineInterface, generation: number): Promise<void> {
   for (const key of STORE_SHARED_BEFORE) await $.store.delete(key)
   const now = await $.clock.now()
   const own = `${STORE_SESSION}${await $.session.id()}`
@@ -71,8 +84,10 @@ export async function restoreSession($: EngineInterface): Promise<void> {
     if (typeof other?.at !== 'number' || now - other.at > KEEP_SESSION_MS) await $.store.delete(key)
   }
   const kept = (await $.store.get(own)) as Partial<KeptSession> | undefined
-  if (kept?.active && typeof kept.active.story === 'string' && (await read($, active)) === null) await update($, active, () => kept.active as CodebookActive)
-  if (Array.isArray(kept?.watched) && (await read($, watched)).length === 0) await update($, watched, () => (kept.watched as CodebookWatch[]).filter(one => typeof one?.story === 'string'))
+  await changeOwnership($, generation, async () => {
+    if (kept?.active && typeof kept.active.story === 'string' && (await read($, active)) === null) await update($, active, () => kept.active as CodebookActive)
+    if (Array.isArray(kept?.watched) && (await read($, watched)).length === 0) await update($, watched, () => (kept.watched as CodebookWatch[]).filter(one => typeof one?.story === 'string'))
+  })
 }
 
 // Wire shapes of the connector (docs/MCP-CONNECTOR.md in codebook-app), as far as the pane reads them.
@@ -327,7 +342,7 @@ function askOnce(beforeKey: string | null, wait: { key: string; prompt: string }
 
 /** Sends the queued asks, if any, as one prompt: from the poll timer (every second), never from inside a tool call. */
 export function flushAsk($: EngineInterface): void {
-  if (pendingAsks.length === 0) return
+  if (stopping || pendingAsks.length === 0) return
   const text = pendingAsks.join('\n\n')
   pendingAsks = []
   void $.prompt.submit({ text })
@@ -374,8 +389,9 @@ export function narration(e: WireEvent, reference: string): string | null {
 }
 
 /** Asks story_status for the followed story and folds it into the pane's values. */
-export async function refresh($: EngineInterface): Promise<void> {
-  const generation = await continuationGeneration($)
+export async function refresh($: EngineInterface, generation?: number): Promise<void> {
+  generation ??= await continuationGeneration($)
+  if (stopping || !await continuationCurrent($, generation)) return
   const a = await read($, active)
   if (a === null) return
   await loadBoard($, a)
@@ -442,21 +458,25 @@ export async function refresh($: EngineInterface): Promise<void> {
     lastEvent: s.last_event ?? before?.lastEvent ?? null,
     checkedAt: await $.clock.now(),
   }
-  await update($, story, () => next)
-  // A line in the chat for each new event; the first look at a story only fills the pane.
-  if (before !== null) {
-    for (const e of s.events) {
-      if (e.id <= (before.lastEvent ?? 0)) continue
-      const line = narration(e, s.story.reference)
-      if (line) $.ui.log(`CodeBook: ${line}`)
+  await changeOwnership($, generation, async () => {
+    await update($, story, () => next)
+    if (!await continuationCurrent($, generation)) return
+    // A line in the chat for each new event; the first look at a story only fills the pane.
+    if (before !== null) {
+      for (const e of s.events) {
+        if (e.id <= (before.lastEvent ?? 0)) continue
+        const line = narration(e, s.story.reference)
+        if (line) $.ui.log(`CodeBook: ${line}`)
+      }
+      if (next.leftForPerson && !before.leftForPerson) $.ui.log(`CodeBook: ${s.story.reference} is done, but ${next.leftForPerson}`)
+      if (next.question !== null && next.waitKey !== before.waitKey) {
+        $.ui.log(`CodeBook: ${s.story.reference} asks you: "${next.question}"`)
+      }
     }
-    if (next.leftForPerson && !before.leftForPerson) $.ui.log(`CodeBook: ${s.story.reference} is done, but ${next.leftForPerson}`)
-    if (next.question !== null && next.waitKey !== before.waitKey) {
-      $.ui.log(`CodeBook: ${s.story.reference} asks you: "${next.question}"`)
-    }
-  }
-  askOnce(before?.waitKey ?? null, wait)
-  if (before === null || (s.last_event ?? null) !== (before.lastEvent ?? null)) await loadTrail($, s.story.story)
+    askOnce(before?.waitKey ?? null, wait)
+  })
+  if (!await continuationCurrent($, generation)) return
+  if (before === null || (s.last_event ?? null) !== (before.lastEvent ?? null)) await loadTrail($, s.story.story, generation)
   if (!await continuationCurrent($, generation)) return
   if (s.events.length > 0) {
     const rows: CodebookEvent[] = s.events.map(e => ({
@@ -466,10 +486,10 @@ export async function refresh($: EngineInterface): Promise<void> {
       text: eventText(e),
       at: e.occurred_at,
     }))
-    await update($, events, list => {
+    await changeOwnership($, generation, () => update($, events, list => {
       const seen = new Set(list.map(one => one.id))
       return [...list, ...rows.filter(one => !seen.has(one.id))].slice(-40)
-    })
+    }))
   }
   // A story followed by its id alone (from confirm_stories) learns its factory here.
   const known: CodebookActive = {
@@ -481,7 +501,7 @@ export async function refresh($: EngineInterface): Promise<void> {
     title: a.title || s.story.title,
     url: s.url ?? a.url,
   }
-  if (JSON.stringify(known) !== JSON.stringify(a)) await update($, active, () => known)
+  if (JSON.stringify(known) !== JSON.stringify(a)) await changeOwnership($, generation, () => update($, active, () => known))
 }
 
 /**
@@ -495,6 +515,7 @@ export async function refresh($: EngineInterface): Promise<void> {
 let nextWatched = 0
 
 export async function refreshWatched($: EngineInterface): Promise<void> {
+  if (stopping) return
   const generation = await continuationGeneration($)
   const list = await read($, watched)
   if (list.length === 0) return
@@ -506,14 +527,16 @@ export async function refreshWatched($: EngineInterface): Promise<void> {
   await observeContinuation($, one.story, s, generation)
   if (!await continuationCurrent($, generation)) return
   const wait = waitOf(s)
-  askOnce(one.waitKey, wait)
   // Against the list as it is now: a story the person or Claude added while this poll ran stays.
-  await update($, watched, now =>
-    s.finished !== null
-      ? now.filter(n => n.story !== one.story)
-      : now.map(n => (n.story === one.story ? { ...n, reference: s.story.reference || n.reference, waitKey: wait?.key ?? null, question: wait?.question ?? null } : n)),
-  )
-  await keep($)
+  await changeOwnership($, generation, async () => {
+    askOnce(one.waitKey, wait)
+    await update($, watched, now =>
+      s.finished !== null
+        ? now.filter(n => n.story !== one.story)
+        : now.map(n => (n.story === one.story ? { ...n, reference: s.story.reference || n.reference, waitKey: wait?.key ?? null, question: wait?.question ?? null } : n)),
+    )
+    await keep($)
+  })
 }
 
 /** Offers the person's answer to the question waiting on the followed story: "Answer #57: " in their prompt box. */
@@ -533,7 +556,7 @@ type Trail = {
 }
 
 /** The card's trail for the pane (G5b story_trail): pull requests, the latest comments, the artifacts. */
-async function loadTrail($: EngineInterface, storyId: string): Promise<void> {
+async function loadTrail($: EngineInterface, storyId: string, generation: number): Promise<void> {
   const got = await call<Trail>($, 'story_trail', { story: storyId })
   if (!got.ok) return
   const t = got.data
@@ -546,31 +569,44 @@ async function loadTrail($: EngineInterface, storyId: string): Promise<void> {
     comments: (t.comments ?? []).slice(-3).map(c => ({ id: c.id, author: c.author, text: c.text.split('\n')[0]?.slice(0, 160) ?? '' })),
     artifacts: (t.artifacts ?? []).length,
   }
-  await update($, trail, () => next)
+  await changeOwnership($, generation, () => update($, trail, () => next))
 }
 
 /** Starts following a story, in this session: the pane and the timer read it, and it is kept for this session's resume. */
-export async function follow($: EngineInterface, a: CodebookActive): Promise<void> {
-  await watchContinuation($, a.story, a.reference, a.factory)
-  board = null
-  await update($, active, () => a)
-  await update($, story, () => null)
-  await update($, events, () => [])
-  await update($, trail, () => null)
-  await update($, sendingBack, () => false)
-  await keep($)
-  await refresh($)
+export async function follow($: EngineInterface, a: CodebookActive, generation: number): Promise<boolean> {
+  if (stopping || !await continuationCurrent($, generation)) return false
+  await watchContinuation($, a.story, a.reference, a.factory, false, generation)
+  await changeOwnership($, generation, async () => {
+    board = null
+    await update($, active, () => a)
+    await update($, story, () => null)
+    await update($, events, () => [])
+    await update($, trail, () => null)
+    await update($, sendingBack, () => false)
+    await keep($)
+  })
+  if (stopping || !await continuationCurrent($, generation)) return false
+  await refresh($, generation)
+  return !stopping && await continuationCurrent($, generation)
 }
 
 export async function unfollow($: EngineInterface): Promise<void> {
-  await stopContinuation($)
+  stopping++
   pendingAsks = []
-  board = null
-  await update($, watched, () => [])
-  await update($, active, () => null)
-  await update($, story, () => null)
-  await update($, events, () => [])
-  await keep($)
+  try {
+    await stopContinuation($)
+    await changeOwnership($, await continuationGeneration($), async () => {
+      pendingAsks = []
+      board = null
+      await update($, watched, () => [])
+      await update($, active, () => null)
+      await update($, story, () => null)
+      await update($, events, () => [])
+      await update($, trail, () => null)
+      await update($, notice, () => null)
+      await keep($)
+    })
+  } finally { stopping-- }
 }
 
 /** Sets where the next stories run and, when a story is followed, moves that story there too (set_run_location). */
@@ -663,12 +699,13 @@ export function takePollSoon(): boolean {
 }
 
 /** Folds the answer of a connector call Claude made back into the pane: a started story is followed, others ask the timer to poll. */
-export async function adopt($: EngineInterface, tool: string, data: unknown): Promise<void> {
+export async function adopt($: EngineInterface, tool: string, data: unknown, generation: number): Promise<void> {
+  if (stopping || !await continuationCurrent($, generation)) return
   if (tool === 'start_story') {
     const s = data as Started | null
     if (!s?.story?.story) return
-    await watchContinuation($, s.story.story, s.story.reference, s.factory.factory, true)
-    await follow($, {
+    await watchContinuation($, s.story.story, s.story.reference, s.factory.factory, true, generation)
+    if (!await follow($, {
       story: s.story.story,
       factory: s.factory.factory,
       factoryName: s.factory.name,
@@ -676,12 +713,13 @@ export async function adopt($: EngineInterface, tool: string, data: unknown): Pr
       reference: s.story.reference,
       title: s.story.title,
       url: s.url ?? null,
-    })
-    await update($, notice, () => (s.next ? s.next : `Following ${s.story.reference}.`))
+    }, generation)) return
+    await changeOwnership($, generation, () => update($, notice, () => (s.next ? s.next : `Following ${s.story.reference}.`)))
     return
   }
   if (tool === 'confirm_stories') {
-    await adoptContinuation($, data)
+    await adoptContinuation($, data, generation)
+    if (stopping || !await continuationCurrent($, generation)) return
     type Created = { story: string; reference: string; title: string; url?: string }
     const created = (data as { created?: Created[] } | null)?.created ?? []
     const first = created[0]
@@ -695,7 +733,7 @@ export async function adopt($: EngineInterface, tool: string, data: unknown): Pr
         others.push({ story: a.story, reference: a.reference, title: a.title, url: a.url, waitKey: s?.waitKey ?? null, question: s?.question ?? null })
       }
       const isNew = a === null || a.story !== first.story
-      await follow($, {
+      if (!await follow($, {
         story: first.story,
         factory: '',
         factoryName: '',
@@ -703,20 +741,23 @@ export async function adopt($: EngineInterface, tool: string, data: unknown): Pr
         reference: first.reference,
         title: first.title,
         url: first.url ?? null,
+      }, generation)) return
+      await changeOwnership($, generation, async () => {
+        const list = await update($, watched, now => [...now.filter(n => n.story !== first.story && !others.some(o => o.story === n.story)), ...others])
+        await keep($)
+        if (isNew && await continuationCurrent($, generation)) {
+          const also = list.map(one => one.reference)
+          await update($, notice, () =>
+            also.length > 0 ? `Following ${first.reference}; also following ${also.join(', ')} for anything that needs you.` : `Following ${first.reference}.`,
+          )
+        }
       })
-      const list = await update($, watched, now => [...now.filter(n => n.story !== first.story && !others.some(o => o.story === n.story)), ...others])
-      await keep($)
-      if (isNew) {
-        const also = list.map(one => one.reference)
-        await update($, notice, () =>
-          also.length > 0 ? `Following ${first.reference}; also following ${also.join(', ')} for anything that needs you.` : `Following ${first.reference}.`,
-        )
-      }
       return
     }
   }
   const said = (data as { next?: unknown } | null)?.next
-  if (typeof said === 'string') await update($, notice, () => said)
+  if (!await continuationCurrent($, generation)) return
+  if (typeof said === 'string') await changeOwnership($, generation, () => update($, notice, () => said))
   // Never a poll per call: with eight workers side by side that was over half the connector's 120 requests a minute,
   // and the workers' own calls were refused. The pane catches up on the next tick, within POLL_MS.
   pollSoon = true

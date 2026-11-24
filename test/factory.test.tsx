@@ -138,7 +138,9 @@ function status58(asks: boolean): Record<string, unknown> {
 }
 
 /** The engine beneath the plugin: a connected codebook server answering from the fixtures above. */
-type Lifecycle = { passed?: boolean; terminal?: boolean; events?: Record<string, unknown>[]; holdFeed?: Promise<void>; feedError?: boolean }
+type Lifecycle = { passed?: boolean; terminal?: boolean; events?: Record<string, unknown>[]; holdFeed?: Promise<void>; feedError?: boolean;
+  holdStore?: Promise<void>; storeEntered?: () => void; storePrefix?: string; storeSkip?: number; afterStore?: boolean;
+  holdStatus?: Promise<void>; statusEntered?: () => void }
 function engine(on: On, at: { now: At; asks58?: boolean; done58?: boolean; session?: string; stored?: Record<string, unknown>; controls?: boolean; backlog?: boolean; lifecycle?: Lifecycle }) {
   const calls: Calls = []
   const prompts: string[] = []
@@ -148,7 +150,15 @@ function engine(on: On, at: { now: At; asks58?: boolean; done58?: boolean; sessi
   const kept = new Map<string, unknown>(Object.entries(at.stored ?? {}))
   const deleted: string[] = []
   on('store.get', (_, e) => ({ value: kept.get(e.key) }))
-  on('store.set', (_, e) => {
+  on('store.set', async (_, e) => {
+    const latch = at.lifecycle
+    const held = e.key.startsWith(latch?.storePrefix ?? CONTINUATION_STORE) && latch?.holdStore && !(latch.storeSkip && latch.storeSkip-- > 0) ? latch.holdStore : undefined
+    if (held) {
+      delete latch!.holdStore
+      if (latch!.afterStore) kept.set(e.key, e.value)
+      latch!.storeEntered?.()
+      await held
+    }
     kept.set(e.key, e.value)
     return { value: undefined }
   })
@@ -238,6 +248,12 @@ function engine(on: On, at: { now: At; asks58?: boolean; done58?: boolean; sessi
   }
   on('mcp.call', async (_, e) => {
     if (e.tool === 'factory_events' && at.lifecycle?.holdFeed) await at.lifecycle.holdFeed
+    if (e.tool === 'story_status' && at.lifecycle?.holdStatus) {
+      const held = at.lifecycle.holdStatus
+      delete at.lifecycle.holdStatus
+      at.lifecycle.statusEntered?.()
+      await held
+    }
     calls.push({ tool: e.tool, args: e.args })
     const data = answer(e.tool, e.args)
     const isError = typeof data === 'object' && data !== null && 'error' in data
@@ -854,6 +870,64 @@ test('P5: /factory status shows a version mismatch', async ($, on) => {
 
 
 const continuationPrompts = (prompts: string[]) => prompts.filter(text => text.includes('continue eligible authorized work'))
+
+for (const tool of ['start_story', 'confirm_stories']) {
+  for (const [storePrefix, storeSkip] of [[CONTINUATION_STORE, 0], [CONTINUATION_STORE, 1], ['session-1:', 0], ...(tool === 'confirm_stories' ? [['session-1:', 1]] : [])] as [string, number][]) {
+    for (const afterStore of [false, true]) {
+      test(`stop fences ${tool} adoption at ${storePrefix} write ${storeSkip + 1} ${afterStore ? 'after' : 'before'} persistence`, async ($, on) => {
+        const at: { now: At; asks58?: boolean; lifecycle: Lifecycle } = { now: 'build', lifecycle: {} }
+        const { prompts, clock, kept, calls } = engine(on, at)
+        await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+        let release!: () => void
+        let entered!: () => void
+        const inStore = new Promise<void>(resolve => { entered = resolve })
+        Object.assign(at.lifecycle, { storePrefix, storeSkip, afterStore, storeEntered: entered, holdStore: new Promise<void>(resolve => { release = resolve }) })
+        const starting = tool === 'start_story' ? claudeStarts($) : $.tool.call({ tool: 'mcp__plugin_codebook_codebook__confirm_stories', proposal: 'wo7' } as never)
+        await inStore
+        const stopping = $.command.run(typed('stop'))
+        await new Promise(resolve => setTimeout(resolve, 10))
+        release()
+        await Promise.all([starting, stopping])
+        at.now = 'done'
+        at.asks58 = true
+        await clock.advance(65000)
+        expect(kept.has(CONTINUATION_STORE + 'session-a')).toBe(false)
+        expect(kept.has('session-1:session-a')).toBe(false)
+        expect(prompts).toEqual([])
+        const reads = calls.length
+        await clock.advance(65000)
+        expect(calls.length).toBe(reads)
+        // Cancellation fences old operations, not a new explicit follow after stop has completed.
+        at.now = 'build'
+        await $.command.run(typed('follow 6KjN Payments'))
+        at.now = 'done'
+        await clock.advance(5000)
+        expect(continuationPrompts(prompts).length).toBe(1)
+      })
+    }
+  }
+}
+
+test('stop fences an explicit follow whose status response is still in flight', async ($, on) => {
+  const at: { now: At; lifecycle: Lifecycle } = { now: 'build', lifecycle: {} }
+  const { prompts, clock, kept } = engine(on, at)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  let release!: () => void
+  let entered!: () => void
+  const inStatus = new Promise<void>(resolve => { entered = resolve })
+  at.lifecycle.holdStatus = new Promise<void>(resolve => { release = resolve })
+  at.lifecycle.statusEntered = entered
+  const following = $.command.run(typed('follow 6KjN Payments'))
+  await inStatus
+  await $.command.run(typed('stop'))
+  release()
+  expect((await following).text).toContain('cancelled')
+  at.now = 'done'
+  await clock.advance(65000)
+  expect(kept.has(CONTINUATION_STORE + 'session-a')).toBe(false)
+  expect(kept.has('session-1:session-a')).toBe(false)
+  expect(prompts).toEqual([])
+})
 
 test('owned story completion wakes continuation once', async ($, on) => {
   const at: { now: At; done58?: boolean; lifecycle: Lifecycle } = { now: 'build', lifecycle: {} }

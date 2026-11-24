@@ -372,7 +372,7 @@ export const register: Register = (on, options) => {
       const run = data.run
       await updateClaims($, list => list.filter(one => one.run !== run))
     }
-    if (await continuationCurrent($, generation)) await adopt($, name, data)
+    if (await continuationCurrent($, generation)) await adopt($, name, data, generation)
     // A proof the model asked for is run here and now, by the plugin: the commands, the sandbox and the report are
     // proof.ts's, and the model reads only what CodeBook recorded. A failure to run it never fails the model's call.
     if (name === 'request_proof') {
@@ -500,6 +500,7 @@ export const register: Register = (on, options) => {
   }).catch(($, e, next) => next(e))
 
   on('session.start', async ($, e, next) => {
+    const generation = await continuationGeneration($)
     await $.command.register({
       name: 'factory',
       description: 'CodeBook factories: open the Factory pane, start a story (run), or show its status',
@@ -516,11 +517,11 @@ export const register: Register = (on, options) => {
     void askAtStart($, e.cwd).catch(() => null)
     const storedMode = await $.store.get(STORE_MODE)
     if (storedMode === 'here' || storedMode === 'cloud') await update($, mode, () => storedMode)
-    await restoreSession($)
-    await restoreContinuation($)
+    await restoreSession($, generation)
+    await restoreContinuation($, generation)
     const followed = await read($, active)
-    if (followed) await watchContinuation($, followed.story, followed.reference, followed.factory)
-    for (const one of await read($, watched)) await watchContinuation($, one.story, one.reference)
+    if (followed) await watchContinuation($, followed.story, followed.reference, followed.factory, false, generation)
+    for (const one of await read($, watched)) await watchContinuation($, one.story, one.reference, '', false, generation)
     $.clock.every(1000, () => {
       void tick($)
     })
@@ -625,6 +626,7 @@ export const register: Register = (on, options) => {
     if (lower === 'status') return statusText($)
 
     if (lower === 'follow') {
+      const generation = await continuationGeneration($)
       const [storyRef = '', ...factoryWords] = rest
       const factory = factoryWords.join(' ')
       if (!storyRef) return { text: 'Usage: /factory follow <story> [<factory>]' }
@@ -634,7 +636,7 @@ export const register: Register = (on, options) => {
       await setLink($, got)
       if (!got.ok) return { text: got.message }
       const s = got.data
-      await follow($, {
+      if (!await follow($, {
         story: s.story.story,
         factory: s.factory.factory,
         factoryName: s.factory.name,
@@ -642,7 +644,7 @@ export const register: Register = (on, options) => {
         reference: s.story.reference,
         title: s.story.title,
         url: s.url ?? null,
-      })
+      }, generation)) return { text: 'Following was cancelled by /factory stop.' }
       await openPane($)
       return { text: `Following ${s.story.reference} "${s.story.title}" in ${s.factory.name}.` }
     }

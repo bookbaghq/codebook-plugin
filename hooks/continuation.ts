@@ -33,10 +33,10 @@ export async function hasContinuation($: EngineInterface): Promise<boolean> {
   return Object.keys(current.stories).length > 0 || Object.keys(current.orders).length > 0 || Object.keys(current.pending).length > 0
 }
 
-export async function restoreContinuation($: EngineInterface): Promise<void> {
+export async function restoreContinuation($: EngineInterface, generation: number): Promise<void> {
   const kept = await $.store.get(CONTINUATION_STORE + await $.session.id()) as { at?: number; value?: CodebookContinuation } | undefined
   if (typeof kept?.at === 'number' && kept.at > await $.clock.now() - 30 * 24 * 3600 * 1000 && kept.value?.stories && kept.value.orders && kept.value.pending) {
-    await update($, state, () => ({ ...kept.value!, checkedAt: 0 }))
+    await update($, state, current => current.generation === generation ? { ...kept.value!, generation, checkedAt: 0 } : current)
   }
 }
 
@@ -45,19 +45,20 @@ export async function stopContinuation($: EngineInterface): Promise<void> {
   await save($)
 }
 
-export async function watchContinuation($: EngineInterface, story: string, reference: string, factory = '', fresh = false): Promise<void> {
+export async function watchContinuation($: EngineInterface, story: string, reference: string, factory: string, fresh: boolean, generation: number): Promise<void> {
   await update($, state, current => {
-    if (current.stories[story] || Object.keys(current.stories).length >= MAX_STORIES) return current
+    if (current.generation !== generation || current.stories[story] || Object.keys(current.stories).length >= MAX_STORIES) return current
     return { ...current, stories: { ...current.stories, [story]: { factory, reference, order: null, state: fresh ? 'moving' : null, event: 0 } } }
   })
   await save($)
 }
 
 /** Only a successful confirmation in this session establishes ownership of this proposal. */
-export async function adoptContinuation($: EngineInterface, data: unknown): Promise<void> {
+export async function adoptContinuation($: EngineInterface, data: unknown, generation: number): Promise<void> {
   const result = data as { proposal?: { proposal?: string; reference?: string }; created?: { story: string; reference: string }[] } | null
   if (!result?.created?.length) return
   await update($, state, current => {
+    if (current.generation !== generation) return current
     const next = { ...current, stories: { ...current.stories }, orders: { ...current.orders } }
     const id = result.proposal?.proposal, reference = result.proposal?.reference
     const order = typeof id === 'string' && typeof reference === 'string' && (next.orders[id] || Object.keys(next.orders).length < MAX_ORDERS) ? id : null
