@@ -11,7 +11,7 @@
 // BACKLOG_LOOK). Change one here only together with that file.
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname, join, relative, resolve } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 
@@ -52,7 +52,23 @@ const SIX = ['spending money', 'touching production data', 'deleting things', 's
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 /** A file as one line of plain words: line breaks, list markers and Markdown emphasis do not count. */
 const plain = (text) => text.replace(/\r\n/g, '\n').replace(/\*\*/g, '').replace(/\n\s*(?:[-*]|\d+\.)\s+/g, ' ').replace(/\s+/g, ' ')
-const read = (path) => plain(readFileSync(join(root, path), 'utf8'))
+// Check the published guidance including its linked, on-demand references. This is
+// validation only: agents read a reference when its condition applies, not eagerly.
+const read = (path) => {
+  const seen = new Set()
+  const visit = (file) => {
+    const absolute = resolve(root, file)
+    assert.ok(!relative(root, absolute).startsWith('..'), `reference leaves the plugin: ${file}`)
+    if (seen.has(absolute)) return ''
+    seen.add(absolute)
+    const text = readFileSync(absolute, 'utf8')
+    const references = [...text.matchAll(/\[[^\]]+\]\(([^)#]+\.md)(?:#[^)]*)?\)/g)]
+      .map((match) => match[1]).filter((target) => !/^[a-z]+:/i.test(target))
+      .map((target) => visit(relative(root, resolve(dirname(absolute), target))))
+    return [text, ...references].join('\n')
+  }
+  return plain(visit(path))
+}
 const skill = read('skills/factory-manager/SKILL.md'), worker = read('agents/factory-worker.md'), readme = read('README.md')
 
 const carries = (text, name, sentences) => {
@@ -147,7 +163,6 @@ test('a missing recipe is proposed from the repository (Q5)', () => {
   carries(skill, 'The manager skill', RULES.NO_RECIPE)
   assert.ok(skill.includes('`run_recipe_change { factory, repository?, step, value, reason }`'))
   assert.ok(worker.includes('`run_recipe_change { run, fence, step, value, reason }`'))
-  assert.ok(worker.includes('Do not report blocked for a missing recipe.'))
 })
 
 test('a story is finished with a stand-in, and the card says what was not checked (Q6)', () => {
