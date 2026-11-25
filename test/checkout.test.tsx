@@ -228,6 +228,14 @@ test('outside a station\'s run, a push, a pull request and a merge in the checko
   expect((await check($, 'git push')).reason).toContain('worked by the factory')
 })
 
+test('manager merge keeps the ask', async ($, on) => {
+  world(on)
+  await $.tool.call({ tool: OWN + 'claim_work', run: 811, agentId: 'worker' } as never)
+  const verdict = await check($, 'gh pr merge 12 --squash')
+  expect(verdict.decision).toBe('ask')
+  expect(verdict.reason).toContain('Allow it to do this yourself, this once')
+})
+
 test('from another folder, a push into the factory\'s checkout is asked about as well', async ($, on) => {
   world(on, { cwd: '/work/other', answers: args => (args.repository === 'Acme/Shop' ? factoryAnswer() : noFactory(String(args.repository))) })
   expect((await check($, 'git -C /work/shop push origin main')).decision).toBe('ask')
