@@ -20,6 +20,7 @@ import type { EngineInterface } from 'claude-code'
 
 import type { CodebookCheckout, CodebookClaim } from '../types'
 import { call } from './connector'
+import { captureForMilestone, type NativeBrowserWork } from './browser-proof'
 import { FORWARD_PORT, forwarderSource, parseHosts, proxyEnvironment, proxySource, ruleText } from './egress'
 import type { HostRule } from './egress'
 
@@ -420,7 +421,9 @@ export async function proofFolder(
 
 /** What is waiting for this person's computer, without taking any of it. */
 export async function waitingProofs($: EngineInterface): Promise<{ ok: true; waiting: ProofWaiting[] } | { ok: false; message: string }> {
-  const peeked = await call<{ waiting?: ProofWaiting[] }>($, 'claim_proof', { peek: true })
+  let peeked = await call<{ waiting?: ProofWaiting[] }>($, 'claim_proof', { peek: true, local_browser_version: 1 })
+  // Older servers may validate their original schema strictly. Ordinary proofs remain usable.
+  if (!peeked.ok && /unknown|unexpected|additional|invalid.*argument/i.test(peeked.message)) peeked = await call<{ waiting?: ProofWaiting[] }>($, 'claim_proof', { peek: true })
   if (!peeked.ok) return { ok: false, message: peeked.message }
   return { ok: true, waiting: peeked.data.waiting ?? [] }
 }
@@ -465,6 +468,16 @@ export async function runProof($: EngineInterface, { proof = null, known = [], h
   const head = (await quiet($, ['git', '-C', dir, 'rev-parse', 'HEAD'])).stdout.trim()
   const status = await quiet($, ['git', '-C', dir, 'status', '--porcelain'])
   const isDirty = status.exitCode !== 0 || status.stdout.trim() !== ''
+  if (target.commands.length === 1 && target.commands[0] === 'milestone_browser') {
+    const claim = await call<NativeBrowserWork>($, 'claim_proof', { proof: target.proof, local_browser_version: 1 })
+    if (!claim.ok) return { isRun: false, text: claim.message }
+    const work = claim.data
+    if (!work.proof || !work.token || !work.report_url || work.steps?.length !== 1 || !work.steps[0]?.local_browser) return { isRun: false, text: 'This native browser proof is no longer available.' }
+    const payload = await captureForMilestone($, work, dir, head, isDirty)
+    const answer = await report($, work, payload)
+    const outcome = answer.status === 'passed' || answer.status === 'failed' ? `Receipt ${work.proof} ${answer.status}.` : 'No verified browser receipt was issued.'
+    return { isRun: true, text: answer.ok ? outcome : `CodeBook could not record the browser capture: ${answer.message}` }
+  }
   const branch = target.default_branch ?? 'main'
   await quiet($, ['git', '-C', dir, 'fetch', '--quiet', 'origin', branch], undefined, 20000)
   const base = (await quiet($, ['git', '-C', dir, 'rev-parse', '--verify', '--quiet', `refs/remotes/origin/${branch}`])).stdout.trim()

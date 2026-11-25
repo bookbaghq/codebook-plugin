@@ -426,6 +426,12 @@ On your computer that program is this plugin.
 - **Nothing else.** The plugin has no servers of its own, no analytics, and no keys in this repository. Your code
   stays in your checkout except what you push. Privacy: <https://codebook.work/privacy>.
 
+### Local milestone browser receipts
+
+Read the outstanding browser step in `work_orders`. If a native receipt already exists, submit its ID with `link_milestone_browser_receipt`. To collect one, explicitly request that single step with `request_milestone_browser_proof`, then run `/factory prove <proof>`. The plugin returns the receipt ID and the browser's actual pass or failure. Link it to the same attempt, criterion, repository and commit.
+
+The first adapter supports a static site with a confirmed `python3 -m http.server` recipe, regular tracked files, Python 3 and a local Chromium headless shell or Chrome. It starts its own loopback server and browser profile. A structured specification can click a CSS selector and assert visible text or a visible selector. The browser records a JPEG and a bounded trace of action outcomes. CodeBook checks both digests before accepting a receipt.
+
 ## What is in this repository
 
 | Path | What it is |
@@ -435,6 +441,7 @@ On your computer that program is this plugin.
 | `skills/factory-manager/` | The manager skill Run here follows: the code on your computer, stories, "proceed?", stations, what it decides and the six things it asks a person, taking the next story, narration. |
 | `agents/factory-worker.md` | The sub-agent that works one station run here as that station's agent, testing on a local copy of the app it builds itself. |
 | `test/rule-texts.mjs` | Checks, with plain Node, that the skill and the agent carry CodeBook's rule sentences word for word, and that nothing tells the manager to ask about a split, an order or a retry. |
+| `hooks/browser-proof.ts`, `scripts/milestone-browser.mjs` | Capture an approved milestone browser interaction from the clean, pinned checkout. |
 | `hooks/proof.ts` | Proof runs: the repository's checks, run here boxed and reported by the plugin itself. |
 | `hooks/egress.ts` | A proof run's list of allowed hosts: reading the list, and the filtering proxy and forwarder that enforce it. |
 | `types/index.d.ts` | The pane's state contract. |
