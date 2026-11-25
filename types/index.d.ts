@@ -110,6 +110,19 @@ export type CodebookClaim = {
    * Absent: the answer carried no lease, and only complete_work ends the claim.
    */
   expiresAt?: number
+  /**
+   * Whether the run may change code (`run_here.may_change_code`, #173). False: a read-only station's run (requirements,
+   * design), which never holds a repository against another loop's push. Absent (an older CodeBook): it may.
+   */
+  writesCode?: boolean
+  /**
+   * The repositories this run holds against other loops' pushes (#173): its story's own `run_here.repository`, not the
+   * factory's whole list (`repos`, which is what the run's own worker may reach). Absent (a claim stored by an older
+   * plugin, or a brief without `repository`): `repos`.
+   */
+  owns?: string[]
+  /** Each listed repository's default branch (`default_branch`), which no worker pushes (#173). */
+  defaults?: Record<string, string>
 }
 
 /** A repository's checkout on this computer, as CodeBook last answered it (`you.local_code`, a claim's `local`). */
@@ -129,6 +142,18 @@ export type CodebookLink =
   | { state: 'error'; message: string }
 
 export type CodebookBacklogPage = { factory: string; lines: string[]; next?: { factory: string; workflow: string; offset: number } }
+
+/** Compact continuation observations belong to this session, independently of the pane selection. */
+export type CodebookContinuation = {
+  generation: number
+  stories: Record<string, { factory: string; reference: string; order: string | null; state: string | null; event: number }>
+  orders: Record<string, { factory: string; reference: string; passes: string[] | null }>
+  feeds: Record<string, number>
+  pending: Record<string, string>
+  nextFactory: number
+  nextOrder: number
+  checkedAt: number
+}
 
 declare module 'claude-code' {
   interface PluginState {
@@ -152,6 +177,7 @@ declare module 'claude-code' {
       checkouts: Shaped<CodebookCheckout[]>
       trail: Shaped<CodebookTrail | null>
       watched: Shaped<CodebookWatch[]>
+      continuation: Shaped<CodebookContinuation>
     }
   }
 }

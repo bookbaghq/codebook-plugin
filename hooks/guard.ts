@@ -55,18 +55,110 @@ export function allowedOf(brief: unknown): string[] {
   return [...new Set(names)]
 }
 
+/** Each repository's default branch a brief names (`default_branch` on `repositories` and `repository`), by `owner/name`. */
+export function defaultsOf(brief: unknown): Record<string, string> {
+  const here = (brief as { run_here?: { repository?: unknown; repositories?: unknown } } | null)?.run_here
+  const listed = [...(Array.isArray(here?.repositories) ? here.repositories : []), ...(here?.repository ? [here.repository] : [])]
+  const out: Record<string, string> = {}
+  for (const one of listed) {
+    if (typeof one !== 'object' || one === null) continue
+    const repo = one as { name?: string; full_name?: string; url?: string; default_branch?: unknown }
+    const name = repoOf(repo.name ?? repo.full_name ?? '') ?? repoOf(repo.url ?? '')
+    if (name && typeof repo.default_branch === 'string' && repo.default_branch.trim() !== '') out[name] = repo.default_branch.trim()
+  }
+  return out
+}
+
 /**
  * The claim a `claim_work` answer makes for the loop that called it: the run, its repositories, the loop (`agentId`,
  * absent on the main conversation), and the story's key and branch from `run_here.card_reference`, which a proof run
- * looks for its worktree by (proof.ts).
+ * looks for its worktree by (proof.ts). Since #173 also whether it may change code (`may_change_code`), the
+ * repository it holds against other loops (its story's own `repository`; none for a read-only run) and the default
+ * branches. An older CodeBook's answer without those fields makes the claim it always made.
  */
 export function claimOf(run: number, brief: unknown, agentId: string | undefined, lease?: unknown): CodebookClaim {
-  const reference = (brief as { run_here?: { card_reference?: { key?: unknown; branch?: unknown } } } | null)?.run_here?.card_reference
+  const here = (brief as { run_here?: { card_reference?: { key?: unknown; branch?: unknown }; may_change_code?: unknown; repository?: unknown } } | null)?.run_here
+  const reference = here?.card_reference
   const text = (value: unknown) => (typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined)
   const key = text(reference?.key)
   const branch = text(reference?.branch)
   const expiresAt = expiresOf(lease)
-  return { run, repos: allowedOf(brief), ...(agentId ? { agentId } : {}), ...(key ? { key } : {}), ...(branch ? { branch } : {}), ...(expiresAt !== undefined ? { expiresAt } : {}) }
+  const repos = allowedOf(brief)
+  const writesCode = here?.may_change_code === false ? false : here?.may_change_code === true ? true : undefined
+  const own = here?.repository ? allowedOf({ run_here: { repository: here.repository } }) : []
+  const owns = writesCode === false ? [] : own.length > 0 && Array.isArray((here as { repositories?: unknown }).repositories) ? own : undefined
+  const defaults = defaultsOf(brief)
+  return {
+    run, repos, ...(agentId ? { agentId } : {}), ...(key ? { key } : {}), ...(branch ? { branch } : {}), ...(expiresAt !== undefined ? { expiresAt } : {}),
+    ...(writesCode !== undefined ? { writesCode } : {}), ...(owns ? { owns } : {}), ...(Object.keys(defaults).length > 0 ? { defaults } : {}),
+  }
+}
+
+/** The repositories a claim holds against other loops' pushes (#173): none for a read-only run, else `owns`, else `repos`. */
+export function ownedOf(claim: CodebookClaim): string[] {
+  if (claim.writesCode === false) return []
+  return claim.owns ?? claim.repos
+}
+
+/**
+ * Whether `branch` carries the story key `key` (#173) as a whole word: `codebook/SD-173-run-1515` and `codex/SD-173-x`
+ * carry SD-173; `codebook/SD-1734-x` and `codebook/XSD-173` do not. Case is ignored.
+ */
+export function carriesKey(branch: string, key: string | undefined): boolean {
+  if (!key) return false
+  const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return new RegExp(`(?:^|[^A-Za-z0-9])${escaped}(?![0-9])`, 'i').test(branch)
+}
+
+/** The default branches a push to `repo` must not update (#173): what the claims say, else main and master. */
+export function defaultBranchesOf(claims: CodebookClaim[], repo: string): string[] {
+  const named = [...new Set(claims.map(one => one.defaults?.[repo]).filter((name): name is string => typeof name === 'string'))]
+  return named.length > 0 ? named : ['main', 'master']
+}
+
+/**
+ * The branches a plain push updates (#173), from its refspecs and the folder's current branch (`current`, for no
+ * refspec or `HEAD`): `forced` for a force, a deletion or any option beyond a plain push (pushSpecOf), `unknown`
+ * for what cannot be told (a wildcard, `HEAD` on a detached checkout). Tags and other refs are not branches.
+ */
+export type Pushed = { kind: 'forced' } | { kind: 'unknown' } | { kind: 'branches'; branches: string[] }
+export function pushedOf(spec: PushSpec, current: string | null): Pushed {
+  if (!spec.isPlain) return { kind: 'forced' }
+  if (spec.refs.length === 0) return { kind: 'branches', branches: current ? [current] : [] }
+  const branches: string[] = []
+  for (const ref of spec.refs) {
+    if (ref.startsWith('+')) return { kind: 'forced' }
+    const parts = ref.split(':')
+    if (parts.length > 2 || ref.includes('*')) return { kind: 'unknown' }
+    if (parts.length === 2 && parts[0] === '') return { kind: 'forced' }
+    const to = destinationOf(parts, current)
+    if (to.kind === 'unknown') return { kind: 'unknown' }
+    if (to.kind === 'branch') branches.push(to.branch)
+  }
+  return { kind: 'branches', branches: [...new Set(branches)] }
+}
+
+/** Ref namespaces git may resolve an unqualified destination into (`tags/v1` is refs/tags/v1), besides `heads/`. */
+const NAMESPACES = /^(?:heads|tags|remotes|notes|pull|merge-requests|changes|stash)(?:\/|$)/
+
+/**
+ * The branch a refspec's destination names (#173), as git resolves it on the remote: `refs/heads/x` and `heads/x` are
+ * branch x; `HEAD` alone is the current branch; any other `refs/…` is not a branch (a tag). Anything else that is not
+ * a plain branch name is `unknown`: a namespace git may resolve it into (`tags/`, `remotes/`, a second `heads/`), an
+ * explicit `HEAD` destination (the remote's HEAD is its default branch), or characters no branch name may have.
+ */
+export function destinationOf(parts: string[], current: string | null): { kind: 'branch'; branch: string } | { kind: 'other' } | { kind: 'unknown' } {
+  let to = parts[1] ?? parts[0] ?? ''
+  if (to === 'HEAD') {
+    if (parts.length === 2 || !current) return { kind: 'unknown' }
+    to = current
+  }
+  if (to.startsWith('refs/heads/')) to = to.slice('refs/heads/'.length)
+  else if (to.startsWith('refs/')) return { kind: 'other' }
+  else if (to.startsWith('heads/')) to = to.slice('heads/'.length)
+  if (to === '' || to === 'HEAD' || to.startsWith('refs/') || NAMESPACES.test(to)) return { kind: 'unknown' }
+  if (/[\s~^:?*[\\]|\.\.|@\{|^[-/.]|[/.]$|\/\/|\.lock(?:\/|$)/.test(to)) return { kind: 'unknown' }
+  return { kind: 'branch', branch: to }
 }
 
 /**
@@ -90,7 +182,7 @@ export function liveClaims(claims: CodebookClaim[], now: number): CodebookClaim[
  *
  *   - `worker`: this loop holds runs. It may reach their repositories and nothing else (it is a station's worker).
  *   - `bystander`: this loop holds none, while other loops of the session do. It may reach any repository except the
- *     ones those runs work on (it has no lease there); a repository no held run works on is its own business.
+ *     ones those runs hold (ownedOf: a write-capable run's own repository, #173); any other repository is its own business.
  *   - `free`: nothing is held. The guard stands aside.
  */
 export type Lease =
@@ -105,7 +197,8 @@ export function leaseOf(all: CodebookClaim[], agentId: string | undefined, now: 
   const loop = agentId || undefined
   const own = claims.filter(one => (one.agentId || undefined) === loop)
   if (own.length > 0) return { kind: 'worker', runs: own.map(one => one.run), allowed: [...new Set(own.flatMap(one => one.repos))] }
-  return { kind: 'bystander', runs: claims.map(one => one.run), held: [...new Set(claims.flatMap(one => one.repos))] }
+  // Only what write-capable runs hold blocks a bystander (#173): a read-only run holds nothing, a run only its own repository.
+  return { kind: 'bystander', runs: claims.map(one => one.run), held: [...new Set(claims.flatMap(ownedOf))] }
 }
 
 /** Whether a loop with this lease may reach `repo` (null: a repository the guard could not tell, never allowed). */
@@ -467,11 +560,10 @@ export function sentBranchOf(spec: PushSpec, current: string | null): string | n
   for (const ref of spec.refs) {
     const parts = ref.split(':')
     if (parts.length > 2 || parts.some(part => part === '') || ref.startsWith('+') || ref.includes('*')) return null
-    let branch = parts[1] ?? parts[0] ?? ''
-    if (branch === 'HEAD') branch = current ?? ''
-    branch = branch.replace(/^refs\/heads\//, '')
-    if (branch === '' || branch.startsWith('refs/') || (sent !== null && sent !== branch)) return null
-    sent = branch
+    // `refs/heads/x` and `heads/x` are branch x (#173); a tag, an unknown namespace or a second branch is not one branch.
+    const to = destinationOf(parts, current)
+    if (to.kind !== 'branch' || (sent !== null && sent !== to.branch)) return null
+    sent = to.branch
   }
   return sent
 }
