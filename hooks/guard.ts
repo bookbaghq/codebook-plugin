@@ -131,17 +131,34 @@ export function pushedOf(spec: PushSpec, current: string | null): Pushed {
     const parts = ref.split(':')
     if (parts.length > 2 || ref.includes('*')) return { kind: 'unknown' }
     if (parts.length === 2 && parts[0] === '') return { kind: 'forced' }
-    let branch = parts[1] ?? parts[0] ?? ''
-    if (branch === 'HEAD') {
-      if (!current) return { kind: 'unknown' }
-      branch = current
-    }
-    if (branch.startsWith('refs/') && !branch.startsWith('refs/heads/')) continue
-    branch = branch.replace(/^refs\/heads\//, '')
-    if (branch === '') return { kind: 'unknown' }
-    branches.push(branch)
+    const to = destinationOf(parts, current)
+    if (to.kind === 'unknown') return { kind: 'unknown' }
+    if (to.kind === 'branch') branches.push(to.branch)
   }
   return { kind: 'branches', branches: [...new Set(branches)] }
+}
+
+/** Ref namespaces git may resolve an unqualified destination into (`tags/v1` is refs/tags/v1), besides `heads/`. */
+const NAMESPACES = /^(?:heads|tags|remotes|notes|pull|merge-requests|changes|stash)(?:\/|$)/
+
+/**
+ * The branch a refspec's destination names (#173), as git resolves it on the remote: `refs/heads/x` and `heads/x` are
+ * branch x; `HEAD` alone is the current branch; any other `refs/…` is not a branch (a tag). Anything else that is not
+ * a plain branch name is `unknown`: a namespace git may resolve it into (`tags/`, `remotes/`, a second `heads/`), an
+ * explicit `HEAD` destination (the remote's HEAD is its default branch), or characters no branch name may have.
+ */
+export function destinationOf(parts: string[], current: string | null): { kind: 'branch'; branch: string } | { kind: 'other' } | { kind: 'unknown' } {
+  let to = parts[1] ?? parts[0] ?? ''
+  if (to === 'HEAD') {
+    if (parts.length === 2 || !current) return { kind: 'unknown' }
+    to = current
+  }
+  if (to.startsWith('refs/heads/')) to = to.slice('refs/heads/'.length)
+  else if (to.startsWith('refs/')) return { kind: 'other' }
+  else if (to.startsWith('heads/')) to = to.slice('heads/'.length)
+  if (to === '' || to === 'HEAD' || to.startsWith('refs/') || NAMESPACES.test(to)) return { kind: 'unknown' }
+  if (/[\s~^:?*[\\]|\.\.|@\{|^[-/.]|[/.]$|\/\/|\.lock(?:\/|$)/.test(to)) return { kind: 'unknown' }
+  return { kind: 'branch', branch: to }
 }
 
 /**
@@ -543,11 +560,10 @@ export function sentBranchOf(spec: PushSpec, current: string | null): string | n
   for (const ref of spec.refs) {
     const parts = ref.split(':')
     if (parts.length > 2 || parts.some(part => part === '') || ref.startsWith('+') || ref.includes('*')) return null
-    let branch = parts[1] ?? parts[0] ?? ''
-    if (branch === 'HEAD') branch = current ?? ''
-    branch = branch.replace(/^refs\/heads\//, '')
-    if (branch === '' || branch.startsWith('refs/') || (sent !== null && sent !== branch)) return null
-    sent = branch
+    // `refs/heads/x` and `heads/x` are branch x (#173); a tag, an unknown namespace or a second branch is not one branch.
+    const to = destinationOf(parts, current)
+    if (to.kind !== 'branch' || (sent !== null && sent !== to.branch)) return null
+    sent = to.branch
   }
   return sent
 }

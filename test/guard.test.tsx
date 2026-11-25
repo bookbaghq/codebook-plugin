@@ -1211,3 +1211,68 @@ test('push guard still refuses foreign branches and default', async ($, on) => {
   expect(pushedOf({ refs: ['HEAD'], isPlain: true }, null)).toEqual({ kind: 'unknown' })
   expect(pushedOf({ refs: [], isPlain: true }, null)).toEqual({ kind: 'branches', branches: [] })
 })
+
+test('push guard resolves heads/ destinations', async ($, on) => {
+  // QA run 1525: `HEAD:heads/main` was read as a branch named heads/main; git resolves it to refs/heads/main.
+  const spec = (...refs: string[]) => ({ refs, isPlain: true })
+  expect(pushedOf(spec('HEAD:heads/main'), 'x')).toEqual({ kind: 'branches', branches: ['main'] })
+  expect(pushedOf(spec('heads/main'), 'x')).toEqual({ kind: 'branches', branches: ['main'] })
+  expect(pushedOf(spec('HEAD:refs/heads/codebook/SD-1-x'), 'x')).toEqual({ kind: 'branches', branches: ['codebook/SD-1-x'] })
+  expect(pushedOf(spec('HEAD:heads/codebook/SD-1-x'), 'x')).toEqual({ kind: 'branches', branches: ['codebook/SD-1-x'] })
+  // Any other destination that is not a plain branch name and not refs/… is unknown.
+  for (const ref of ['HEAD:heads/heads/main', 'HEAD:tags/v1', 'tags/v1', 'HEAD:remotes/origin/main', 'x:HEAD', 'HEAD:heads/', 'HEAD:main..x', 'HEAD:a~1', 'HEAD:-main'])
+    expect(pushedOf(spec(ref), 'x')).toEqual({ kind: 'unknown' })
+  // A tag under refs/ is not a branch; a plain name with slashes is.
+  expect(pushedOf(spec('refs/tags/v1', 'codebook/SD-1-x'), 'x')).toEqual({ kind: 'branches', branches: ['codebook/SD-1-x'] })
+  expect([sentBranchOf(spec('HEAD:heads/main'), 'x'), sentBranchOf(spec('heads/x'), null), sentBranchOf(spec('HEAD:tags/v1'), 'x'), sentBranchOf(spec('HEAD:refs/heads/x'), null)])
+    .toEqual(['main', 'x', null, 'x'])
+
+  // A worker that holds its repository alone: `heads/main` is the default branch, a namespace it cannot read is refused.
+  const ran = parallel(on)
+  await $.tool.call(claim(1491, 'worker-1'))
+  const deny = async (command: string, agentId?: string) => String((await $.tool.call(bash(command, agentId))).deny ?? '')
+  for (const ref of ['HEAD:heads/main', 'heads/main', 'HEAD:refs/heads/main'])
+    expect(await deny(`git -C /Users/me/code/app-167 push origin ${ref}`, 'worker-1')).toContain('would update the default branch main of bookbaghq/codebook-app')
+  for (const ref of ['HEAD:tags/main', 'HEAD:heads/heads/main', 'HEAD:remotes/origin/main', 'codex/SD-167-run-1462:HEAD'])
+    expect(await deny(`git -C /Users/me/code/app-167 push origin ${ref}`, 'worker-1')).toContain('the guard cannot tell which branches it updates')
+  // So is a loop with no run, and a declared branch spelled heads/main excuses nothing.
+  await $.tool.call({ tool: OWN + 'declare_work', run: 1491, fence: 1, repository: 'bookbaghq/codebook-app', worktree: '~/code/app', branch: 'main', agentId: 'worker-1' } as never)
+  expect(await deny('git -C ~/code/app push origin HEAD:heads/main', 'track-j6')).toContain('which CodeBook run 1491 works on')
+  // Its own branch, spelled any of these ways, goes through.
+  await $.tool.call(bash('git -C /Users/me/code/app-167 push origin HEAD:heads/codex/SD-167-run-1462', 'worker-1'))
+  await $.tool.call(bash('git -C /Users/me/code/app-167 push origin HEAD:refs/heads/codex/SD-167-run-1462', 'worker-1'))
+  expect(ran).toEqual([
+    'git -C /Users/me/code/app-167 push origin HEAD:heads/codex/SD-167-run-1462',
+    'git -C /Users/me/code/app-167 push origin HEAD:refs/heads/codex/SD-167-run-1462',
+  ])
+})
+
+test('default branch stays protected in any claimed repository', async ($, on) => {
+  // Only read-only runs are live: they hold nothing against a loop's story branch, but every repository their briefs
+  // list keeps its default branch and refuses a force or a deletion, from any loop (the manager's decision, QA 1525).
+  const ran = parallel(on)
+  await $.tool.call(claim(1476, 'design-1'))
+  await $.tool.call(claim(1501, 'requirements-1'))
+  const deny = async (command: string, agentId?: string) => String((await $.tool.call(bash(command, agentId))).deny ?? '')
+  for (const agent of [undefined, 'track-j6', 'design-1']) {
+    for (const ref of ['HEAD:main', 'HEAD:heads/main', 'main'])
+      expect(await deny(`git -C /Users/me/code/sso push origin ${ref}`, agent)).toContain('would update the default branch main of bookbaghq/sso')
+    expect(await deny('git -C /Users/me/code/app push origin main', agent)).toContain('would update the default branch main of bookbaghq/codebook-app')
+    expect(await deny('git -C /Users/me/code/app push', agent)).toContain('would update the default branch main of bookbaghq/codebook-app')
+    for (const command of ['push --force origin codebook/SD-60-run-1600', 'push origin +codebook/SD-60-run-1600', 'push origin :codebook/SD-60-run-1600', 'push --delete origin x', 'push --force-with-lease origin x'])
+      expect(await deny(`git -C /Users/me/code/sso ${command}`, agent)).toContain('reaches bookbaghq/sso as a force push, a deletion or more than a plain push of branches')
+    expect(await deny('git -C /Users/me/code/sso push origin HEAD:tags/v1', agent)).toContain('the guard cannot tell which branches it updates')
+  }
+  // The refusal names the runs whose briefs list the repository.
+  expect(await deny('git -C /Users/me/code/sso push origin main')).toContain('which the guard always refuses while CodeBook run 1476, 1501 is worked here')
+  expect(ran).toEqual([])
+  // Story branches go through; a repository no live claim mentions is not the guard's at all.
+  await $.tool.call(bash('git -C /Users/me/code/sso push origin codebook/SD-60-run-1600'))
+  await $.tool.call(bash('git -C /Users/me/code/other push origin main'))
+  await $.tool.call(bash('git -C /Users/me/code/other push --force origin main', 'track-j6'))
+  expect(ran).toEqual([
+    'git -C /Users/me/code/sso push origin codebook/SD-60-run-1600',
+    'git -C /Users/me/code/other push origin main',
+    'git -C /Users/me/code/other push --force origin main',
+  ])
+})

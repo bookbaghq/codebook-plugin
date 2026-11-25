@@ -243,6 +243,24 @@ async function branchSaid($: EngineInterface, target: Target): Promise<string> {
 }
 
 /**
+ * The refusal every loop gets in a repository any live claim lists (#173, manager's decision): a force, a deletion or
+ * more than a plain push of branches; a push whose branches the guard cannot tell; the default branch. Otherwise the
+ * branches the push updates. `runs` are the runs named as worked here; `own` the pushing loop's claims (none for a
+ * loop that holds no run).
+ */
+async function protectedRefusal($: EngineInterface, held: CodebookClaim[], runs: number[], own: CodebookClaim[], target: Target, repo: string): Promise<string | { kind: 'branches'; branches: string[] }> {
+  const what = target.kind === 'push' ? `git push to ${target.remote ?? 'the branch\'s default remote'}` : 'gh pr create'
+  const yours = `Push your story branch (${storyBranchOf(own)}) plainly, without --force; the factory merges.`
+  const pushed = await pushedFrom($, target)
+  if (pushed.kind === 'forced') return `CodeBook: ${what} reaches ${repo} as a force push, a deletion or more than a plain push of branches (--force, --force-with-lease, +branch, --delete, --tags, --all, --mirror), which the guard always refuses while CodeBook run ${runs.join(', ')} is worked here. ${yours}`
+  if (pushed.kind === 'unknown') return `CodeBook: ${what} reaches ${repo}, and the guard cannot tell which branches it updates (a wildcard, a destination such as tags/… or HEAD, HEAD on a detached checkout, or push.default / remote.<name>.push configuration), so it was not run while CodeBook run ${runs.join(', ')} is worked here. Name the branch: git -C <worktree> push <remote> <branch>. ${yours}`
+  const defaults = defaultBranchesOf(held.filter(one => one.repos.includes(repo)), repo)
+  const main = pushed.branches.find(branch => defaults.includes(branch))
+  if (main !== undefined) return `CodeBook: ${what} would update the default branch ${main} of ${repo}, which the guard always refuses while CodeBook run ${runs.join(', ')} is worked here. ${yours}`
+  return pushed
+}
+
+/**
  * Why a worker's push to `repo`, one of its own repositories, is refused (#173), or null when it goes through: a force,
  * a deletion or more than a plain push of branches; what the guard cannot tell; the default branch; another story's
  * branch in a repository another loop's write-capable run holds.
@@ -250,13 +268,9 @@ async function branchSaid($: EngineInterface, target: Target): Promise<string> {
 async function workerPushRefusal($: EngineInterface, held: CodebookClaim[], runs: number[], target: Target, repo: string): Promise<string | null> {
   const own = held.filter(one => runs.includes(one.run))
   const what = target.kind === 'push' ? `git push to ${target.remote ?? 'the branch\'s default remote'}` : 'gh pr create'
-  const yours = `Push your story branch (${storyBranchOf(own)}) plainly, without --force; the factory merges.`
-  const pushed = await pushedFrom($, target)
-  if (pushed.kind === 'forced') return `CodeBook: ${what} reaches ${repo} as a force push, a deletion or more than a plain push of branches (--force, --force-with-lease, +branch, --delete, --tags, --all, --mirror), which the guard always refuses while CodeBook run ${runs.join(', ')} is worked here. ${yours}`
-  if (pushed.kind === 'unknown') return `CodeBook: ${what} reaches ${repo}, and the guard cannot tell which branches it updates (a wildcard, HEAD on a detached checkout, or push.default / remote.<name>.push configuration), so it was not run while CodeBook run ${runs.join(', ')} is worked here. Name the branch: git -C <worktree> push <remote> <branch>. ${yours}`
-  const defaults = defaultBranchesOf(held.filter(one => one.repos.includes(repo)), repo)
-  const main = pushed.branches.find(branch => defaults.includes(branch))
-  if (main !== undefined) return `CodeBook: ${what} would update the default branch ${main} of ${repo}, which the guard always refuses while CodeBook run ${runs.join(', ')} is worked here. ${yours}`
+  const kept = await protectedRefusal($, held, runs, own, target, repo)
+  if (typeof kept === 'string') return kept
+  const pushed = kept
   const others = held.filter(one => !runs.includes(one.run) && ownedOf(one).includes(repo))
   if (others.length === 0) return null
   const foreign = pushed.branches.find(branch => !own.some(one => one.branch === branch || carriesKey(branch, one.key)))
@@ -479,7 +493,17 @@ export const register: Register = (on, options) => {
       if (!Array.isArray(found)) return { deny: `CodeBook: the repository guard did not run this while CodeBook run ${runs} is worked here: ${found.deny}` }
       for (const repo of found) {
         if (mayReach(lease, repo)) {
-          if (lease.kind !== 'worker' || target.kind !== 'push' || repo === null) continue
+          if (target.kind !== 'push' || repo === null) continue
+          if (lease.kind === 'bystander') {
+            // Any loop, in any repository a live claim lists (read-only runs' included): never the default branch, never
+            // forced (#173, manager's decision). A repository no live claim mentions stays the loop's own business.
+            const listing = held.filter(one => one.repos.includes(repo))
+            if (listing.length === 0) continue
+            const kept = await protectedRefusal($, held, listing.map(one => one.run), [], target, repo)
+            if (typeof kept === 'string') return { deny: kept }
+            continue
+          }
+          if (lease.kind !== 'worker') continue
           // A worker's push in its own repositories (#173): never the default branch, never forced, and in a repository
           // another loop's write-capable run holds, only its own story's branches (its declared one, or one carrying its key).
           const refused = await workerPushRefusal($, held, lease.runs, target, repo)
