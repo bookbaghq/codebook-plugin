@@ -12,6 +12,7 @@ const REPORT = 'https://app.codebook.work/kanban/api/proof/report'
 type World = {
   /** What each recipe line exits with and prints, by the folder it ran in ("head" or "baseline"). */
   results: Record<string, { exit: number; output: string }>
+  collector?: { tree?: string; physical?: string; untracked?: string }
   dirty?: boolean
   origin?: string
   waiting?: boolean
@@ -58,6 +59,9 @@ function world(on: On, w: World) {
     const argv = [...e.argv]
     processes.push(argv)
     const joined = argv.join(' ')
+    if (w.collector && argv[0] === 'realpath') return out((argv[1] === DIR ? DIR : (w.collector.physical ?? argv[1])) + '\n') as never
+    if (w.collector && argv.includes('ls-tree')) return out(w.collector.tree ?? ('100644 blob ' + HEAD + '\tproof/whiteboard/editing.test.mjs\0')) as never
+    if (w.collector && argv.includes('ls-files')) return out(w.collector.untracked ?? '') as never
     if (argv[0] === 'uname') return out(`${w.system ?? 'Darwin'}\n`) as never
     if (argv[0] === '/bin/sh' && argv[2] === 'command -v node') return (w.node === null ? out('', 1) : out(`${w.node ?? '/opt/homebrew/bin/node'}\n`)) as never
     if (argv[0] === 'cat' && argv[1]?.includes('/.codebook/proof/egress-')) return out(w.refusedLog ?? '', w.refusedLog === undefined ? 1 : 0) as never
@@ -103,7 +107,7 @@ function world(on: On, w: World) {
     const shell = argv.at(-1) ?? ''
     if (argv.includes('/bin/sh')) {
       const where = shell.includes('/.codebook/proof/baseline/') ? 'baseline' : 'head'
-      const line = /&& \{ ([^\n]+)\n\} 2>&1$/.exec(shell)?.[1] ?? ''
+      const line = /&& \{ ([^\n]+)\n\}(?: 2>&1)?$/.exec(shell)?.[1] ?? ''
       const result = w.results[`${where}:${line}`] ?? { exit: 127, output: `no such line: ${line}` }
       return out(result.output, result.exit) as never
     }
@@ -120,8 +124,8 @@ function world(on: On, w: World) {
   const answer = (tool: string, args: Record<string, unknown>) =>
     tool === 'claim_proof'
       ? args.peek
-        ? { waiting: w.waiting === false ? [] : [{ proof: 70, repository: 'acme/payments', default_branch: 'main', commands: ['test'], commit: w.commit ?? null }] }
-        : { proof: 70, token: TOKEN, report_url: REPORT, report_path: '/kanban/api/proof/report', repository: { id: 5, full_name: 'acme/payments', default_branch: 'main' }, expected_commit: null, recipe: { revision: 2, install: 'npm ci', network: 'loopback', ...(w.recipe ?? {}) }, steps }
+        ? { waiting: w.waiting === false ? [] : [{ proof: 70, ...(w.collector ? {case_report_version:1} : {}), repository: 'acme/payments', default_branch: 'main', commands: ['test'], commit: w.commit ?? null }] }
+        : { proof: 70, token: TOKEN, report_url: REPORT, report_path: '/kanban/api/proof/report', repository: { id: 5, full_name: 'acme/payments', default_branch: 'main' }, expected_commit: w.collector ? HEAD : null, recipe: { revision: 2, install: 'npm ci', network: 'loopback', ...(w.recipe ?? {}) }, steps }
       : tool === 'request_proof'
         ? { proof: 70, where: 'here', repository: 'acme/payments', commands: [{ name: 'test', status: 'queued' }] }
         : tool === 'claim_work'
@@ -226,6 +230,31 @@ test('the model asks; the plugin runs the check boxed and reports it itself, and
   expect(JSON.stringify(asked.result)).not.toContain(TOKEN)
 })
 
+test('the approved case directory runs its fixed command separately from the suite and sends complete scoped stdout', async ($, on) => {
+  const line = 'node --test --test-reporter=junit', directory = 'proof/whiteboard'
+  const descriptor = { version:1, directory, definition:9, revision:1, hash:'a'.repeat(64) }
+  const steps = [{run:71,name:'test',line:'npm test',timeout_seconds:90,baseline:false},
+    {run:72,name:'case-report',line,timeout_seconds:90,baseline:false,case_report:descriptor}]
+  const w = world(on,{collector:{},steps,results:{'head:npm test':{exit:1,output:'not ok 1 - unrelated'},
+    ['head:'+line]:{exit:0,output:'<testsuites/>\n'}}})
+  await $.tool.call({tool:OWN+'request_proof',story:'story'} as never)
+  expect(w.mcp[1]?.args.case_report_version).toBe(1)
+  expect(w.processes.find(argv=>argv[0]==='/usr/bin/sandbox-exec' && argv.at(-1)?.includes(line))?.at(-1)).toContain(DIR+'/'+directory)
+  expect(w.reports.map(r=>r.body.exit_code)).toEqual([1,0])
+  expect(w.reports[1]?.body.case_report).toEqual(descriptor)
+  expect(w.reports[1]?.body.complete).toBe(true)
+  expect(w.reports[1]?.body.output).toBe('<testsuites/>\n')
+})
+
+test('a physical symlink escape cannot launch an approved case command', async ($, on) => {
+  const line = 'node --test --test-reporter=junit'
+  const step = { run:72,name:'case-report',line,timeout_seconds:30,baseline:false,case_report:{version:1,directory:'proof/whiteboard',definition:9,revision:1,hash:'a'.repeat(64)} }
+  const w = world(on,{collector:{physical:'/external/whiteboard'},steps:[step],results:{}})
+  await $.tool.call({tool:OWN+'request_proof',story:'story'} as never)
+  expect(w.processes.some(argv=>argv[0]==='/usr/bin/sandbox-exec' && argv.at(-1)?.includes(line))).toBe(false)
+  expect(w.reports[0]?.body.complete).toBe(false)
+  expect(w.reports[0]?.body.error).toContain('approved case directory')
+})
 test('a failing check is run again on the default branch, in a worktree of its own, and reported first', async ($, on) => {
   const steps = [
     { run: 71, name: 'test', line: 'npm test', timeout_seconds: 900, baseline: false },
