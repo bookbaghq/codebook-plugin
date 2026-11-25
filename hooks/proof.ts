@@ -473,7 +473,11 @@ export async function runProof($: EngineInterface, { proof = null, known = [], h
     if (!claim.ok) return { isRun: false, text: claim.message }
     const work = claim.data
     if (!work.proof || !work.token || !work.report_url || work.steps?.length !== 1 || !work.steps[0]?.local_browser) return { isRun: false, text: 'This native browser proof is no longer available.' }
-    const payload = await captureForMilestone($, work, dir, head, isDirty)
+    let profile: string | undefined
+    if (work.steps[0].local_browser.adapter === 'node-loopback-v1' && (await findSandbox($)).kind === 'seatbelt') {
+      profile = seatbeltProfile({ dirs: ['__CODEBOOK_DISPOSABLE_SITE__'], home: (await $.env.get('HOME')) ?? '', network: 'loopback' })
+    }
+    const payload = await captureForMilestone($, work, dir, head, isDirty, profile)
     const answer = await report($, work, payload)
     const outcome = answer.status === 'passed' || answer.status === 'failed' ? `Receipt ${work.proof} ${answer.status}.` : 'No verified browser receipt was issued.'
     return { isRun: true, text: answer.ok ? outcome : `CodeBook could not record the browser capture: ${answer.message}` }

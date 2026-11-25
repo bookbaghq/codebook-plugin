@@ -2,8 +2,9 @@
 // repository and the server-issued static-site specification. Its output is never parsed from app logs.
 import { spawn, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, readdirSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, readdirSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { once } from 'node:events';
+import { createServer } from 'node:net';
 import { tmpdir, homedir } from 'node:os';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
@@ -55,6 +56,50 @@ srv=ThreadingHTTPServer(('127.0.0.1',0),Handler)
 print(srv.server_port,flush=True)
 srv.serve_forever()`;
 
+async function startNodeSite(site,temp,script,template) {
+    if (process.platform !== 'darwin' || !template?.includes('__CODEBOOK_DISPOSABLE_SITE__')) throw Error('A native Seatbelt sandbox is required for a dynamic app.');
+    let line = script.start;
+    if (line === 'npm start') {
+        // Read the pinned manifest. Do not execute npm lifecycle hooks or a shell.
+        const pkg = JSON.parse(readFileSync(path.join(site,'package.json'),'utf8'));
+        if (pkg.scripts?.prestart || pkg.scripts?.poststart) throw Error('Lifecycle scripts are unsupported.');
+        line = pkg.scripts?.start;
+    }
+    const match = /^node ([A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)*\.(?:[cm]?js))$/.exec(line || '');
+    if (!match || !existsSync(path.join(site,match[1]))) throw Error('The approved Node entry point is unavailable.');
+    const reserve = createServer();
+    reserve.listen(0,'127.0.0.1'); await once(reserve,'listening');
+    const port = reserve.address().port;
+    await new Promise((resolve,reject) => reserve.close(err => err ? reject(err) : resolve()));
+    const real = realpathSync(site), safe = JSON.stringify(real);
+    const writable = path.join(realpathSync(temp),'data');
+    mkdirSync(writable);
+    // Keep the engine's sandbox and narrow it for application code: no other local service,
+    // background child, credential store or direct access to the original checkout.
+    const profile = template.replace('"__CODEBOOK_DISPOSABLE_SITE__"',safe) + '\n' + [
+        '(deny network*)', '(allow network-bind (local ip "localhost:' + port + '"))',
+        '(allow network-inbound (local ip "localhost:' + port + '"))',
+        '(deny process-fork)', '(deny file-write*)','(allow file-write* (subpath ' + JSON.stringify(writable) + '))',
+    ].join('\n');
+    const app = spawn('/usr/bin/sandbox-exec',['-p',profile,process.execPath,'--permission','--allow-fs-read='+real,'--allow-fs-write='+writable,path.join(real,match[1])],
+        {cwd:real,env:{...cleanEnv,HOME:writable,TMPDIR:writable,PORT:String(port),HOST:'127.0.0.1',NODE_ENV:'test'},stdio:'ignore'});
+    try {
+        const end = Date.now()+8000;
+        // Kernel ownership prevents a different local server from winning the free-port race.
+        while (Date.now()<end && app.exitCode === null && app.signalCode === null) {
+            try {
+                const sockets = execFileSync('/usr/sbin/lsof',['-nP','-a','-p',String(app.pid),'-iTCP:'+port,'-sTCP:LISTEN','-Fn'],{encoding:'utf8',stdio:['ignore','pipe','ignore']});
+                if (sockets.split('\n').includes('n127.0.0.1:'+port)) return {app,port};
+            } catch { /* The app may still be starting. */ }
+            await new Promise(resolve=>setTimeout(resolve,75));
+        }
+        throw Error('The approved Node app did not own the requested loopback port.');
+    } catch (e) {
+        if (app.exitCode === null && app.signalCode === null) { const ended=once(app,'exit');app.kill('SIGKILL');await ended; }
+        throw e;
+    }
+}
+
 function devtools(proc) {
     let id = 0, pending = new Map(), buffer = '';
     const listeners = new Map();
@@ -91,9 +136,9 @@ function installedChromium() {
     return [...cached,'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome','/usr/bin/chromium','/usr/bin/chromium-browser','/usr/bin/google-chrome'].find(existsSync);
 }
 
-export async function capture({ dir, commit, repository, script }) {
+export async function capture({ dir, commit, repository, script, dynamicSandbox }) {
     cleanHead(dir,repository,commit);
-    if (script.adapter !== 'python-static-v1' || !script.path.startsWith('/') || script.path.startsWith('//')) throw Error('Unsupported static-site specification.');
+    if (!['python-static-v1','node-loopback-v1'].includes(script.adapter) || !script.path.startsWith('/') || script.path.startsWith('//')) throw Error('Unsupported static-site specification.');
     const chrome = installedChromium();
     if (!chrome) throw Error('A system Chrome or Chromium installation is required.');
     const temp = mkdtempSync(path.join(tmpdir(),'codebook-browser-'));
@@ -102,10 +147,15 @@ export async function capture({ dir, commit, repository, script }) {
     const timeout = setTimeout(() => { browser?.kill('SIGKILL'); app?.kill('SIGKILL'); }, 45000);
     try {
         exportSite(dir,commit,site);
-        app = spawn('python3',['-I','-u','-c',appProgram],{ cwd:site, env:cleanEnv,stdio:['ignore','pipe','ignore'] });
-        const lines = createInterface({ input:app.stdout });
-        const port = Number((await Promise.race([once(lines,'line'),once(app,'exit').then(() => { throw Error('Static app did not start.'); })]))[0]);
-        if (!Number.isInteger(port) || port < 1 || port > 65535) throw Error('Static app did not bind its loopback port.');
+        let port;
+        if (script.adapter === 'node-loopback-v1') {
+            ({app,port} = await startNodeSite(site,temp,script,dynamicSandbox));
+        } else {
+            app = spawn('python3',['-I','-u','-c',appProgram],{ cwd:site, env:cleanEnv,stdio:['ignore','pipe','ignore'] });
+            const lines = createInterface({ input:app.stdout });
+            port = Number((await Promise.race([once(lines,'line'),once(app,'exit').then(() => { throw Error('Static app did not start.'); })]))[0]);
+            if (!Number.isInteger(port) || port < 1 || port > 65535) throw Error('Static app did not bind its loopback port.');
+        }
         const origin = 'http://127.0.0.1:' + port;
         const targetUrl = new URL(script.path, origin);
         if (targetUrl.origin !== origin) throw Error('Page outside the disposable app.');
@@ -115,8 +165,9 @@ export async function capture({ dir, commit, repository, script }) {
         const { targetId } = await cdp.call('Target.createTarget',{url:'about:blank'});
         const { sessionId } = await cdp.call('Target.attachToTarget',{targetId,flatten:true});
         const call = (method,params) => cdp.call(method,params,sessionId);
+        const mainFrame = (await call('Page.getFrameTree')).frameTree.frame.id;
         let navigationStatus = 0;
-        cdp.on('Network.responseReceived', ev => { if (ev.sessionId === sessionId && ev.params.type === 'Document') navigationStatus = ev.params.response.status; });
+        cdp.on('Network.responseReceived', ev => { if (ev.sessionId === sessionId && ev.params.type === 'Document' && ev.params.frameId === mainFrame) navigationStatus = ev.params.response.status; });
         cdp.on('Fetch.requestPaused', ev => {
             const permitted = new URL(ev.params.request.url).origin === origin;
             void call(permitted ? 'Fetch.continueRequest' : 'Fetch.failRequest', { requestId:ev.params.requestId, ...(permitted ? {} : {errorReason:'BlockedByClient'}) }).catch(() => {});
@@ -133,8 +184,8 @@ export async function capture({ dir, commit, repository, script }) {
         if (navigation.errorText || !navigationStatus) throw Error('The disposable app did not respond.');
         const actual = new URL(await evaluate('location.href'));
         if (actual.origin !== origin) throw Error('Navigation left the disposable static app.');
-        const trace = [{index:0,op:'navigate',ok:navigationStatus >= 200 && navigationStatus < 400 && actual.pathname === targetUrl.pathname,
-            http_status:navigationStatus,path_sha256:sha256(actual.pathname)}];
+        const trace = [{index:0,op:'navigate',ok:navigationStatus >= 200 && navigationStatus < 400 && actual.pathname === script.final_path,
+            http_status:navigationStatus,path_sha256:sha256(actual.pathname),requested_path_sha256:sha256(targetUrl.pathname)}];
         for (const action of script.actions) {
             if (!trace.at(-1).ok) break;
             const [op,value] = Object.entries(action)[0], literal = JSON.stringify(value);
@@ -158,7 +209,7 @@ export async function capture({ dir, commit, repository, script }) {
         const shot = await call('Page.captureScreenshot',{format:'jpeg',quality:55});
         if (shot.data.length > 400000) throw Error('Screenshot exceeds the receipt size limit.');
         cleanHead(dir,repository,commit);
-        return { executor:'codebook-plugin-static-v1', spec_sha256:script.spec_sha256, trace, trace_sha256:sha256(JSON.stringify(trace)), screenshot:shot.data, screenshot_sha256:sha256(Buffer.from(shot.data,'base64')) };
+        return { executor:script.adapter === 'node-loopback-v1' ? 'codebook-plugin-node-v1' : 'codebook-plugin-static-v1', spec_sha256:script.spec_sha256, trace, trace_sha256:sha256(JSON.stringify(trace)), screenshot:shot.data, screenshot_sha256:sha256(Buffer.from(shot.data,'base64')) };
     } finally {
         clearTimeout(timeout);
         for (const child of [browser,app]) if (child && child.exitCode === null && child.signalCode === null) {
