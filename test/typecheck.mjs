@@ -75,7 +75,7 @@ export function findHostTypes() {
   return { file: null, version, searched }
 }
 
-test('the type check passes with no errors', { timeout: 300000 }, () => {
+test('the type check passes with no errors', { timeout: 300000 }, (t) => {
   const host = findHostTypes()
   assert.ok(host.file, [
     'The claude-code type declarations were not found, so nothing can be type-checked.',
@@ -83,6 +83,7 @@ test('the type check passes with no errors', { timeout: 300000 }, () => {
     ...host.searched.map((s) => `  ${s}`),
     'Start a Claude Code session once (it writes them beside its plugin-authoring skill), or set CLAUDE_CODE_TYPES.',
   ].join('\n'))
+  t.diagnostic(`Using ${TYPESCRIPT} with declarations from ${host.from}.`)
 
   const dir = mkdtempSync(join(tmpdir(), 'codebook-typecheck-'))
   try {

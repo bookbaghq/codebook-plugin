@@ -447,16 +447,16 @@ On your computer that program is this plugin.
 
 ```bash
 claude plugin validate .
-claude plugin test .
+node scripts/test-factory.mjs --typecheck
 node --test test/rule-texts.mjs
-node --test test/typecheck.mjs
 claude --plugin-dir .
 ```
 
-`claude plugin test` loads code files only, so the checks on what the skill and the agent say (`test/rule-texts.mjs`)
-run with Node, and so does the type check (`test/typecheck.mjs`). `claude-code` is declared by Claude Code itself, not
-by a package: the check finds the declarations the installed Claude Code writes beside its plugin-authoring skill (or
-`CLAUDE_CODE_TYPES`, a `claude-code.d.ts`), and fails, naming what it searched, when there are none.
+The local test command type-checks the plugin before running its native tests. Run the type check on its own with
+`node --test test/typecheck.mjs`, or put specific native test files after `--typecheck` to run those with it.
+The check uses Claude Code declarations from its plugin-authoring skill or a `claude-code.d.ts` selected through
+`CLAUDE_CODE_TYPES`. It reports which declarations it used, including when it falls back to the newest cached version,
+or where it looked if none were found.
 
 `scripts/art.sh <folder of PNGs>` rebuilds `hooks/art.ts` from the illustrations.
 

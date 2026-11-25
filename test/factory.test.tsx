@@ -4,6 +4,9 @@ import type { On } from 'claude-code'
 import { splitRun } from '../hooks/factory'
 import { CONTINUATION_STORE } from '../hooks/continuation'
 
+// The native test runtime provides timers. The plugin host's hook declarations omit them.
+declare function setTimeout(callback: () => void, delay: number): unknown
+
 // A story in the "Payments" factory: Plan passed, Build waits for this person's runner, Review is a person (you).
 const BOARD = {
   factory: 'k3Vb9QmZ',
@@ -885,7 +888,7 @@ for (const tool of ['start_story', 'confirm_stories']) {
         const starting = tool === 'start_story' ? claudeStarts($) : $.tool.call({ tool: 'mcp__plugin_codebook_codebook__confirm_stories', proposal: 'wo7' } as never)
         await inStore
         const stopping = $.command.run(typed('stop'))
-        await new Promise(resolve => setTimeout(resolve, 10))
+        await new Promise<void>(resolve => setTimeout(resolve, 10))
         release()
         await Promise.all([starting, stopping])
         at.now = 'done'

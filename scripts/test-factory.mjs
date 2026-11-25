@@ -1,6 +1,7 @@
 // The CLI accepts a plugin directory, not a test-file filter, so the files to run are staged in a folder of their own.
 // With no arguments every test/*.test.tsx runs; with file arguments (`node scripts/test-factory.mjs test/guard.test.tsx`)
-// only those do. All connector/clock/store interactions in them use the native plugin test kit's mocks.
+// only those do. Pass --typecheck first to run the local TypeScript check before the native tests.
+// All connector/clock/store interactions in them use the native plugin test kit's mocks.
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
@@ -10,6 +11,8 @@ import { nativeResultsToTap } from './native-test-output.mjs'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const asked = process.argv.slice(2)
+const typecheck = asked[0] === '--typecheck'
+if (typecheck) asked.shift()
 const files = asked.length > 0
   ? asked.map(file => resolve(process.cwd(), file))
   : readdirSync(join(root, 'test')).filter(name => name.endsWith('.test.tsx')).sort().map(name => join(root, 'test', name))
@@ -17,6 +20,11 @@ const missing = files.filter(file => !existsSync(file) || !file.endsWith('.test.
 if (missing.length > 0) {
   console.error(`No such test file (test/<name>.test.tsx): ${missing.join(', ')}`)
   process.exit(2)
+}
+if (typecheck) {
+  const result = spawnSync(process.execPath, ['--test', '--test-reporter=spec', join(root, 'test', 'typecheck.mjs')], { stdio: 'inherit' })
+  if (result.error) console.error(result.error.message)
+  if (result.status !== 0) process.exit(result.status ?? 1)
 }
 const stage = mkdtempSync(join(tmpdir(), 'codebook-factory-tests-'))
 try {
