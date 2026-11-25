@@ -130,6 +130,18 @@ export type CodebookLink =
 
 export type CodebookBacklogPage = { factory: string; lines: string[]; next?: { factory: string; workflow: string; offset: number } }
 
+/** Compact continuation observations belong to this session, independently of the pane selection. */
+export type CodebookContinuation = {
+  generation: number
+  stories: Record<string, { factory: string; reference: string; order: string | null; state: string | null; event: number }>
+  orders: Record<string, { factory: string; reference: string; passes: string[] | null }>
+  feeds: Record<string, number>
+  pending: Record<string, string>
+  nextFactory: number
+  nextOrder: number
+  checkedAt: number
+}
+
 declare module 'claude-code' {
   interface PluginState {
     codebook: {
@@ -152,6 +164,7 @@ declare module 'claude-code' {
       checkouts: Shaped<CodebookCheckout[]>
       trail: Shaped<CodebookTrail | null>
       watched: Shaped<CodebookWatch[]>
+      continuation: Shaped<CodebookContinuation>
     }
   }
 }
