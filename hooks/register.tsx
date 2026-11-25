@@ -10,9 +10,9 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { CodebookActive, CodebookCheckout, CodebookClaim, CodebookLink, CodebookMode, CodebookStory, CodebookWatch } from '../types'
 import { call, words } from './connector'
 import { continuationCurrent, continuationGeneration, flushContinuation, hasContinuation, pollContinuation, restoreContinuation, watchContinuation } from './continuation'
-import { claimOf, expiresOf, leaseOf, liveClaims, mayReach, readCommand } from './guard'
+import { carriesKey, claimOf, defaultBranchesOf, expiresOf, leaseOf, liveClaims, mayReach, ownedOf, readCommand } from './guard'
 import type { Target } from './guard'
-import { checkOne, checkShellWords, folderOf, ownPushOf, reaches, shellState } from './resolve'
+import { checkOne, checkShellWords, folderOf, ownPushOf, pushedFrom, reaches, shellState } from './resolve'
 import { adoptCheckout, askAtStart, askBefore, checkoutLine, contextBlock, outsideCommand, promptNote, sweepCheckouts } from './checkout'
 import type { Reach } from './checkout'
 import { checkoutLines, checkoutsOf, mergeCheckouts } from './local'
@@ -208,15 +208,83 @@ async function isOwnPush($: EngineInterface, held: CodebookClaim[], target: Targ
   return true
 }
 
-/** Each held run as a refusal names it (#145): "run 811 on acme/payments, held by agent worker-1" or "… by the main conversation". */
+/** Who holds a run, as a refusal says it: "agent worker-1" or "the main conversation". */
+const holderOf = (one: CodebookClaim): string => (one.agentId ? `agent ${one.agentId}` : 'the main conversation')
+
+/** When a run's lease lapses, as a refusal says it (#173). */
+const lapsesOf = (one: CodebookClaim): string => (one.expiresAt !== undefined ? `its lease lapses at ${new Date(one.expiresAt).toISOString()}` : 'its lease lapses')
+
+/**
+ * Each held run as a refusal names it (#145, #173): "run 811 on acme/payments, held by agent worker-1 (story SD-167,
+ * branch codex/SD-167-x, lease until …)" or "… by the main conversation". The repositories are the ones it holds
+ * against other loops (ownedOf): a read-only run holds none.
+ */
 function holdersOf(claims: CodebookClaim[]): string {
   return claims
-    .map(one => `run ${one.run} on ${one.repos.length > 0 ? one.repos.join(', ') : 'no repository'}, held by ${one.agentId ? `agent ${one.agentId}` : 'the main conversation'}`)
+    .map(one => {
+      const owned = ownedOf(one)
+      const about = [one.key ? `story ${one.key}` : null, one.branch ? `branch ${one.branch}` : null, one.expiresAt !== undefined ? `lease until ${new Date(one.expiresAt).toISOString()}` : null, one.writesCode === false ? 'read-only' : null].filter(Boolean)
+      return `run ${one.run} on ${owned.length > 0 ? owned.join(', ') : one.writesCode === false ? 'no repository (a read-only run holds none)' : 'no repository'}, held by ${holderOf(one)}${about.length > 0 ? ` (${about.join(', ')})` : ''}`
+    })
     .join('; ')
 }
 
+/** The story branch a worker's runs push (#173): its declared or brief branch, else any branch carrying its key. */
+function storyBranchOf(claims: CodebookClaim[]): string {
+  const named = claims.map(one => one.branch ?? (one.key ? `a branch carrying ${one.key}` : null)).filter(Boolean)
+  return named.length > 0 ? named.join(' or ') : 'your story branch'
+}
+
+/** The branch a push sends, as a bystander's refusal says it (#173): " This push sends branch codex/SD-167-x.", or nothing when it cannot be told. */
+async function branchSaid($: EngineInterface, target: Target): Promise<string> {
+  if (target.kind !== 'push') return ''
+  const pushed = await pushedFrom($, target)
+  return pushed.kind === 'branches' && pushed.branches.length > 0 ? ` This push sends branch ${pushed.branches.join(', ')}.` : pushed.kind === 'forced' ? ' This push is a force push, a deletion or more than a plain push.' : ''
+}
+
+/**
+ * The refusal every loop gets in a repository any live claim lists (#173, manager's decision): a force, a deletion or
+ * more than a plain push of branches; a push whose branches the guard cannot tell; the default branch. Otherwise the
+ * branches the push updates. `runs` are the runs named as worked here; `own` the pushing loop's claims (none for a
+ * loop that holds no run).
+ */
+async function protectedRefusal($: EngineInterface, held: CodebookClaim[], runs: number[], own: CodebookClaim[], target: Target, repo: string): Promise<string | { kind: 'branches'; branches: string[] }> {
+  const what = target.kind === 'push' ? `git push to ${target.remote ?? 'the branch\'s default remote'}` : 'gh pr create'
+  const yours = `Push your story branch (${storyBranchOf(own)}) plainly, without --force; the factory merges.`
+  const pushed = await pushedFrom($, target)
+  if (pushed.kind === 'forced') return `CodeBook: ${what} reaches ${repo} as a force push, a deletion or more than a plain push of branches (--force, --force-with-lease, +branch, --delete, --tags, --all, --mirror), which the guard always refuses while CodeBook run ${runs.join(', ')} is worked here. ${yours}`
+  if (pushed.kind === 'unknown') return `CodeBook: ${what} reaches ${repo}, and the guard cannot tell which branches it updates (a wildcard, a destination such as tags/… or HEAD, HEAD on a detached checkout, or push.default / remote.<name>.push configuration), so it was not run while CodeBook run ${runs.join(', ')} is worked here. Name the branch: git -C <worktree> push <remote> <branch>. ${yours}`
+  const defaults = defaultBranchesOf(held.filter(one => one.repos.includes(repo)), repo)
+  const main = pushed.branches.find(branch => defaults.includes(branch))
+  if (main !== undefined) return `CodeBook: ${what} would update the default branch ${main} of ${repo}, which the guard always refuses while CodeBook run ${runs.join(', ')} is worked here. ${yours}`
+  return pushed
+}
+
+/**
+ * Why a worker's push to `repo`, one of its own repositories, is refused (#173), or null when it goes through: a force,
+ * a deletion or more than a plain push of branches; what the guard cannot tell; the default branch; another story's
+ * branch in a repository another loop's write-capable run holds.
+ */
+async function workerPushRefusal($: EngineInterface, held: CodebookClaim[], runs: number[], target: Target, repo: string): Promise<string | null> {
+  const own = held.filter(one => runs.includes(one.run))
+  const what = target.kind === 'push' ? `git push to ${target.remote ?? 'the branch\'s default remote'}` : 'gh pr create'
+  const kept = await protectedRefusal($, held, runs, own, target, repo)
+  if (typeof kept === 'string') return kept
+  const pushed = kept
+  const others = held.filter(one => !runs.includes(one.run) && ownedOf(one).includes(repo))
+  if (others.length === 0) return null
+  const foreign = pushed.branches.find(branch => !own.some(one => one.branch === branch || carriesKey(branch, one.key)))
+  if (foreign === undefined) return null
+  const blocking = others.filter(one => one.branch === foreign || carriesKey(foreign, one.key))
+  const named = blocking.length > 0 ? blocking : others
+  const holders = named.map(one => `${one.run} (${[one.key ? `story ${one.key}` : null, one.branch ? `branch ${one.branch}` : null, `held by ${holderOf(one)}`].filter(Boolean).join(', ')})`).join(', ')
+  const releases = named.map(one => `run ${one.run} finishes with complete_work, ${lapsesOf(one)}, or run ${one.run}'s own ${one.agentId ? 'agent' : 'holder'} makes this push`).join('; or ')
+  const mine = own.map(one => `${one.run}${one.key ? ` (story ${one.key})` : ''}`).join(', ')
+  return `CodeBook: ${what} reaches ${repo} on branch ${foreign}, which CodeBook run ${holders} works on in this session. Your run ${mine} does not own that branch. Releases when ${releases}. Your own story branch (${storyBranchOf(own)}), pushed plainly, is not blocked by other runs. Retrying the same command changes nothing.`
+}
+
 /** What a loop refused a held run's repository can do about it (#145). */
-const WAYS_OUT = 'Ways out: the holder finishes the run with complete_work, or its lease lapses, or the holder makes this push itself (the main conversation, when it holds the run). The run\'s declared branch, pushed from its declared worktree, goes through from any loop. Retrying the same command changes nothing.'
+const WAYS_OUT = 'Ways out: the holder finishes the run with complete_work, or its lease lapses, or the holder makes this push itself (the main conversation, when it holds the run). The run\'s declared branch, pushed from its declared worktree, goes through from any loop. Your own story branch (one carrying your run\'s story key), pushed by the loop that holds your run, is not blocked by other runs. Retrying the same command changes nothing.'
 
 /** What to do instead of a command the guard cannot read (#145): one push, pull request or merge per command. */
 const ONE_AT_A_TIME = 'The guard cannot read `for` or `while` loops, `$(…)` or backtick substitutions, subshells, or wrappers such as timeout and xargs: run each `gh pr merge --repo <owner/name> <n>`, each push and each pull request as its own command.'
@@ -424,16 +492,33 @@ export const register: Register = (on, options) => {
       const found = await reaches($, target, env)
       if (!Array.isArray(found)) return { deny: `CodeBook: the repository guard did not run this while CodeBook run ${runs} is worked here: ${found.deny}` }
       for (const repo of found) {
-        if (mayReach(lease, repo)) continue
+        if (mayReach(lease, repo)) {
+          if (target.kind !== 'push' || repo === null) continue
+          if (lease.kind === 'bystander') {
+            // Any loop, in any repository a live claim lists (read-only runs' included): never the default branch, never
+            // forced (#173, manager's decision). A repository no live claim mentions stays the loop's own business.
+            const listing = held.filter(one => one.repos.includes(repo))
+            if (listing.length === 0) continue
+            const kept = await protectedRefusal($, held, listing.map(one => one.run), [], target, repo)
+            if (typeof kept === 'string') return { deny: kept }
+            continue
+          }
+          if (lease.kind !== 'worker') continue
+          // A worker's push in its own repositories (#173): never the default branch, never forced, and in a repository
+          // another loop's write-capable run holds, only its own story's branches (its declared one, or one carrying its key).
+          const refused = await workerPushRefusal($, held, lease.runs, target, repo)
+          if (refused) return { deny: refused }
+          continue
+        }
         // A held run's own push (#142): its declared branch from its declared worktree, whichever loop makes it.
         if ((await ownPushOf($, held, target, repo)) !== null) continue
         const what = target.kind === 'push' ? `git push to ${target.remote ?? 'the branch\'s default remote'}` : 'gh pr create'
         const where = repo ?? 'a repository the guard could not tell'
         if (lease.kind === 'bystander') {
-          const blocking = repo === null ? held : held.filter(one => one.repos.includes(repo))
+          const blocking = repo === null ? held : held.filter(one => ownedOf(one).includes(repo))
           return { deny: repo === null
             ? `CodeBook: ${what} reaches ${where}, and CodeBook run ${runs} is worked in this session on ${lease.held.join(', ')}, so the guard cannot tell it is not one of those. Push with a GitHub address or remote it can read, plainly: git -C <checkout> push <remote> <branch>. Held: ${holdersOf(blocking)}.`
-            : `CodeBook: ${what} reaches ${where}, which CodeBook run ${blocking.map(one => one.run).join(', ')} works on in this session. Only that run's worker (the agent that claimed it) pushes there while it is held; any other repository is not the guard's. Held: ${holdersOf(blocking)}. ${WAYS_OUT}` }
+            : `CodeBook: ${what} reaches ${where}, which CodeBook run ${blocking.map(one => one.run).join(', ')} works on in this session.${await branchSaid($, target)} This loop holds no run of its own. Only that run's worker (the agent that claimed it) pushes there while it is held; any other repository is not the guard's. Held: ${holdersOf(blocking)}. ${WAYS_OUT}` }
         }
         const may = lease.allowed.length > 0 ? lease.allowed.join(', ') : 'no repository (its brief names none)'
         const own = held.filter(one => lease.runs.includes(one.run))

@@ -19,8 +19,8 @@
 import type { EngineInterface } from 'claude-code'
 
 import type { CodebookClaim } from '../types'
-import { HOME_PREFIX, isPushLike, isRiskyGitVar, pushSpecOf, readCommand, repoOf, scriptPushes, sentBranchOf } from './guard'
-import type { Check, Target } from './guard'
+import { HOME_PREFIX, defaultBranchesOf, isPushLike, isRiskyGitVar, pushSpecOf, pushedOf, readCommand, repoOf, scriptPushes, sentBranchOf } from './guard'
+import type { Check, Pushed, Target } from './guard'
 
 /** A reason to refuse, as the person reads it after "CodeBook: ". */
 export type Refusal = { deny: string }
@@ -230,11 +230,32 @@ export async function ownPushOf($: EngineInterface, claims: CodebookClaim[], tar
   const current = lines(await gitIn($, dir, ['symbolic-ref', '--quiet', '--short', 'HEAD']))[0] ?? null
   const sent = sentBranchOf(spec, current)
   if (sent === null) return null
+  // A declared branch is never the default branch (#173): that one is the factory's to merge into.
+  if (defaultBranchesOf(claims.filter(one => one.repos.includes(repo)), repo).includes(sent)) return null
   for (const claim of declared) {
     if (claim.branch !== sent) continue
     if ((await topOf($, await folderOf($, claim.worktree ?? null))) === top) return claim.run
   }
   return null
+}
+
+/**
+ * The branches a push updates (#173), read as git sends them: pushedOf on its refspecs and the folder's current branch.
+ * A push with no refspec that git's configuration may send further (push.default other than simple or current, or a
+ * remote.<name>.push) is `unknown`.
+ */
+export async function pushedFrom($: EngineInterface, target: Target): Promise<Pushed> {
+  const spec = pushSpecOf(target)
+  if (spec === null) return { kind: 'unknown' }
+  if (!spec.isPlain) return { kind: 'forced' }
+  const dir = await folderOf($, target.cwd)
+  if (spec.refs.length === 0) {
+    const mode = ((await configValue($, dir, 'push.default')) ?? 'simple').toLowerCase()
+    if (mode !== 'simple' && mode !== 'current') return { kind: 'unknown' }
+    if (lines(await gitIn($, dir, ['config', '--get-regexp', '^remote\\..*\\.push$'])).length > 0) return { kind: 'unknown' }
+  }
+  const current = lines(await gitIn($, dir, ['symbolic-ref', '--quiet', '--short', 'HEAD']))[0] ?? null
+  return pushedOf(spec, current)
 }
 
 /**

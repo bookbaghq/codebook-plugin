@@ -1,18 +1,29 @@
-// The CLI accepts a plugin directory, not a test-file filter. Stage only the factory lifecycle test file.
-// All connector/clock/store interactions in that file use the native plugin test kit's mocks.
-import { cpSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+// The CLI accepts a plugin directory, not a test-file filter, so the files to run are staged in a folder of their own.
+// With no arguments every test/*.test.tsx runs; with file arguments (`node scripts/test-factory.mjs test/guard.test.tsx`)
+// only those do. All connector/clock/store interactions in them use the native plugin test kit's mocks.
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
 import { nativeResultsToTap } from './native-test-output.mjs'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+const asked = process.argv.slice(2)
+const files = asked.length > 0
+  ? asked.map(file => resolve(process.cwd(), file))
+  : readdirSync(join(root, 'test')).filter(name => name.endsWith('.test.tsx')).sort().map(name => join(root, 'test', name))
+const missing = files.filter(file => !existsSync(file) || !file.endsWith('.test.tsx'))
+if (missing.length > 0) {
+  console.error(`No such test file (test/<name>.test.tsx): ${missing.join(', ')}`)
+  process.exit(2)
+}
 const stage = mkdtempSync(join(tmpdir(), 'codebook-factory-tests-'))
 try {
   for (const name of ['hooks', 'types', '.claude-plugin']) cpSync(join(root, name), join(stage, name), { recursive: true })
   mkdirSync(join(stage, 'test'))
-  cpSync(join(root, 'test/factory.test.tsx'), join(stage, 'test/factory.test.tsx'))
+  for (const file of files) cpSync(file, join(stage, 'test', basename(file)))
+  console.error(`Running ${files.map(file => `test/${basename(file)}`).join(', ')}`)
   const result = spawnSync('claude', ['plugin', 'test', stage], { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 })
   // Preserve the native diagnostics. CodeBook does not yet read its Bun-style result marks,
   // so transcribe only results the real runner printed; never infer a test pass from exit 0.
