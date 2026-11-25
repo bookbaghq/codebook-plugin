@@ -35,7 +35,8 @@ export const LOCK_FILES = ['package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', '
 export const SECRET_FOLDERS = ['.ssh', '.aws', '.gnupg', '.kube', '.docker', '.config/gh', '.config/gcloud', '.azure', '.claude']
 export const SECRET_FILES = ['.netrc', '.npmrc', '.pypirc', '.git-credentials']
 
-export type ProofStep = { run: number; name: string; line: string; timeout_seconds: number; baseline: boolean; for_run?: number; ref?: string; commit?: string }
+type CaseReport = { version: 1; directory: string; definition: number; revision: number; hash: string }
+export type ProofStep = { case_report?: CaseReport; run: number; name: string; line: string; timeout_seconds: number; baseline: boolean; for_run?: number; ref?: string; commit?: string }
 export type ProofWork = {
   proof: number | null
   token?: string
@@ -50,7 +51,7 @@ export type ProofWork = {
  * (today's CodeBook queues a model's request_proof with none). `run`, `branch` and `worktree` are what a newer CodeBook
  * may send of the run that asked (its declare_work); the plugin reads them when they are there.
  */
-export type ProofWaiting = { proof: number; repository: string; commands: string[]; commit: string | null; default_branch?: string; run?: number | null; branch?: string | null; worktree?: string | null }
+export type ProofWaiting = { case_report_version?: number; proof: number; repository: string; commands: string[]; commit: string | null; default_branch?: string; run?: number | null; branch?: string | null; worktree?: string | null }
 /** What this session knows of the run that asked for a proof: its worktree and branch (declare_work), the story's key and branch (its brief). */
 export type ProofHint = { run: number | null; worktree?: string; branch?: string; key?: string }
 export type Sandbox = { kind: 'seatbelt' | 'bubblewrap' | 'none'; bin: string | null }
@@ -130,9 +131,9 @@ export function cleanEnvironment(base: Record<string, string | undefined>, cache
  * The whole argument vector of one boxed command: the sandbox, a clean environment, then the line through a shell.
  * With `egress` (a list of hosts) the command is told the proxy; in a Linux box the forwarder starts it.
  */
-export function boxedArgv({ sandbox, line, cwd, dirs, home, hidden, network, env, egress }: { sandbox: Sandbox; line: string; cwd: string; dirs: string[]; home: string; hidden: string[]; network: string; env: string[]; egress?: Egress | null }): string[] {
+export function boxedArgv({ sandbox, line, cwd, dirs, home, hidden, network, env, egress, stdoutOnly = false }: { stdoutOnly?: boolean; sandbox: Sandbox; line: string; cwd: string; dirs: string[]; home: string; hidden: string[]; network: string; env: string[]; egress?: Egress | null }): string[] {
   // Both streams in the order they were written: CodeBook reads the tests from one text.
-  const shell = ['/bin/sh', '-c', `cd ${quote(cwd)} && { ${line}\n} 2>&1`]
+  const shell = ['/bin/sh', '-c', `cd ${quote(cwd)} && { ${line}\n}${stdoutOnly ? '' : ' 2>&1'}`]
   const way = network === 'hosts' && egress ? egress : null
   const told = way === null ? env : [...env, ...proxyEnvironment(way.kind === 'tcp' ? way.port : FORWARD_PORT)]
   const inner = way?.kind === 'unix' ? ['/usr/bin/env', '-i', ...told, way.node, '-e', forwarderSource(), '--', way.socket, ...shell] : ['/usr/bin/env', '-i', ...told, ...shell]
@@ -221,10 +222,10 @@ async function sha256Hex(text: string): Promise<string> {
   return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('')
 }
 
-async function quiet($: EngineInterface, argv: string[], cwd?: string, timeoutMs = 30000): Promise<{ exitCode: number; stdout: string }> {
+async function quiet($: EngineInterface, argv: string[], cwd?: string, timeoutMs = 30000, complete = false): Promise<{ exitCode: number; stdout: string }> {
   try {
     const ran = await $.process.run(argv, { ...(cwd ? { cwd } : {}), timeoutMs })
-    return { exitCode: ran.exitCode, stdout: ran.stdout }
+    return { exitCode: complete && ran.isStdoutTruncated ? 1 : ran.exitCode, stdout: ran.stdout }
   } catch {
     return { exitCode: 127, stdout: '' }
   }
@@ -246,12 +247,12 @@ export async function findSandbox($: EngineInterface): Promise<Sandbox> {
   return { kind: 'none', bin: null }
 }
 
-async function runBoxed($: EngineInterface, argv: string[], cwd: string, timeoutSeconds: number): Promise<Ran> {
+async function runBoxed($: EngineInterface, argv: string[], cwd: string, timeoutSeconds: number, stdoutOnly = false): Promise<Ran> {
   const started = await $.clock.now()
   const timeoutMs = Math.min(MAX_COMMAND_MS, Math.max(10, timeoutSeconds) * 1000)
   try {
     const ran = await $.process.run(argv, { cwd, timeoutMs })
-    return { exitCode: ran.exitCode, output: ran.stdout + (ran.stderr ? `\n${ran.stderr}` : ''), isTruncated: ran.isStdoutTruncated, isTimedOut: false, error: null, ms: (await $.clock.now()) - started }
+    return { exitCode: ran.exitCode, output: ran.stdout + (!stdoutOnly && ran.stderr ? `\n${ran.stderr}` : ''), isTruncated: ran.isStdoutTruncated || (!stdoutOnly && ran.isStderrTruncated), isTimedOut: false, error: null, ms: (await $.clock.now()) - started }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     const ms = (await $.clock.now()) - started
@@ -418,6 +419,28 @@ export async function proofFolder(
   return { refused: `Proof ${proof} is for ${run} of ${repository}, and no working tree of it on this computer is at its pull request's head (${matches.slice(0, 3).map(offHead).join('; ')}), so nothing ran. Push the branch, then ask for the proof again (or /factory prove ${proof}).` }
 }
 
+const CASE_LINE = 'node --test --test-reporter=junit'
+const CASE_DIRECTORY = /^(?:[A-Za-z0-9][A-Za-z0-9._-]*)(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)*$/
+
+// Git and the physical checkout must identify the same directory. Reject untracked
+// discovery inputs (including ignored files), symlinks/submodules, partial listings or a changed HEAD.
+async function caseDirectory($: EngineInterface, root: string, relative: string, sha: string): Promise<string | null> {
+  if (!CASE_DIRECTORY.test(relative) || relative.length > 200 || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(sha)) return null
+  const git = (...args: string[]) => quiet($, ['git', '-C', root, ...args], undefined, 30000, true)
+  const head = await git('rev-parse', 'HEAD')
+  const status = await git('status', '--porcelain')
+  const extra = await git('ls-files', '--others', '--directory', '-z', '--', relative)
+  if (head.exitCode || head.stdout.trim() !== sha || status.exitCode || status.stdout || extra.exitCode || extra.stdout) return null
+  const tree = await git('ls-tree', '-rz', sha, '--', relative)
+  if (tree.exitCode || tree.stdout.length > 65536 || !tree.stdout.endsWith('\0')) return null
+  const entries = tree.stdout.slice(0, -1).split('\0')
+  if (!entries.length || entries.some(entry => !/^100(?:644|755) blob [0-9a-f]+\t/.test(entry) || !entry.slice(entry.indexOf('\t') + 1).startsWith(relative + '/'))) return null
+  const base = await quiet($, ['realpath', root])
+  const cwd = root + '/' + relative
+  const physical = await quiet($, ['realpath', cwd])
+  return !base.exitCode && !physical.exitCode && physical.stdout.trimEnd() === base.stdout.trimEnd() + '/' + relative ? cwd : null
+}
+
 /** What is waiting for this person's computer, without taking any of it. */
 export async function waitingProofs($: EngineInterface): Promise<{ ok: true; waiting: ProofWaiting[] } | { ok: false; message: string }> {
   const peeked = await call<{ waiting?: ProofWaiting[] }>($, 'claim_proof', { peek: true })
@@ -469,7 +492,7 @@ export async function runProof($: EngineInterface, { proof = null, known = [], h
   await quiet($, ['git', '-C', dir, 'fetch', '--quiet', 'origin', branch], undefined, 20000)
   const base = (await quiet($, ['git', '-C', dir, 'rev-parse', '--verify', '--quiet', `refs/remotes/origin/${branch}`])).stdout.trim()
 
-  const claimed = await call<ProofWork>($, 'claim_proof', { proof: target.proof, ...(/^[0-9a-f]{40,64}$/.test(base) ? { base: { ref: branch, commit: base } } : {}) })
+  const claimed = await call<ProofWork>($, 'claim_proof', { proof: target.proof, ...(target.case_report_version === 1 ? {case_report_version:1} : {}), ...(/^[0-9a-f]{40,64}$/.test(base) ? { base: { ref: branch, commit: base } } : {}) })
   if (!claimed.ok) return { isRun: false, text: claimed.message }
   const work = claimed.data
   if (work.proof === null || !work.token || !work.report_url || !work.steps) return { isRun: false, text: 'The proof run was taken by another session first.' }
@@ -505,12 +528,13 @@ export async function runProof($: EngineInterface, { proof = null, known = [], h
     }
   }
   const network = reach.network
-  const box = (line: string, cwd: string, dirs: string[], wanted: string = network) => boxedArgv({ sandbox, line, cwd, dirs, home, hidden, network: wanted, env: environment, egress })
+  const box = (line: string, cwd: string, dirs: string[], wanted: string = network, stdoutOnly = false) => boxedArgv({stdoutOnly, sandbox, line, cwd, dirs, home, hidden, network: wanted, env: environment, egress })
   const send = async (step: ProofStep, ran: Ran | null, commit: string | null, dirty: boolean): Promise<void> => {
-    const output = ran ? (ran.output.length > MAX_SENT_OUTPUT ? ran.output.slice(-MAX_SENT_OUTPUT) : ran.output) : ''
+    const complete = Boolean(step.case_report && ran && !ran.isTruncated && ran.output && ran.output.length <= 60000 && new TextEncoder().encode(ran.output).length <= 60000)
+    const output = step.case_report ? (complete ? ran!.output : '') : ran?.output.slice(-MAX_SENT_OUTPUT) ?? ''
     const answered = await report($, work, ran === null
       ? { run: step.run, skipped: true }
-      : { run: step.run, exit_code: ran.exitCode, output, output_sha256: await sha256Hex(output), commit, dirty, duration_ms: ran.ms, sandbox: sandbox.kind, ...(network === 'hosts' ? { network, hosts: reach.rules.map(ruleText) } : {}), timed_out: ran.isTimedOut, ...(ran.error ? { error: ran.error } : {}), ...(/^[0-9a-f]{40,64}$/.test(base) ? { base_commit: base } : {}) })
+      : { run: step.run, ...(step.case_report ? {case_report:step.case_report, case_checkout:dir, complete} : {}), exit_code: ran.exitCode, output, output_sha256: await sha256Hex(output), commit, dirty, duration_ms: ran.ms, sandbox: sandbox.kind, ...(network === 'hosts' && !step.case_report ? { network, hosts: reach.rules.map(ruleText) } : {}), timed_out: ran.isTimedOut, ...(ran.error ? { error: ran.error } : {}), ...(/^[0-9a-f]{40,64}$/.test(base) ? { base_commit: base } : {}) })
     if (!answered.ok) notes.push(`  ${step.name}${step.baseline ? ' (default branch)' : ''}: CodeBook did not record it — ${answered.message}`)
     outcomes.push({ name: step.name, baseline: step.baseline, status: answered.status ?? (ran === null ? 'not run' : 'not recorded'), exitCode: ran?.exitCode ?? null, tests: answered.tests ?? 0, newFailures: answered.newFailures ?? null, isDirty: dirty, commit })
   }
@@ -522,6 +546,19 @@ export async function runProof($: EngineInterface, { proof = null, known = [], h
   try {
     for (const step of steps.filter(one => isAllBaseline || !one.baseline)) {
       await $.ui.status(`CodeBook proof: ${step.name}…`)
+      if (step.case_report) {
+        const descriptor = step.case_report, sha = work.expected_commit ?? ''
+        const valid = descriptor.version === 1 && step.line === CASE_LINE && !step.baseline
+          && sandbox.kind !== 'none' && Number.isSafeInteger(descriptor.definition) && Number.isSafeInteger(descriptor.revision)
+          && /^[0-9a-f]{64}$/.test(descriptor.hash)
+        const cwd = valid ? await caseDirectory($, dir, descriptor.directory, sha) : null
+        const refused: Ran = { exitCode:null, output:'', isTruncated:false, isTimedOut:false, error:'The approved case directory or clean pinned checkout could not be verified.', ms:0 }
+        if (!cwd) { await send(step, refused, null, true); continue }
+        const ran = await runBoxed($, box(CASE_LINE, cwd, [cache], 'loopback', true), cwd, step.timeout_seconds, true)
+        const unchanged = Boolean(await caseDirectory($, dir, descriptor.directory, sha))
+        await send(step, unchanged ? ran : refused, unchanged ? sha : null, !unchanged)
+        continue
+      }
       const ran = await runBoxed($, box(step.line, dir, [dir, cache]), dir, step.timeout_seconds)
       const failed = ran.exitCode !== 0 && !ran.isTimedOut && ran.error === null
       const baseline = isAllBaseline ? undefined : steps.find(one => one.baseline && one.for_run === step.run)
