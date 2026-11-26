@@ -36,12 +36,13 @@ export const SECRET_FOLDERS = ['.ssh', '.aws', '.gnupg', '.kube', '.docker', '.c
 export const SECRET_FILES = ['.netrc', '.npmrc', '.pypirc', '.git-credentials']
 
 type CaseReport = { version: 1; directory: string; definition: number; revision: number; hash: string }
-export type ProofStep = { case_report?: CaseReport; run: number; name: string; line: string; timeout_seconds: number; baseline: boolean; for_run?: number; ref?: string; commit?: string }
+export type ProofStep = { delegated_focused?: boolean; case_report?: CaseReport; run: number; name: string; line: string; timeout_seconds: number; baseline: boolean; for_run?: number; ref?: string; commit?: string }
 export type ProofWork = {
   proof: number | null
   token?: string
   report_url?: string
   repository?: { id: number; full_name: string; default_branch: string }
+  proof_scope?: string
   expected_commit?: string | null
   recipe?: { revision: number; install: string; network: string; hosts?: unknown } | null
   steps?: ProofStep[]
@@ -51,7 +52,7 @@ export type ProofWork = {
  * (today's CodeBook queues a model's request_proof with none). `run`, `branch` and `worktree` are what a newer CodeBook
  * may send of the run that asked (its declare_work); the plugin reads them when they are there.
  */
-export type ProofWaiting = { case_report_version?: number; proof: number; repository: string; commands: string[]; commit: string | null; default_branch?: string; run?: number | null; branch?: string | null; worktree?: string | null }
+export type ProofWaiting = { delegated_focused_version?: number; case_report_version?: number; proof: number; repository: string; commands: string[]; commit: string | null; default_branch?: string; run?: number | null; branch?: string | null; worktree?: string | null }
 /** What this session knows of the run that asked for a proof: its worktree and branch (declare_work), the story's key and branch (its brief). */
 export type ProofHint = { run: number | null; worktree?: string; branch?: string; key?: string }
 export type Sandbox = { kind: 'seatbelt' | 'bubblewrap' | 'none'; bin: string | null }
@@ -441,6 +442,127 @@ async function caseDirectory($: EngineInterface, root: string, relative: string,
   return !base.exitCode && !physical.exitCode && physical.stdout.trimEnd() === base.stdout.trimEnd() + '/' + relative ? cwd : null
 }
 
+const FULL_COMMIT = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/
+
+// These commands come from the server's routine-check grammar. Execute individual arguments,
+// never an arbitrary shell expression. A newer grammar needs a new negotiated capability.
+function delegatedCommand(line: string): string[] | null {
+  const argv = line.split(' ')
+  const env = argv[0] === 'KANBAN_TEST_PG=throwaway' ? [argv.shift()!] : []
+  const [program, ...args] = argv
+  if (program === 'bash' && !env.length && args.length === 2 && args[0] === 'scripts/smoke.sh'
+      && /^test\/smoke\/(?:[A-Za-z0-9_-]+\/)*[A-Za-z0-9_-]+\.sh$/.test(args[1] ?? '')) return argv
+  if (program !== 'node') return null
+  const files = [...args]
+  const tests = files[0] === '--test'
+  if (tests) {
+    files.shift()
+    const flags = new Set(['--test-reporter=tap', '--test-force-exit'])
+    while (flags.delete(files[0] ?? '')) files.shift()
+  }
+  if (!files.length || files.length > (tests ? 2 : 1) || files.some(path =>
+    !/^test\/(?:[A-Za-z0-9_-]+\/)*[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*\.(?:mjs|cjs|js)$/.test(path)
+    || /(?:^|\/)(?:run[-_]?all|all[-_]?tests|full[-_]?suite)(?:\.|\/)/i.test(path))) return null
+  return [...env, ...argv]
+}
+
+const RUNTIME_PATHS = ['/bin', '/sbin', '/usr/bin', '/usr/sbin', '/usr/lib', '/usr/lib64', '/usr/share',
+  '/lib', '/lib64', '/usr/local/bin', '/usr/local/lib', '/opt/homebrew/bin', '/opt/homebrew/opt', '/opt/homebrew/Cellar']
+const TOOL_PATH = '/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin'
+
+// A delegated command receives a read-only checkout, fresh HOME/temp and system runtimes.
+// The ordinary personal box may use saved host rules and shared caches; this one never starts that proxy.
+function delegatedBox(sandbox: Sandbox, dir: string, scratch: string, args: string[], gitDirIsFolder: boolean, metadata: string[] = []): string[] | null {
+  if (!sandbox.bin) return null
+  const path = metadata.length && sandbox.kind === 'seatbelt' ? '/Applications/Xcode.app/Contents/Developer/usr/bin:/Library/Developer/CommandLineTools/usr/bin:' + TOOL_PATH : TOOL_PATH
+  const inner = ['/usr/bin/env', '-i', 'PATH=' + path, 'HOME=' + scratch, 'TMPDIR=' + scratch,
+    'CI=1', 'GIT_TERMINAL_PROMPT=0', ...args]
+  if (sandbox.kind === 'bubblewrap') return [sandbox.bin, '--unshare-all', '--die-with-parent', '--new-session',
+    ...RUNTIME_PATHS.flatMap(path => ['--ro-bind-try', path, path]), '--dev', '/dev', '--proc', '/proc', '--tmpfs', '/tmp',
+    '--ro-bind', dir, dir, ...metadata.flatMap(path => ['--ro-bind', path, path]),
+    ...(metadata.length ? [] : gitDirIsFolder ? ['--tmpfs', dir+'/.git'] : ['--ro-bind', '/dev/null', dir+'/.git']),
+    '--bind', scratch, scratch, '--chdir', dir, ...inner]
+  if (sandbox.kind !== 'seatbelt') return null
+  const readable = [...RUNTIME_PATHS, '/System', '/Library/Developer/CommandLineTools', '/usr/libexec', '/Applications/Xcode.app/Contents/Developer/usr', dir, scratch, ...metadata]
+  const profile = ['(version 1)', '(allow default)', '(deny file-read* file-write* (subpath "/"))',
+    '(allow file-read-metadata)', '(allow file-read* ' + readable.map(path => '(subpath ' + quote(path) + ')').join(' ')
+      + ' (literal "/") (literal "/dev/null") (literal "/dev/zero") (literal "/dev/random") (literal "/dev/urandom") (regex #"^/dev/fd/"))',
+    '(allow file-write* (subpath '+quote(scratch)+') (literal "/dev/null") (regex #"^/dev/fd/"))',
+    ...(metadata.length ? [] : ['(deny file-read* (subpath '+quote(dir+'/.git')+'))']),
+    '(deny mach-lookup)', '(deny network*)', ...(metadata.length ? [] : ['(allow network-outbound (remote ip "localhost:*"))',
+    '(allow network-inbound (local ip "localhost:*"))', '(allow network-bind (local ip "localhost:*"))'])].join('\n')
+  return [sandbox.bin, '-p', profile, ...inner]
+}
+
+async function cleanPinned($: EngineInterface, sha: string, box: (argv: string[]) => string[] | null) {
+  const git = async (...args: string[]) => {
+    const argv = box(['git', '--no-optional-locks', '-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null', ...args])
+    return argv ? quiet($, argv, undefined, 30000, true) : {exitCode:1, stdout:''}
+  }
+  const head = await git('rev-parse', 'HEAD')
+  // Ordinary cached entries have tag H. Refuse entries Git can omit from worktree checks.
+  const index = await git('ls-files', '--cached', '-v', '-z')
+  if (index.exitCode !== 0 || !index.stdout.endsWith('\0')
+      || !index.stdout.slice(0, -1).split('\0').every(entry => entry.startsWith('H '))) return false
+  const status = await git('status', '--porcelain')
+  const extra = await git('ls-files', '--others', '--directory', '-z')
+  return head.exitCode === 0 && head.stdout.trim() === sha && status.exitCode === 0 && !status.stdout
+    && extra.exitCode === 0 && !extra.stdout
+}
+
+async function runDelegated($: EngineInterface, target: ProofWaiting, work: ProofWork, dir: string, sandbox: Sandbox) {
+  const steps = work.steps ?? [], sha = work.expected_commit ?? ''
+  const refused = 'Delegated proof requires a supported native sandbox, clean exact checkout and bounded loopback check without setup or baseline.'
+  const valid = target.delegated_focused_version === 1 && target.commit === sha && FULL_COMMIT.test(sha) && !!sandbox.bin
+    && work.proof_scope === 'focused' && work.repository?.full_name.toLowerCase() === target.repository.toLowerCase() && work.recipe?.network === 'loopback'
+    && work.recipe.install === '' && (!work.recipe.hosts || (Array.isArray(work.recipe.hosts) && !work.recipe.hosts.length))
+    && steps.length > 0 && steps.length === target.commands.length && steps.every(s => typeof s.line === 'string' && target.commands.includes(s.name) && s.delegated_focused === true && !s.case_report && s.baseline === false
+      && s.for_run == null && Number.isSafeInteger(s.timeout_seconds) && s.timeout_seconds >= 10 && s.timeout_seconds <= 360
+      && !!delegatedCommand(s.line))
+  const outcomes: StepOutcome[] = [], notes: string[] = []
+  for (const step of steps) {
+    let ran: Ran = { exitCode:null, output:'', isTruncated:false, isTimedOut:false, error:refused, ms:0 }
+    let pinned = false
+    if (valid) {
+      const temp = await quiet($, ['/usr/bin/mktemp', '-d', '/tmp/codebook-delegated-XXXXXXXX'])
+      const scratch = temp.stdout.trim()
+      if (!temp.exitCode && /^\/tmp\/codebook-delegated-[A-Za-z0-9]+$/.test(scratch)) {
+        try {
+          // Seatbelt matches physical paths; macOS /tmp is a symlink to /private/tmp.
+          const physical = (await quiet($, ['realpath', scratch])).stdout.trim()
+          const checkout = (await quiet($, ['realpath', dir])).stdout.trim()
+          const gitDir = await quiet($, ['git', '-C', dir, 'rev-parse', '--absolute-git-dir'])
+          const gitCommon = await quiet($, ['git', '-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir'])
+          const metadata = [...new Set([gitDir.stdout.trim(), gitCommon.stdout.trim()])]
+          const standalone = gitDir.stdout.trim() === checkout+'/.git'
+          if (checkout.startsWith('/') && checkout !== '/' && checkout !== await $.env.get('HOME') && !gitDir.exitCode && !gitCommon.exitCode
+              && metadata.every(path => path.startsWith('/') && /\/\.git(?:\/worktrees\/[^/]+)?$/.test(path))
+              && (physical === scratch || physical === '/private'+scratch)) {
+            const validation = (args: string[]) => delegatedBox(sandbox, checkout, physical, ['git', '-C', checkout, ...args.slice(1)], standalone, metadata)
+            const command = delegatedCommand(step.line)
+            const argv = command ? delegatedBox(sandbox, checkout, physical, command, standalone) : null
+            if (argv && await cleanPinned($, sha, validation)) {
+              ran = await runBoxed($, argv, checkout, step.timeout_seconds)
+              pinned = await cleanPinned($, sha, validation)
+              if (!pinned) ran = { ...ran, exitCode:null, output:'', error:refused }
+            }
+          }
+        } finally {
+          await quiet($, ['/bin/rm', '-rf', scratch])
+        }
+      }
+    }
+    const output = ran.output.slice(-MAX_SENT_OUTPUT)
+    const sent = await report($, work, {run:step.run, delegated_focused_version:1, network:'loopback',
+      sandbox:sandbox.kind, exit_code:ran.exitCode, output, output_sha256:await sha256Hex(output),
+      commit:pinned ? sha : null, dirty:!pinned, duration_ms:ran.ms, timed_out:ran.isTimedOut, ...(ran.error ? {error:ran.error} : {})})
+    if (!sent.ok) notes.push('CodeBook did not record ' + step.name + ': ' + sent.message)
+    outcomes.push({name:step.name, baseline:step.baseline, status:ran.error ? 'not run: '+ran.error : (sent.status ?? 'not recorded'),
+      exitCode:ran.exitCode, tests:sent.tests ?? 0, newFailures:null, isDirty:!pinned, commit:pinned ? sha : null})
+  }
+  return {isRun:true, text:summaryOf(target.repository, sandbox, outcomes, notes, 'Network: local loopback only.')}
+}
+
 /** What is waiting for this person's computer, without taking any of it. */
 export async function waitingProofs($: EngineInterface): Promise<{ ok: true; waiting: ProofWaiting[] } | { ok: false; message: string }> {
   const peeked = await call<{ waiting?: ProofWaiting[] }>($, 'claim_proof', { peek: true })
@@ -474,6 +596,12 @@ export async function runProof($: EngineInterface, { proof = null, known = [], h
   const target = proof === null ? peeked.waiting[0] : peeked.waiting.find(one => one.proof === proof)
   if (!target) return { isRun: false, text: proof === null ? 'No proof run is waiting for this computer.' : `Proof run ${proof} is not waiting for this computer (it may already have been run, or it was asked for someone else's).` }
 
+  const delegated = target.delegated_focused_version !== undefined
+  const delegatedSandbox = delegated ? await findSandbox($) : null
+  if (delegated && (target.delegated_focused_version !== 1 || !delegatedSandbox?.bin || !FULL_COMMIT.test(target.commit ?? ''))) {
+    return { isRun:false, text:'The waiting delegated proof requires protocol version 1, a native sandbox and a full commit.' }
+  }
+
   // Where the run that asked works (P1): what CodeBook says of it first, then what this session holds.
   const sent = (value: unknown) => (typeof value === 'string' && value.trim() ? value.trim() : undefined)
   const fromServer = { worktree: sent(target.worktree), branch: sent(target.branch) }
@@ -485,6 +613,14 @@ export async function runProof($: EngineInterface, { proof = null, known = [], h
   const dir = placed.dir
 
   // The commit that is checked out, whether anything is uncommitted, and the default branch as this git knows it.
+  if (delegated && delegatedSandbox) {
+    const claimed = await call<ProofWork>($, 'claim_proof', {proof:target.proof, delegated_focused_version:1})
+    if (!claimed.ok) return {isRun:false, text:claimed.message}
+    const work = claimed.data
+    if (work.proof !== target.proof || !work.token || !work.report_url || !work.steps) return {isRun:false, text:'The delegated proof was unavailable.'}
+    return runDelegated($, target, work, dir, delegatedSandbox)
+  }
+
   const head = (await quiet($, ['git', '-C', dir, 'rev-parse', 'HEAD'])).stdout.trim()
   const status = await quiet($, ['git', '-C', dir, 'status', '--porcelain'])
   const isDirty = status.exitCode !== 0 || status.stdout.trim() !== ''
@@ -496,6 +632,10 @@ export async function runProof($: EngineInterface, { proof = null, known = [], h
   if (!claimed.ok) return { isRun: false, text: claimed.message }
   const work = claimed.data
   if (work.proof === null || !work.token || !work.report_url || !work.steps) return { isRun: false, text: 'The proof run was taken by another session first.' }
+
+  if (work.steps.some(step => step.delegated_focused !== undefined && step.delegated_focused !== false)) {
+    return runDelegated($, target, work, dir, {kind:'none', bin:null})
+  }
 
   const home = (await $.env.get('HOME')) ?? ''
   const cache = `${home}/.codebook/proof`

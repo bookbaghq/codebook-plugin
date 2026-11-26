@@ -13,6 +13,9 @@ type World = {
   /** What each recipe line exits with and prints, by the folder it ran in ("head" or "baseline"). */
   results: Record<string, { exit: number; output: string }>
   collector?: { tree?: string; physical?: string; untracked?: string }
+  indexListing?: string
+  delegated?: boolean
+  claimedHead?: string
   dirty?: boolean
   origin?: string
   waiting?: boolean
@@ -59,6 +62,16 @@ function world(on: On, w: World) {
     const argv = [...e.argv]
     processes.push(argv)
     const joined = argv.join(' ')
+    if (w.delegated && argv[0] === '/usr/bin/mktemp') return out('/tmp/codebook-delegated-fixture\n') as never
+    if (w.delegated && argv[0] === 'realpath') return out(argv[1]+'\n') as never
+    if (w.delegated && argv[0] === 'git' && (argv.includes('--absolute-git-dir') || argv.includes('--git-common-dir'))) return out(DIR+'/.git\n') as never
+    if (w.delegated && argv.includes('/usr/bin/env') && argv.includes('git')) {
+      if (argv.includes('HEAD')) return out(HEAD+'\n') as never
+      if (argv.includes('--cached')) return out(w.indexListing ?? 'H test/local.mjs\0') as never
+      if (argv.includes('status')) return out(w.dirty ? ' M file\n' : '') as never
+      return out('') as never
+    }
+    if (w.delegated && argv.includes('/usr/bin/env') && argv.includes('node')) return out('ok 1 - exact delegated file\n') as never
     if (w.collector && argv[0] === 'realpath') return out((argv[1] === DIR ? DIR : (w.collector.physical ?? argv[1])) + '\n') as never
     if (w.collector && argv.includes('ls-tree')) return out(w.collector.tree ?? ('100644 blob ' + HEAD + '\tproof/whiteboard/editing.test.mjs\0')) as never
     if (w.collector && argv.includes('ls-files')) return out(w.collector.untracked ?? '') as never
@@ -124,8 +137,8 @@ function world(on: On, w: World) {
   const answer = (tool: string, args: Record<string, unknown>) =>
     tool === 'claim_proof'
       ? args.peek
-        ? { waiting: w.waiting === false ? [] : [{ proof: 70, ...(w.collector ? {case_report_version:1} : {}), repository: 'acme/payments', default_branch: 'main', commands: ['test'], commit: w.commit ?? null }] }
-        : { proof: 70, token: TOKEN, report_url: REPORT, report_path: '/kanban/api/proof/report', repository: { id: 5, full_name: 'acme/payments', default_branch: 'main' }, expected_commit: w.collector ? HEAD : null, recipe: { revision: 2, install: 'npm ci', network: 'loopback', ...(w.recipe ?? {}) }, steps }
+        ? { waiting: w.waiting === false ? [] : [{ proof: 70, ...(w.collector ? {case_report_version:1} : {}), ...(w.delegated ? {delegated_focused_version:1} : {}), repository: 'acme/payments', default_branch: 'main', commands: w.delegated ? steps.map(step => (step as {name:string}).name) : ['test'], commit: w.commit ?? null }] }
+        : { proof: 70, token: TOKEN, report_url: REPORT, report_path: '/kanban/api/proof/report', repository: { id: 5, full_name: 'acme/payments', default_branch: 'main' }, proof_scope: w.delegated ? 'focused' : 'repository_recipe', expected_commit: w.claimedHead ?? (w.collector || w.delegated ? HEAD : null), recipe: { revision: 2, install: 'npm ci', network: 'loopback', ...(w.recipe ?? {}) }, steps }
       : tool === 'request_proof'
         ? { proof: 70, where: 'here', repository: 'acme/payments', commands: [{ name: 'test', status: 'queued' }] }
         : tool === 'claim_work'
@@ -228,6 +241,57 @@ test('the model asks; the plugin runs the check boxed and reports it itself, and
   expect(told).toContain('boxed by the macOS sandbox')
   expect(told).not.toContain(TOKEN)
   expect(JSON.stringify(asked.result)).not.toContain(TOKEN)
+})
+
+test('delegated local proof requires a clean pinned sandbox and strict loopback', { options: { proof_hosts: 'packages.example.test' } }, async ($, on) => {
+  const step = {run:71, name:'focused', line:'node --test test/local.mjs', timeout_seconds:90, baseline:false, delegated_focused:true}
+  const steps = [step]
+  const state: World = {delegated:true, commit:HEAD, steps, recipe:{install:'', network:'loopback'}, results:{}}
+  const w = world(on, state)
+  const run = () => $.tool.call({tool:OWN+'request_proof', story:'story'} as never)
+  const executions = () => w.processes.filter(argv => argv.includes('node') && argv.at(-1) === 'test/local.mjs')
+  await run()
+  expect(w.mcp[1]?.args).toEqual({proof:70, delegated_focused_version:1})
+  expect(executions().length).toBe(1)
+  const args = executions()[0]!
+  expect(args[0]).toBe('/usr/bin/sandbox-exec')
+  expect(args).toContain('-i')
+  expect(args).toContain('HOME=/tmp/codebook-delegated-fixture')
+  expect(args.join(' ')).not.toContain('ghp_secret')
+  expect(args.join(' ')).not.toContain('HTTP_PROXY')
+  expect(args[2]).toContain('(deny network*)')
+  expect(args[2]).not.toContain('(remote unix-socket)')
+  expect(w.spawned.length).toBe(0)
+  expect(w.reports[0]?.body.network).toBe('loopback')
+  expect(w.reports[0]?.body.delegated_focused_version).toBe(1)
+  expect(w.reports[0]?.body.commit).toBe(HEAD)
+  expect(w.processes.some(argv => argv.includes('fetch'))).toBe(false)
+
+  for (const tag of ['h', 'S']) {
+    state.indexListing = tag + ' test/local.mjs\0'
+    await run()
+  }
+  state.indexListing = undefined
+  state.dirty = true
+  await run()
+  state.dirty = false
+  state.claimedHead = BASE
+  await run()
+  state.claimedHead = HEAD
+  state.recipe = {install:'npm ci', network:'loopback'}
+  await run()
+  state.recipe = {install:'', network:'full'}
+  await run()
+  state.recipe = {install:'', network:'loopback'}
+  steps.push({...step, run:72, baseline:true})
+  await run()
+  steps.pop()
+  expect(w.reports.slice(1).every(reply => reply.body.exit_code === null && reply.body.error && reply.body.commit === null)).toBe(true)
+  const previousClaims = w.mcp.filter(call => !call.args.peek).length
+  state.system = 'unsupported'
+  await run()
+  expect(w.mcp.filter(call => !call.args.peek).length).toBe(previousClaims)
+  expect(executions().length).toBe(1)
 })
 
 test('the approved case directory runs its fixed command separately from the suite and sends complete scoped stdout', async ($, on) => {
