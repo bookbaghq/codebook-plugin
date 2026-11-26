@@ -6,7 +6,7 @@ state below. Keep independent authorized work moving while a true blocker waits;
 requests or tests. The owning session observes its unfinished orders after their current stories finish, so a later
 milestone can wake it. Duplicate observations stay quiet; `/factory stop` stops that session's observation.
 
-What happens when a story finishes is the factory's setting too (`manager_brief.goes_alone.next`, section 3):
+Check current proposal routing before applying these factory defaults (`manager_brief.goes_alone.next`, section 3):
 
 - **Where it lets you go alone** (`approved_order`, `full`): When a story finishes, start the next ready story
   yourself, up to the factory's limits, and keep going until nothing is ready. Do not wait to be asked, and do not end
@@ -14,22 +14,26 @@ What happens when a story finishes is the factory's setting too (`manager_brief.
   one of its stories finishes: such a story then waits in `list_my_work`, so look there first and never start one
   twice.
 - **Where it says to ask** (`suggest`, and an older CodeBook with no `goes_alone`): When a story finishes, say which
-  story is ready next and ask "proceed?". One short list and one question for everything that is ready, not a
+  story is ready next and ask "proceed?". Include only proposals routed to the person. One short list and one question for everything that is ready, not a
   question per story.
 
 Either way, look for the next ready story yourself after each story reaches Done (or is stopped), in this order:
 
 1. `list_my_work { factory }`: a run of a story you manage that waits for this runner. It is not a new story: start
    its worker (section 4) without asking.
-2. **Open proposals** (`manager_brief.proposals`, `work_orders { factory, order }`): a line that waited for the story
-   that just finished is ready now (`confirm_stories { proposal, stories }`, with `decided_by: "manager"` where you
-   go alone).
+2. **Open proposals** (`manager_brief.proposals`, `work_orders { factory, order }`): re-read the current route and readiness for
+   the pending proposal. Follow `goes_alone.next_action` as in [story planning](story-planning.md).
+   For `wait_for_resume`, report the pause once and leave the item pending. After resume, refresh readiness for
+   those same items. Confirm only those CodeBook now authorizes for the manager. Show the stories and criteria and
+   ask “Proceed?” for a current `ask_person` decision.
 3. **The proposed stories drawer.** After each finished story, look at the Backlog too. Start the stories that are ready, as the
    factory's setting for new stories allows, and tell the person which ones are parked and on what. It is in
    `manager_brief.backlog` (call `manager_brief` again after each finished story: the brief is read fresh each time):
    `{ stories: [{ story, title, workflow, proposal?, ready, parked_on, start_with? }], ready, parked, say }`. A story
    with `ready: true` carries `start_with`, the exact call that starts it (`confirm_stories { proposal, stories,
-   decided_by: "manager" }`): make that call, unless step 1 or 2 already started it, and say so in one line. A story
+   decided_by: "manager" }`): use the current authorized call once, unless step 1 or 2 already started it. A `CONFLICT`
+   with `error.goes_alone.next_action: "wait_for_resume"` parks that proposal until the factory resumes.
+   Check its readiness again then and use the current authorization. A story
    that is not ready says what it is parked on (`parked_on`): the stories it waits for, a paused work order, the
    person's "proceed?" (where the factory says to ask, it goes in your one "proceed?" list), or that a person put it
    there by hand (theirs to start: ask before you move it). Tell the person which are parked and on what, in one
