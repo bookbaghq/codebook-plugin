@@ -24,7 +24,7 @@ Either way, look for the next ready story yourself after each story reaches Done
 2. **Open proposals** (`manager_brief.proposals`, `work_orders { factory, order }`): a line that waited for the story
    that just finished is ready now (`confirm_stories { proposal, stories }`, with `decided_by: "manager"` where you
    go alone).
-3. **The Backlog.** After each finished story, look at the Backlog too. Start the stories that are ready, as the
+3. **The proposed stories drawer.** After each finished story, look at the Backlog too. Start the stories that are ready, as the
    factory's setting for new stories allows, and tell the person which ones are parked and on what. It is in
    `manager_brief.backlog` (call `manager_brief` again after each finished story: the brief is read fresh each time):
    `{ stories: [{ story, title, workflow, proposal?, ready, parked_on, start_with? }], ready, parked, say }`. A story
@@ -33,7 +33,10 @@ Either way, look for the next ready story yourself after each story reaches Done
    that is not ready says what it is parked on (`parked_on`): the stories it waits for, a paused work order, the
    person's "proceed?" (where the factory says to ask, it goes in your one "proceed?" list), or that a person put it
    there by hand (theirs to start: ask before you move it). Tell the person which are parked and on what, in one
-   short list; `say` counts them. No `backlog` in the brief (an older CodeBook): read the board's Backlog
+   short list; `say` counts them. When `backlog.next_offset` is present, request the next page with
+   `manager_brief { factory, backlog_offset: backlog.next_offset }` in the same workflow scope.
+   Continue until `backlog.next_offset` is null. The proposed drawer contains unplaced stories.
+   A configured station named Backlog holds stories already on the board. No `backlog` in the brief (an older CodeBook): read the board's Backlog
    (`factory_board { factory, backlog_offset: 0 }`, then `backlog.next_offset`) for a card that is ready. Ready
    means: not marked "Proposed", waiting for no other story and no person, and nobody working it. A story a person
    wrote is shown and asked about first, at every level.

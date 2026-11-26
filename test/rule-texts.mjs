@@ -196,3 +196,15 @@ test('the README tells the owner the same rules', () => {
     assert.ok(readme.includes(said), `The README does not say: ${said}`)
   }
 })
+
+test('factory continuation checks active work and proposed backlog', () => {
+  const skill = plain(readFileSync(join(root, 'skills/factory-manager/SKILL.md'), 'utf8'))
+  const next = plain(readFileSync(join(root, 'skills/factory-manager/references/next-story.md'), 'utf8'))
+  assert.match(skill, /After each finished story, inspect queued runs, open proposals and the separate proposed stories drawer/)
+  assert.match(skill, /Do not start another session's work or duplicate a run/)
+  assert.match(next, /manager_brief \{ factory, backlog_offset: backlog.next_offset \}.*same workflow scope/)
+  assert.match(next, /Continue until `backlog.next_offset` is null/)
+  assert.match(next, /A configured station named Backlog holds stories already on the board/)
+  assert.match(next, /the stories it waits for, a paused work order/)
+  assert.match(next, /the person's "proceed\?"/)
+})
