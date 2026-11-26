@@ -167,3 +167,75 @@ test('a restarted manager reconciles each undelivered story, stays quiet and fen
   expect(writes.length).toBe(stopped)
   expect(submitted.length).toBe(2)
 })
+
+test('a moving page, a held followed card and a newly claimed local run do not wake the manager', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 }), session = 'changing-readiness', key = CONTINUATION_STORE + session
+  const saved = new Map<string, unknown>(), delivered: string[] = [], rejected: string[] = []
+  const factory = { factory: 'pay', name: 'Payments' }, workflow = { workflow: 'wf1', name: 'Ship' }
+  let writes = 0, cursor = 1, firstReads = 0, reject = false, claimed = false, localReads = 0
+  on('session.id', () => ({ value: session }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('command.register', () => ({ value: { command: 'factory' } }))
+  on('store.keys', () => ({ value: [...saved.keys()] }))
+  on('store.get', (_, e) => ({ value: saved.get(e.key) }))
+  on('store.set', (_, e) => { if (e.key === key) writes++; saved.set(e.key, e.value); return { value: undefined } })
+  on('store.delete', (_, e) => { if (e.key === key) writes++; saved.delete(e.key); return { value: undefined } })
+  on('mcp.connect', () => ({ value: { isConnected: true, server: 'codebook' } }))
+  on('mcp.call', (_, e) => {
+    let data: unknown
+    if (e.tool === 'factory_events') data = { events: [], last_event: cursor }
+    else if (e.tool === 'manager_brief') {
+      const first = !e.args.backlog_offset
+      data = { factory, workflow, you: { may_run_here: true }, backlog: { next_offset: first ? 1 : null, stories: [
+        { story: first ? 'parked' : 'ready', reference: first ? '#900' : '#901', ready: first ? cursor === 1 : true,
+          workflow: 'Ship', start_with: 'confirm_stories' },
+      ] } }
+      // The server moved the first-page story after returning that page; the next feed read sees the new cursor.
+      if (first && ++firstReads === 2) cursor++
+    } else if (e.tool === 'story_status') {
+      const local = e.args.story === 'local'
+      if (local) localReads++
+      data = { story: { story: local ? 'local' : 'held', reference: local ? '#17' : '#18', title: 'Work' }, factory, workflow,
+        in_backlog: false, finished: null, station: null, stations: [], events: [], last_event: 43,
+        run: { run: local ? 819 : 820, state: 'with_outside_agent', where: 'here' },
+        waiting: local ? { on: 'runner', run: 819, on_you: true, claimed } : { on: 'person', run: 820, on_you: false } }
+    } else if (e.tool === 'factory_board') data = { ...factory, workflow, stations: [] }
+    else if (e.tool === 'story_trail') data = { comments: [], artifacts: [] }
+    else throw Error('Unexpected connector request: ' + e.tool)
+    return { value: { structuredContent: data, content: [] } } as never
+  })
+  on('prompt.submit', (_, e) => {
+    if (reject) { rejected.push(e.text); throw Error('Disconnected') }
+    delivered.push(e.text)
+    return { text: e.text, context: e.context } as never
+  })
+  const start = () => $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await start()
+  await $.command.run(typed('manage pay --workflow wf1'))
+  await clock.advance(155000)
+  expect(delivered.length).toBe(1)
+  expect(delivered[0]).toContain('#901')
+  expect(delivered[0]).not.toContain('#900')
+
+  await $.command.run(typed('follow held pay'))
+  await clock.advance(65000)
+  const idle = writes
+  await clock.advance(20000)
+  expect(writes).toBe(idle)
+  expect(delivered.length).toBe(1)
+
+  reject = true
+  await $.command.run(typed('follow local pay'))
+  await $.command.run(typed('follow held pay'))
+  for (let i = 0; i < 10 && !rejected.length; i++) await clock.advance(5000)
+  expect(rejected.length).toBe(1)
+  expect(rejected[0]).toContain('local run 819')
+  const oldReads = localReads
+  claimed = true; reject = false
+  await start()
+  await clock.advance(65000)
+  expect(localReads).toBeGreaterThan(oldReads)
+  expect(delivered.length).toBe(1)
+  await $.command.run(typed('stop'))
+})
