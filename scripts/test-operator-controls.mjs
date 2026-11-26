@@ -26,3 +26,23 @@ test('MCP operator controls plugin guidance preserves approval boundaries', asyn
   assert.match(close, /Coolify separately/);
   assert.match(guide, /tools\/list[\s\S]+older servers[\s\S]+website control/);
 });
+
+test('Manager guidance follows the live decision owner and reuses exact approval', async () => {
+  const base = new URL('../skills/factory-manager/', import.meta.url);
+  const read = file => readFile(new URL(file, base), 'utf8');
+  const [entry, policy, tools, review] = await Promise.all([
+    read('SKILL.md'), read('references/operating-policy.md'), read('references/factory-tools.md'),
+    read('references/review-and-recovery.md'),
+  ]);
+  assert.match(entry, /manager_brief\.settings\.decision_mode/);
+  assert.match(policy, /`off`[\s\S]*`ask`[\s\S]*`delegated`[\s\S]*Legacy server/);
+  const section = tools.split('- **Proof settings.**')[1].split('- **Mark Done.**')[0];
+  assert.match(section, /Reuse the active immutable revision[\s\S]*complete definition match/);
+  const decision = owner => section.split('If `decision.by` is `' + owner + '`')[1].split('\n  - ')[0];
+  assert.match(decision('manager'), /current mode is `delegated`[\s\S]*preview_hash[\s\S]*decision_mode: "delegated"[\s\S]*Omit `approved`/);
+  assert.doesNotMatch(decision('manager'), /approved: true/);
+  assert.match(decision('person'), /exact preview[\s\S]*approved: true[\s\S]*owner's reason/);
+  assert.match(section, /stale revision or hash requires a fresh preview/);
+  assert.match(section, /lost response read back the revision and receipt/);
+  assert.match(review, /story_status\.done[\s\S]*needs_you[\s\S]*publication provenance[\s\S]*branch prefix proves no ownership/);
+});

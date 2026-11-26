@@ -257,7 +257,9 @@ A change to the factory itself (an agent, a station, a limit) is offered in one 
 work carries on meanwhile. These rules are CodeBook's own sentences, copied word for word from its server, and where
 `manager_brief.rules` words one differently, the server wins.
 
-**The factory's settings.** A factory's settings are changed only where the factory lets the manager, by its own switch
+**The factory's settings.** The manager uses the active approved check revision when it already covers the request. If a new proof definition is needed, the server names who decides. An owner who enables delegated routine changes can see the manager's decision on the saved revision. Person-owned previews still ask for the exact change when approval is missing.
+
+On older servers, a factory's settings are changed only where the factory lets the manager, by its own switch
 under Factory settings › Controls ("Let the manager change this factory's settings. It still asks you before each
 change."), and only after your yes each time. The switch is off until you turn it on. With it on, the manager says in
 the chat which setting it would change and what that does, and changes it (`change_factory_setting`) only after your yes.
