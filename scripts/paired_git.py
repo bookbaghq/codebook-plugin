@@ -110,6 +110,7 @@ def match_binding(route, saved, brief):
     rows = [r for r in local.get("repositories", []) if (r.get("git_transport") or {}).get("clone") == route["checkout"]]
     require(len(rows) == 1 and (rows[0].get("repository") or rows[0].get("name") or "").lower() == route["repository"],
             "Pair this exact clone and repository in Your computer.")
+    require(rows[0].get("git_transport_eligible") is True, "CodeBook has withdrawn private Git eligibility for this repository.")
     live = rows[0]["git_transport"]
     require(saved and all(saved.get(k) == v for k, v in public_fields(route, live.get("public_key")).items())
             and live.get("fingerprint") == saved["fingerprint"], "The recorded device pairing differs from Your computer.")

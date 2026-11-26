@@ -87,7 +87,8 @@ else process.stdout.write(pub.export({format:'der',type:'spki'}).subarray(-32).t
             def tool(self, name, **args):
                 if name == "manager_brief":
                     return {"factory":{"factory":scope["factory"]}, "workflow":{"workflow":scope["workflow"]},
-                        "you":{"may_run_here":True,"local_code":{"repositories":[{"repository":r, "git_transport":v}
+                        "you":{"may_run_here":True,"local_code":{"repositories":[{"repository":r, "git_transport":v,
+                               "git_transport_eligible":r != deny.get("ineligible")}
                                for r,v in control["git_pairings"].items() if r != deny.get("revoked")]}}}
                 assert name == "story_status"
                 return live[args["story"]]
@@ -169,6 +170,9 @@ else process.stdout.write(pub.export({format:'der',type:'spki'}).subarray(-32).t
                 rejected(native.Unavailable, lambda: action("app","fetch"))
             deny.clear()
             deny["revoked"] = "org/app"
+            rejected(native.Unavailable, lambda: action("app","fetch"))
+            deny.clear()
+            deny["ineligible"] = "org/app"  # The server keeps the pairing metadata available to its owner.
             rejected(native.Unavailable, lambda: action("app","fetch"))
             deny.clear()
             assert not records
