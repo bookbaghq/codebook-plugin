@@ -1,7 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import {
-  CONTINUATION_STORE, continuationGeneration, flushContinuation, pollContinuation, restoreContinuation, stopContinuation, watchWorkflow,
-} from '../hooks/continuation'
+import { CONTINUATION_STORE } from '../hooks/continuation'
 import type { Status } from '../hooks/factory'
 import type { CodebookContinuation } from '../types'
 
@@ -106,10 +104,15 @@ test('a restarted manager reconciles each undelivered story, stays quiet and fen
   const submitted: string[] = [], writes: string[] = []
   let cursor = 1, a = false, b = true, reject = false
   let blockedRead: { entered: () => void; wait: Promise<void> } | undefined
-  on('session.id', () => ({ value: 'resumed-manager' }))
+  const session = 'resumed-manager', key = CONTINUATION_STORE + session
+  on('session.id', () => ({ value: session }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('command.register', () => ({ value: { command: 'factory' } }))
+  on('store.keys', () => ({ value: [...store.keys()] }))
   on('store.get', (_, e) => ({ value: store.get(e.key) }))
-  on('store.set', (_, e) => { writes.push('set'); store.set(e.key, e.value); return { value: undefined } })
-  on('store.delete', (_, e) => { writes.push('delete'); store.delete(e.key); return { value: undefined } })
+  on('store.set', (_, e) => { if (e.key === key) writes.push('set'); store.set(e.key, e.value); return { value: undefined } })
+  on('store.delete', (_, e) => { if (e.key === key) writes.push('delete'); store.delete(e.key); return { value: undefined } })
   on('mcp.connect', () => ({ value: { isConnected: true, server: 'codebook' } }))
   on('mcp.call', async (_, e) => {
     if (e.tool === 'factory_events') return { value: { structuredContent: { events: [], last_event: cursor }, content: [] } } as never
@@ -127,47 +130,40 @@ test('a restarted manager reconciles each undelivered story, stays quiet and fen
     return { text: e.text, context: e.context } as never
   })
 
-  await watchWorkflow($, ['pay', '--workflow', 'wf1'])
-  await pollContinuation($)
-  expect(await flushContinuation($)).toBe(true)
+  const start = () => $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await start()
+  await $.command.run(typed('manage pay --workflow wf1'))
+  await clock.advance(65000)
+  expect(submitted.length).toBe(1)
   expect(submitted[0]).toContain('#2')
   a = true; reject = true; cursor++
-  await clock.advance(30001)
-  await pollContinuation($)
-  expect(await flushContinuation($)).toBe(false)
+  // Stop at the first rejected submission, before even one delivery retry.
+  for (let i = 0; i < 10 && submitted.length < 2; i++) await clock.advance(5000)
+  expect(submitted.length).toBe(2)
   expect(submitted[1]).toContain('#1')
 
   a = false; reject = false
-  await restoreContinuation($, await continuationGeneration($))
-  await clock.advance(30001)
-  expect(await flushContinuation($)).toBe(false)
-  await pollContinuation($)
-  expect(await flushContinuation($)).toBe(false)
+  await start()
+  await clock.advance(65000)
   expect(submitted.length).toBe(2)
 
   b = false; cursor++
-  await clock.advance(30001)
-  await pollContinuation($)
+  await clock.advance(65000)
   const settled = writes.length
-  for (let i = 0; i < 2; i++) {
-    await clock.advance(300001)
-    await pollContinuation($)
-    expect(await flushContinuation($)).toBe(false)
-  }
+  for (let i = 0; i < 2; i++) await clock.advance(305000)
   expect(writes.length).toBe(settled)
 
   let entered!: () => void, release!: () => void
   const started = new Promise<void>(resolve => { entered = resolve })
   blockedRead = { entered, wait: new Promise<void>(resolve => { release = resolve }) }
   a = true; cursor++
-  await clock.advance(30001)
-  const unfinished = pollContinuation($)
+  const unfinished = clock.advance(65000)
   await started
-  await stopContinuation($)
+  await $.command.run(typed('stop'))
   const stopped = writes.length
   release()
   await unfinished
-  expect(await flushContinuation($)).toBe(false)
+  await clock.advance(65000)
   expect(writes.length).toBe(stopped)
   expect(submitted.length).toBe(2)
 })
