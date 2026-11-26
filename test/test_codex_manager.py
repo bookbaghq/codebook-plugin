@@ -571,6 +571,10 @@ if __name__ == "__main__":
         print("ok 1 - "+NAME)
         development_routing()
         print("ok 2 - Development dispatch respects repository capabilities and leaves proof permissions intact")
+        sys.dont_write_bytecode = True
+        from paired_git_fixture import exercise
+        exercise(runpy.run_path(str(SCRIPT)))
+        print("ok 3 - Paired local Git operations bind the worker checkout and keep device signing outside the worker")
         obsolete_operator_holds()
-        print("ok 3 - local manager reconciles obsolete operator holds while preserving live decisions")
-        print("1..3")
+        print("ok 4 - local manager reconciles obsolete operator holds while preserving live decisions")
+        print("1..4")

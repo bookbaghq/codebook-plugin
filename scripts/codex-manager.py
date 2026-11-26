@@ -16,6 +16,11 @@ import threading
 import time
 from urllib.parse import parse_qs, urlsplit
 
+# runpy-based local hosts load the script without adding its directory to sys.path.
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import paired_git
+
 IDENT = re.compile(r"[A-Za-z0-9_-]{1,70}")
 REPOSITORY = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}")
 STORY = re.compile(r"(?:#[1-9][0-9]{0,9}|[A-Za-z0-9_-]{1,70})")
@@ -112,6 +117,8 @@ class Host:
                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      stderr=subprocess.DEVNULL, text=True, bufsize=1)
         self.answers = queue.Queue()
+        self.git_requests = queue.Queue()
+        self.accept_git = bool(development and development.get("git_pairing"))
         self.serial = 0
         self.approval_threads = set()
         threading.Thread(target=self.listen, daemon=True).start()
@@ -124,7 +131,10 @@ class Host:
         try:
             for line in self.proc.stdout:
                 message = json.loads(line)
-                if "id" in message:
+                if (self.accept_git and message.get("method") == "item/tool/call" and "id" in message
+                        and (message.get("params") or {}).get("tool") in paired_git.TOOLS):
+                    self.git_requests.put(message)
+                elif "id" in message:
                     self.answers.put(message)
         finally:
             self.answers.put(None)
@@ -162,7 +172,10 @@ class Host:
                                                       "approvalPolicy": "on-request"})["thread"]["id"]
 
     def tool(self, name, **args):
-        result = self.call("mcpServer/tool/call", {"threadId": self.observer, "server": "codebook",
+        return self.tool_in(self.observer, name, **args)
+
+    def tool_in(self, thread, name, **args):
+        result = self.call("mcpServer/tool/call", {"threadId": thread, "server": "codebook",
                                                   "tool": name, "arguments": args})
         if result.get("isError"):
             raise Hold(f"CodeBook refused {name}; check OAuth access and the selected scope.")
@@ -237,6 +250,13 @@ def development_route(config, brief, status, story):
     route = routes.get(repo)
     if not route:
         return None, f"Configure a Development route for {repo} or hand this run to an eligible host."
+    binding = config.get("git_pairings", {}).get(repo)
+    if binding:
+        route = {**route, "git_pairing": binding}
+        try:
+            paired_git.match_binding(route, binding, brief)
+        except paired_git.Unavailable as error:
+            return route, str(error)
     return route, None
 
 
@@ -290,14 +310,17 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 3' HUP INT TERM
 # Perform the worker's actual fetch. The isolated clone retains the fetched state for its worker.
-if ! diagnostic=$(git fetch --no-tags --no-recurse-submodules origin 2>&1); then
+if test "$2" = paired; then
+    commit=$(git rev-parse --verify 'HEAD^{commit}') || exit 3
+elif ! diagnostic=$(git fetch --no-tags --no-recurse-submodules origin 2>&1); then
     case "$diagnostic" in
         *"FETCH_HEAD"*|*"cannot lock ref"*|*"unable to update"*|*"repository database"*|*"insufficient permission"*|*"unable to create temporary file"*|*"unable to write"*|*"cannot store"*) exit 3 ;;
         *uthenticat*|*"could not read Username"*|*"could not read Password"*|*"terminal prompts disabled"*|*eychain*|*securityd*|*"epository not found"*|*"ccess denied"*) exit 5 ;;
         *) exit 4 ;;
     esac
+else
+    commit=$(git rev-parse --verify 'FETCH_HEAD^{commit}') || exit 3
 fi
-commit=$(git rev-parse --verify 'FETCH_HEAD^{commit}') || exit 3
 # Even an up-to-date origin must permit a tracking-ref write for new work.
 git update-ref "$tracked" "$commit" "" || exit 3
 # Use Git's own branch, reflog, and worktree registration paths for the factory branch namespace.
@@ -305,7 +328,7 @@ git -c core.hooksPath=/dev/null worktree add --quiet --no-checkout -b "$branch" 
 """
 
 
-def preflight(host, route):
+def preflight(host, route, scope=None):
     # Both the command sandbox and subsequent worker use this process's approved overlay and named permissions.
     def enabled(method, params, field, identifier, flag):
         while True:
@@ -320,7 +343,18 @@ def preflight(host, route):
         raise Hold("Codex has not enabled the network proxy for this Development host.")
     if not enabled("permissionProfile/list", {"cwd": route["checkout"]}, "id", route["permissions"], "allowed"):
         raise Hold("Codex does not allow the selected Development permissions profile.")
-    result = host.call("command/exec", {"command": ["/bin/sh", "-c", GIT_PROBE, "codebook-git-probe", route["repository"]],
+    binding = route.get("git_pairing")
+    if binding:
+        protected = [Path(__file__).resolve().parent, Path(scope["state_directory"]).resolve()]
+        writable = [Path(scope["cwd"]).resolve(), *[Path(r["checkout"]).resolve() for r in scope["development_routes"].values()]]
+        if any(p == root or root in p.parents for root in writable for p in protected):
+            raise Hold("Run the installed supervisor and keep its state outside the worker workspace and configured clones.")
+        public = paired_git.device("public", scope, route)
+        paired_git.require(paired_git.public_fields(route, public) == binding, "The operator's protected clone key differs.")
+        paired_git.isolated_key(host, scope, route)
+        host.paired_isolated = True
+    result = host.call("command/exec", {"command": ["/bin/sh", "-c", GIT_PROBE, "codebook-git-probe", route["repository"],
+                                                   "paired" if binding else "direct"],
                       "cwd": route["checkout"], "permissionProfile": route["permissions"], "timeoutMs": 15000,
                       "outputBytesCap": 256, "env": {"GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never"}})
     code = result.get("exitCode")
@@ -428,13 +462,24 @@ def marker(key):
 
 
 def prompt(scope, item):
+    route = item.get("route") or {}
+    paired = bool(route.get("git_pairing"))
+    claim = "factory_git_claim" if paired else "CodeBook claim_work"
+    routing = ""
+    if paired:
+        routing = ("The supervisor has verified the paired clone for " + route["repository"] +
+                   ". After claiming, create your per-run worktree on a local base inside this clone, declare its exact branch and path "
+                   "to CodeBook, then call factory_git_fetch. Use the fetched origin refs for your base. "
+                   "Publish only the declared feature branch with factory_git_push. These tools take no arguments. ")
+    elif route:
+        routing = ("Your current directory is the isolated clone for " + route["repository"] +
+                   ". The supervisor just ran git fetch --no-tags --no-recurse-submodules origin in this profile. Use the fetched refs, "
+                   "create a per-run worktree within this clone and leave its checked-out branch in place. ")
     return (f"{marker(item['key'])}\nYou are the independently assigned {item['agent']} station worker at "
             f"{item['station']}. Your only assignment is CodeBook run {item['run']} on story {item['story']}, "
             f"factory {scope['factory']}, workflow {scope['workflow']}. "
             + (f"Card: {item['url']}. " if item.get("url") else "") +
-            (("Your current directory is the isolated clone for " + item["route"]["repository"] +
-              ". The supervisor just ran git fetch --no-tags --no-recurse-submodules origin in this profile. Use the fetched refs, create a per-run worktree within this clone and leave its checked-out branch in place. ") if item.get("route") else "") +
-            "The local manager already validated station, ownership and readiness. First call CodeBook claim_work "
+            routing + f"The local manager already validated station, ownership and readiness. First call {claim} "
             "for this run. If refused, leave it to its holder and finish. Follow the returned frozen brief, agent "
             "instructions and exact fence, heartbeating during work. Start with the server PR and proof records and "
             "git worktree list --porcelain to find the exact local checkout. Claiming needs no remote git operation, "
@@ -518,7 +563,8 @@ class Manager:
 
     @staticmethod
     def route_key(route):
-        return (route["repository"], route["checkout"], route["permissions"], route.get("config_profile"), route.get("revision"))
+        return (route["repository"], route["checkout"], route["permissions"], route.get("config_profile"), route.get("revision"),
+                (route.get("git_pairing") or {}).get("fingerprint"))
 
     def host_for(self, route):
         if not route:
@@ -550,6 +596,10 @@ class Manager:
         if previous:
             info = host.call("thread/resume", {**params, "threadId": previous})
         else:
+            if route and route.get("git_pairing"):
+                params["dynamicTools"] = [{"type": "function", "name": name, "description": desc,
+                                           "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}}
+                                          for name, desc in paired_git.TOOLS.items()]
             info = host.call("thread/start", {**params, "allowProviderModelFallback": False})
         self.worker = self.state["thread"] = info["thread"]["id"]
         self.record("Connected to the independent station worker thread.")
@@ -627,7 +677,8 @@ class Manager:
                 lease = waiting.get("lease") or {}
                 if (target["run"] and current.get("run") == target["run"] and waiting.get("claimed") is True
                         and type(lease.get("fence")) is int and lease["fence"] > 0 and lease.get("expired") is False):
-                    self.state["workers"][active["key"]] = {"thread": thread, "turn": turn["id"], "run": target["run"], "route": target.get("route")}
+                    self.state["workers"][active["key"]] = {"thread": thread, "turn": turn["id"], "run": target["run"],
+                            "story": target["story"], "route": target.get("route"), "git": active.get("git", {})}
                     self.state["notices"][active["key"]]["done"] = True
                     self.state.pop("active")
                     self.last_scan = 0
@@ -717,14 +768,122 @@ class Manager:
         try:
             if item.get("capability_problem"):
                 raise Hold(item["capability_problem"])
-            preflight(self.host_for(route), route)
-        except (Hold, OSError) as error:
-            message = str(error) if isinstance(error, Hold) else "The configured isolated checkout or local host is unavailable."
+            preflight(self.host_for(route), route, {**self.config, "state_directory": str(self.folder)})
+        except (Hold, OSError, paired_git.Unavailable) as error:
+            message = str(error) if isinstance(error, (Hold, paired_git.Unavailable)) else "The configured isolated checkout or local host is unavailable."
             self.capability_holds[base] = {"signature": signature, "reason": message}
             self.record(f"Development hold {base}: {message}")
             return False
         self.capability_holds.pop(base, None)
         return True
+
+    def service_git(self):
+        for host_key, host in list(self.development_hosts.items()):
+            pending = getattr(host, "git_requests", None)
+            for _ in range(8):
+                if not pending:
+                    break
+                try:
+                    request = pending.get_nowait()
+                except queue.Empty:
+                    break
+                try:
+                    receipt = self.worker_git(host_key, host, request.get("params") or {})
+                    success = True
+                except (paired_git.Unavailable, Hold, ValueError, KeyError, OSError, subprocess.SubprocessError) as error:
+                    success = False
+                    receipt = {"outcome": "held", "reason": str(error) if isinstance(error, (paired_git.Unavailable, Hold))
+                               else "The local Git or device operation could not be verified."}
+                host.send({"id": request["id"], "result": {"success": success,
+                           "contentItems": [{"type": "inputText", "text": json.dumps(receipt)}]}})
+
+    def worker_git(self, host_key, host, params):
+        verify = paired_git.require
+        thread, turn = params.get("threadId"), params.get("turnId")
+        name, call = params.get("tool"), params.get("callId")
+        verify(name in paired_git.TOOLS and params.get("arguments") == {} and not params.get("namespace")
+               and isinstance(call, str) and len(call) <= 160 and bool(call) and thread and turn,
+               "Invalid native station operation.")
+        sessions = dict(self.state["workers"])
+        active = self.state.get("active")
+        if active:
+            sessions[active["key"]] = active
+        matches = [(k, row) for k, row in sessions.items() if row["thread"] == thread and row.get("turn") == turn]
+        verify(len(matches) == 1, "This request has no current assigned worker.")
+        key, worker = matches[0]
+        item = worker.get("item") or worker
+        route, story, run = item["route"], item["story"], item["run"]
+        binding = route.get("git_pairing")
+        verify(binding and self.route_key(route) == host_key, "This worker has no paired Development route.")
+        scope = {field: self.config[field] for field in ("factory", "workflow")}
+        assignment = {**scope, "run": run, "story": story}
+        def live():
+            # Re-read local revocations even during a multi-request smart HTTP exchange.
+            control = read(self.folder/"control.json", {})
+            verify(control.get("running") and control.get("git_pairings", {}).get(route["repository"]) == binding
+                   and control.get("development_routes", {}).get(route["repository"]) == {k:v for k,v in route.items() if k != "git_pairing"},
+                   "The operator stopped or changed this Development route.")
+            brief = self.host.tool("manager_brief", **scope)
+            verify((brief.get("you") or {}).get("may_run_here") is True
+                   and (brief.get("factory") or {}).get("factory") == scope["factory"]
+                   and (brief.get("workflow") or {}).get("workflow") == scope["workflow"], "The workflow is no longer available locally.")
+            paired_git.match_binding(route, binding, brief)
+            status = self.host.tool("story_status", **scope, story=story, limit=1)
+            verify((status.get("story") or {}).get("story") == story and (status.get("run") or {}).get("run") == run
+                   and (status.get("factory") or {}).get("factory") == scope["factory"]
+                   and (status.get("workflow") or {}).get("workflow") == scope["workflow"]
+                   and (status.get("station") or {}).get("name") == "Development" and hosted_here(status),
+                   "The assigned local Development station changed.")
+            return status
+        if not getattr(host, "paired_isolated", False):
+            paired_git.isolated_key(host, {**scope, "state_directory": str(self.folder)}, route)
+            host.paired_isolated = True
+        status = live()
+        journal = worker.setdefault("git", {})
+        if name == "factory_git_claim":
+            waiting = status.get("waiting") or {}
+            verify(not journal.get("claim") and waiting.get("on") == "runner" and waiting.get("run") == run
+                   and waiting.get("on_you") is True and waiting.get("claimed") is False,
+                   "This station already has a holder or an unresolved claim attempt.")
+            journal["claim"] = "awaiting_receipt"
+            self.record("Submitting the assigned station worker's fenced claim.")
+            receipt = host.tool_in(thread, "claim_work", run=run)
+            fence = (receipt.get("lease") or {}).get("fence")
+            verify(receipt.get("run") == run and receipt.get("story") == story and receipt.get("where") == "here"
+                   and type(fence) is int and fence > 0 and (receipt.get("brief") or {}).get("station") == "Development",
+                   "CodeBook did not return this station worker's exact claim receipt.")
+            journal.update(claim="held", fence=fence)
+            self.record("Recorded the paired worker's station fence.")
+            return receipt
+        verify(journal.get("claim") == "held", "Only the station worker that received the native claim may transfer Git.")
+        fence = journal["fence"]
+        bound = paired_git.declaration(status, assignment, fence, route)
+        verify(not journal.get("calls", {}).get(call), "This native Git call was already accepted.")
+        action = "fetch" if name == "factory_git_fetch" else "push"
+        if action == "push" and journal.get("pending_push"):
+            verify(self.config.get("retries", {}).get(story, 0) > journal["pending_push"],
+                   "The prior push has an uncertain outcome. Inspect the branch and explicitly retry the story.")
+        public = paired_git.device("public", scope, route)
+        verify(paired_git.public_fields(route, public) == binding, "The protected device key differs from its enrollment.")
+        def transfer(op, body):
+            verify(paired_git.declaration(live(), assignment, fence, route) == bound, "The declared Git operation changed.")
+            if op == "push_pack":
+                journal["pending_push"] = time.time_ns()
+                self.record("Awaiting the upstream's exact assigned-branch update receipt.")
+            return paired_git.exchange(scope, route, binding, bound, op, body,
+                                       lambda **args: host.tool_in(thread, "prepare_run_here_git", **args), public)
+        try:
+            receipt = paired_git.perform(action, bound, paired_git.git_runner(route, bound, development_options(route)), transfer)
+        except Exception:
+            if action == "push" and journal.get("pending_push"):
+                self.hold_for_operator(key)
+            raise
+        if action == "push":
+            journal.pop("pending_push", None)
+        journal["calls"] = dict(list({**journal.get("calls", {}), call: True}.items())[-32:])
+        self.state["last_git_receipt"] = receipt
+        self.record("Verified the paired station worker's Git receipt.")
+        return receipt
 
     def tick(self):
         if not self.config["running"]:
@@ -748,6 +907,7 @@ class Manager:
         changed = self.state["cursor"] != cursor
         self.state["cursor"] = cursor
         self.approvals()
+        self.service_git()
         self.observe_workers()
         statuses = {}
         self.reconcile_operator_holds(scope, statuses)
@@ -864,7 +1024,8 @@ def supervise(folder):
             manager.immediate = False
             # Recheck local controls promptly without polling CodeBook or a model.
             for _ in range(delay):
-                if stop.wait(1) or read(folder / "control.json", {}) != config:
+                if (stop.wait(1) or read(folder / "control.json", {}) != config
+                        or any(not h.git_requests.empty() for h in manager.development_hosts.values())):
                     break
     finally:
         try:
@@ -885,7 +1046,7 @@ def supervise(folder):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["start", "status", "stop", "follow", "retry", "route"])
+    parser.add_argument("action", choices=["start", "status", "stop", "follow", "retry", "route", "git-enroll", "git-status"])
     parser.add_argument("--factory", required=True, type=validated)
     parser.add_argument("--workflow", required=True, type=validated)
     parser.add_argument("--cwd", type=Path)
@@ -899,6 +1060,9 @@ def main():
     if args.action == "route":
         if not (args.repo and args.checkout and args.permissions):
             parser.error("route requires --repo, --checkout and --permissions")
+    elif args.action in ("git-enroll", "git-status"):
+        if not args.repo or any((args.checkout, args.permissions, args.config_profile)):
+            parser.error("git-enroll/git-status require --repo and an existing Development route")
     elif any((args.repo, args.checkout, args.permissions, args.config_profile)):
         parser.error("repository routes must be configured with the route command")
     if args.action in ("follow", "retry") and not args.story:
@@ -918,10 +1082,47 @@ def main():
         config = read(folder/"control.json", {})
         print(json.dumps({**state, "running": running(folder), "enabled": config.get("running", False),
                           "stories": config.get("stories", []), "development_routes": config.get("development_routes", {}),
+                          "git_pairings": config.get("git_pairings", {}),
                           "manage_ready": config.get("manage_ready", False), "state_directory": str(folder)}, indent=2))
         return
     with locked(folder/"control.lock"):
         config = read(folder/"control.json", {})
+        if args.action == "git-status":
+            route = config.get("development_routes", {}).get(args.repo)
+            binding = config.get("git_pairings", {}).get(args.repo)
+            if not route or not binding:
+                print(json.dumps({"repository": args.repo, "state": "not_enrolled"}))
+                return
+            scope = {"factory": args.factory, "workflow": args.workflow}
+            host = None
+            try:
+                public = paired_git.device("public", scope, route)
+                paired_git.require(paired_git.public_fields(route, public) == binding, "The protected device key differs.")
+                cwd = config.get("cwd") or route["checkout"]
+                host = Host(cwd)
+                host.open(cwd)
+                paired_git.match_binding(route, binding, host.tool("manager_brief", **scope))
+                result = {"state": "paired"}
+            except (OSError, Hold, paired_git.Unavailable) as error:
+                result = {"state": "unavailable", "reason": str(error) if isinstance(error, (Hold, paired_git.Unavailable))
+                          else "The local Codex host is unavailable."}
+            finally:
+                if host:
+                    host.close()
+            print(json.dumps({**binding, **result}, indent=2))
+            return
+        if args.action == "git-enroll":
+            route = config.get("development_routes", {}).get(args.repo)
+            if not route:
+                parser.error("configure the repository route before enrolling its device key")
+            try:
+                public = paired_git.device("enroll", {"factory": args.factory, "workflow": args.workflow}, route)
+                binding = paired_git.public_fields(route, public)
+            except paired_git.Unavailable as error:
+                parser.error(str(error))
+            save(folder/"control.json", {**config, "git_pairings": {**config.get("git_pairings", {}), args.repo: binding}})
+            print(json.dumps({**binding, "state": "awaiting_person_pairing"}, indent=2))
+            return
         if args.action == "route":
             if not args.checkout.is_absolute() or not args.checkout.is_dir():
                 parser.error("provide the absolute path of an existing isolated checkout")
@@ -968,7 +1169,7 @@ def main():
         stories = sorted(set(args.story or config.get("stories", [])))
         if len(stories) > 64:
             parser.error("use at most 64 explicitly owned stories per workflow")
-        config = {"factory": args.factory, "workflow": args.workflow, "cwd": cwd, "stories": stories, "retries": config.get("retries", {}), "development_routes": config.get("development_routes", {}), "manage_ready": args.manage_ready or config.get("manage_ready", False), "running": True}
+        config = {**config, "factory": args.factory, "workflow": args.workflow, "cwd": cwd, "stories": stories, "retries": config.get("retries", {}), "development_routes": config.get("development_routes", {}), "manage_ready": args.manage_ready or config.get("manage_ready", False), "running": True}
         owner = (folder/"owner.lock").open("a+")
         fcntl.flock(owner, fcntl.LOCK_EX | fcntl.LOCK_NB)
         save(folder/"control.json", config)
