@@ -210,6 +210,20 @@ def hosted_here(status):
     return location == "here"
 
 
+def scoped_story_status(host, scope, story, statuses):
+    if story not in statuses:
+        try:
+            status = host.tool("story_status", **scope, story=story, limit=1)
+        except Hold:
+            status = {}
+        identities = {**scope, "story": story}
+        statuses[story] = status if all(
+            isinstance(status.get(field), dict) and status[field].get(field) == expected
+            for field, expected in identities.items()
+        ) else None
+    return statuses[story]
+
+
 def development_route(config, brief, status, story):
     """A host assignment never authorizes a new story or an unrelated checkout."""
     routes = config.get("development_routes", {})
@@ -352,8 +366,10 @@ def preflight(host, route, scope=None):
         raise Hold(reasons.get(code, "The sandboxed Development capability check did not pass."))
 
 
-def eligible(host, config, adopted, only=None):
+def eligible(host, config, adopted, only=None, statuses=None):
     scope = {k: config[k] for k in ("factory", "workflow")}
+    if statuses is None:
+        statuses = {}
     allowed = set(config["stories"]) | set(adopted)
     if not allowed and not config["manage_ready"]:
         return [], "Observing only; assign a story or opt into manager-ready drawer work."
@@ -409,9 +425,8 @@ def eligible(host, config, adopted, only=None):
     for story, run, proposal, item in dict.fromkeys(candidates):
         if only and (story, proposal, item) != (only["story"], only["proposal"], only["item"]):
             continue
-        status = host.tool("story_status", **scope, story=story, limit=1)
-        if (status.get("factory", {}).get("factory") != scope["factory"]
-                or status.get("workflow", {}).get("workflow") != scope["workflow"] or not hosted_here(status)):
+        status = scoped_story_status(host, scope, story, statuses)
+        if status is None or not hosted_here(status):
             continue
         waiting = status.get("waiting") or {}
         if run:
@@ -496,6 +511,34 @@ def run_holds(state):
     return state["run_holds"]
 
 
+def station_run_ended(run):
+    finished_at = run.get("finished_at")
+    return (isinstance(finished_at, str) and bool(finished_at)
+            and run.get("state") in ("passed", "failed", "blocked", "cancelled", "superseded", "sent_back"))
+
+
+def operator_hold_ended(status, held):
+    current = status.get("run")
+    if current is not None:
+        if not isinstance(current, dict) or type(current.get("run")) is not int:
+            return False
+        if current["run"] == held:
+            return station_run_ended(current)
+    waiting = status.get("waiting")
+    if waiting is not None and (not isinstance(waiting, dict) or waiting.get("run") == held):
+        return False
+    if current is not None and current["run"] > held:
+        return True
+    if current is None and waiting is None and status.get("finished") in ("done", "dropped"):
+        return True
+    # The current station can have no run while a previous station records the exact run's end.
+    stations = status.get("stations")
+    if not isinstance(stations, list):
+        return False
+    exact = [run for run in stations if isinstance(run, dict) and type(run.get("run")) is int and run["run"] == held]
+    return bool(exact) and all(station_run_ended(run) for run in exact)
+
+
 class Manager:
     def __init__(self, folder, config, host):
         self.folder, self.config, self.host = folder, config, host
@@ -504,6 +547,9 @@ class Manager:
         self.state.setdefault("lease_events", {})
         self.state.setdefault("workers", {})
         self.holds = run_holds(self.state)
+        self.state["interaction_required"] = bool(self.holds)
+        self.next_hold_read = 0
+        self.last_held_story = ""
         self.state.update(pid=os.getpid(), phase="starting")
         self.last_scan = 0
         self.immediate = False
@@ -665,6 +711,29 @@ class Manager:
         self.holds[key.partition(":expiry:")[0]] = time.time_ns()
         self.state["interaction_required"] = True
         self.record("An operator decision is required for " + key + "; retry that story explicitly after resolution.")
+
+    def reconcile_operator_holds(self, scope, statuses):
+        """Retire old host decisions only after CodeBook confirms the run has ended."""
+        now = time.monotonic()
+        if not self.holds or now < self.next_hold_read:
+            return
+        self.next_hold_read = now + INTERVAL
+        by_story = {}
+        for key in self.holds:
+            story, _, number = key.partition(":")
+            if STORY.fullmatch(story) and re.fullmatch(r"[1-9][0-9]{0,18}", number):
+                by_story.setdefault(story, []).append((key, int(number)))
+        # Rotate a small batch. A live hold or an unavailable story cannot starve the others.
+        stories = sorted(by_story, key=lambda story: (story <= self.last_held_story, story))
+        for story in stories[:4]:
+            self.last_held_story = story
+            status = scoped_story_status(self.host, scope, story, statuses)
+            if status is None:
+                continue
+            for key, held in by_story[story]:
+                if operator_hold_ended(status, held):
+                    del self.holds[key]
+        self.state["interaction_required"] = bool(self.holds)
 
     def confirm(self, item, entry):
         """Caller holds the control fence; record intent before the single allowed MCP mutation."""
@@ -840,15 +909,17 @@ class Manager:
         self.approvals()
         self.service_git()
         self.observe_workers()
+        statuses = {}
+        self.reconcile_operator_holds(scope, statuses)
         if self.reconcile():
             self.record(self.state.get("reason", "Waiting for the manager receipt."))
             return
         self.state["phase"] = "observing"
-        if not changed and time.monotonic() - self.last_scan < RECONCILE:
+        if not changed and self.last_scan and time.monotonic() - self.last_scan < RECONCILE:
             self.record(self.state.get("reason", "Waiting for a CodeBook event."))
             return
         self.last_scan = time.monotonic()
-        ready, reason = eligible(self.host, self.config, self.state["adopted"])
+        ready, reason = eligible(self.host, self.config, self.state["adopted"], statuses=statuses)
         for item in ready:
             expired_at = self.state["lease_events"].get(item["key"])
             if item["run"] and expired_at:
