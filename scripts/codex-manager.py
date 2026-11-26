@@ -695,17 +695,24 @@ class Manager:
 
     def report_usage(self):
         pending = self.state.setdefault("usage_pending", {})
+        # The worker queues exactly one answer before it exits. Consume it before
+        # selecting a retry, even if it finishes between supervisor ticks.
+        if self.usage_thread and self.usage_thread.is_alive():
+            return
         try:
             answered = self.usage_results.get_nowait()
         except queue.Empty:
             pass
         else:
-            if answered.get("delivered"):
-                pending.pop(answered["thread"], None)
-            else:
+            existing = pending.get(answered["thread"])
+            if existing and existing["turn"] == answered["turn"] and answered.get("delivered"):
+                # Removing the pending receipt and charging it are persisted together.
+                # A duplicate reply or a restart cannot charge the same turn twice.
+                if self.config.get("local_token_budget") is not None:
+                    self.state["local_tokens_used"] = self.state.get("local_tokens_used", 0) + answered["usage"]["total_tokens"]
+                del pending[answered["thread"]]
+            elif existing and existing["turn"] == answered["turn"]:
                 pending[answered["thread"]] = answered
-        if self.usage_thread and self.usage_thread.is_alive():
-            return
         for entry in pending.values():
             if int(time.time()) >= entry.get("next", 0) and not entry.get("unavailable"):
                 self.usage_thread = threading.Thread(target=self.deliver_usage, args=(dict(entry),), daemon=True)
@@ -727,6 +734,18 @@ class Manager:
                 self.queue_usage(worker, ended)
                 self.approvals()
                 del self.state["workers"][key]
+
+    def local_budget_hold(self):
+        limit = self.config.get("local_token_budget")
+        if limit is None:
+            return None
+        if self.state.get("usage_pending"):
+            return "Waiting for a verified native usage receipt before spending more of the local token budget."
+        if self.state.get("local_tokens_used", 0) >= limit:
+            return "The local workflow token budget has been reached."
+        if self.state.get("workers"):
+            return "A local station is still spending against this workflow's token budget."
+        return None
 
     def reconcile(self):
         active = self.state.get("active")
@@ -780,6 +799,9 @@ class Manager:
             raise Hold("An accepted turn is temporarily unavailable. Waiting for its recorded outcome.")
         # May have lost the acknowledgement. Give history time to materialize before rechecking eligibility.
         if time.time() - active["at"] < 60:
+            return True
+        if self.config.get("local_token_budget") is not None:
+            self.record("Waiting for the unacknowledged turn before spending more local tokens.")
             return True
         self.state.pop("active")
         self.last_scan = 0
@@ -1006,6 +1028,11 @@ class Manager:
         if self.reconcile():
             self.record(self.state.get("reason", "Waiting for the manager receipt."))
             return
+        budget_hold = self.local_budget_hold()
+        if budget_hold:
+            self.state["phase"] = "held"
+            self.record(budget_hold)
+            return
         self.state["phase"] = "observing"
         if not changed and self.last_scan and time.monotonic() - self.last_scan < RECONCILE:
             self.record(self.state.get("reason", "Waiting for a CodeBook event."))
@@ -1147,6 +1174,7 @@ def main():
     parser.add_argument("--permissions", type=validated)
     parser.add_argument("--config-profile", type=validated)
     parser.add_argument("--manage-ready", action="store_true", help="also manage server-authorized local agent runs and ready drawer items in this workflow")
+    parser.add_argument("--local-token-budget", type=int, help="stop new local turns once this workflow's measured gross tokens reach the limit")
     parser.add_argument("--story", action="append", type=lambda x: validated(x, STORY), default=[])
     args = parser.parse_args()
     if args.action == "route":
@@ -1163,6 +1191,8 @@ def main():
         parser.error("--story is valid on start, follow, retry or route")
     if args.manage_ready and args.action != "start":
         parser.error("--manage-ready is an option for start")
+    if args.local_token_budget is not None and (args.action != "start" or args.local_token_budget < 1):
+        parser.error("--local-token-budget requires start and a positive number of tokens")
     if args.cwd and args.action != "start":
         parser.error("--cwd is only valid on start")
     os.umask(0o077)
@@ -1175,7 +1205,8 @@ def main():
         print(json.dumps({**state, "running": running(folder), "enabled": config.get("running", False),
                           "stories": config.get("stories", []), "development_routes": config.get("development_routes", {}),
                           "git_pairings": config.get("git_pairings", {}),
-                          "manage_ready": config.get("manage_ready", False), "state_directory": str(folder)}, indent=2))
+                          "manage_ready": config.get("manage_ready", False), "local_token_budget": config.get("local_token_budget"),
+                          "state_directory": str(folder)}, indent=2))
         return
     with locked(folder/"control.lock"):
         config = read(folder/"control.json", {})
@@ -1262,6 +1293,8 @@ def main():
         if len(stories) > 64:
             parser.error("use at most 64 explicitly owned stories per workflow")
         config = {**config, "factory": args.factory, "workflow": args.workflow, "cwd": cwd, "stories": stories, "retries": config.get("retries", {}), "development_routes": config.get("development_routes", {}), "manage_ready": args.manage_ready or config.get("manage_ready", False), "running": True}
+        if args.local_token_budget is not None:
+            config["local_token_budget"] = args.local_token_budget
         owner = (folder/"owner.lock").open("a+")
         fcntl.flock(owner, fcntl.LOCK_EX | fcntl.LOCK_NB)
         save(folder/"control.json", config)

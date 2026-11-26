@@ -1,4 +1,5 @@
 import json
+import runpy
 import sys
 import tempfile
 import unittest
@@ -9,6 +10,31 @@ from native_usage import completion_fence, turn_usage
 
 
 class NativeUsage(unittest.TestCase):
+    def test_budget_holds_dispatch_until_receipt_and_survives_restart(self):
+        manager_type = runpy.run_path(str(Path(__file__).resolve().parents[1] / "scripts/codex-manager.py"))["Manager"]
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            config = {"local_token_budget": 60}
+            manager = manager_type(folder, config, None)
+            self.assertIsNone(manager.local_budget_hold())
+            manager.state["workers"]["story"] = {"thread": "own"}
+            self.assertIn("still spending", manager.local_budget_hold())
+            manager.state["workers"].clear()
+            receipt = {"thread": "own", "turn": "assigned"}
+            manager.state["usage_pending"] = {"own": {**receipt, "unavailable": True}}
+            self.assertIn("verified native usage", manager.local_budget_hold())
+            manager.config = {}
+            self.assertIsNone(manager.local_budget_hold())
+            manager.config = config
+            delivered = {**receipt, "delivered": True, "usage": {"total_tokens": 66}}
+            for answer in [delivered, {**receipt, "unavailable": True}, delivered]:
+                manager.usage_results.put(answer)
+                manager.report_usage()
+            self.assertEqual(manager.state["local_tokens_used"], 66)
+            manager.record("stopped")
+            restored = manager_type(folder, config, None)
+            self.assertIn("budget has been reached", restored.local_budget_hold())
+
     def test_finished_turn_isolated_from_adjacent_work_and_repeated_events(self):
         def event(kind, **payload):
             return {"type": "event_msg", "payload": {"type": kind, **payload}}
