@@ -22,7 +22,7 @@ def fake_server():
     root = Path(os.environ["CODEBOOK_TEST_FIXTURE"])
     for raw in sys.stdin:
         msg = json.loads(raw)
-        if "id" not in msg:
+        if "id" not in msg or "method" not in msg:
             continue
         method, params = msg["method"], msg["params"]
         cfg = json.loads((root/"factory.json").read_text())
@@ -30,19 +30,45 @@ def fake_server():
         value = {}
         if method == "account/read":
             value = {"account": {"type": "chatgpt"}}
-        elif method in ("thread/start", "thread/resume"):
-            value = {"thread": {"id": "observe" if params.get("ephemeral") else "dedicated-manager"}}
+        elif method == "thread/start":
+            count = len(turns) + 1
+            value = {"thread": {"id": "observe" if params.get("ephemeral") else f"worker-{count}"}}
+        elif method == "thread/resume":
+            value = {"thread": {"id": params["threadId"]}}
         elif method == "mcpServer/tool/call":
             assert params["threadId"] == "observe"
             tool, args = params["tool"], params["arguments"]
             if tool == "factory_events":
                 data = {"last_event": cfg["cursor"], "events": cfg.get("events", [])}
             elif tool == "manager_brief":
-                row = {"ready": cfg["ready"], "workflow": "Software", "story": "newStory", "reference": "#301",
-                       "start_with": "confirm via current server", "proposal": {"proposal": "wo2", "item": 9}}
-                page = {"stories": [row]} if args.get("backlog_offset") else {"stories": [], "next_offset": 1}
+                rows = [{"ready": ready, "workflow": "Software", "story": story,
+                         "start_with": f'confirm_stories {{ proposal: "wo2", stories: [{item}], decided_by: "manager" }}',
+                         "proposal": {"proposal": "wo2", "item": item}} for story, item, ready in
+                        (("uncertain", 8, cfg.get("ambiguous", False)), ("newStory", 9, cfg["ready"]))]
+                page = {"stories": rows} if args.get("backlog_offset") else {"stories": [], "next_offset": 1}
                 data = {"factory": {"factory": "factoryA"}, "workflow": {"workflow": "wf9", "name": "Software"},
                         "you": {"may_run_here": True}, "backlog": page}
+            elif tool == "confirm_stories":
+                assert args == {**{"factory": "factoryA", "proposal": "wo2", "stories": args["stories"]},
+                                "decided_by": "manager", "run_location": "here", "start": True}
+                item = args["stories"][0]
+                story = "newStory" if item == 9 else "uncertain"
+                state = json.loads((root/"state/codebook/codex-manager/factoryA/wf9/status.json").read_text())
+                assert state["notices"][f"{story}:wo2:{item}"]["confirmation"] == "awaiting_receipt"
+                assert (root/"factory.json").exists() and not cfg["paused"]
+                if item == 9:
+                    assert cfg["ready"]
+                    cfg["ready"] = False
+                    cfg["work"].append(["newStory", 22, False])
+                    created = [{"item": 9, "story": "newStory", "run_location": "here", "from_backlog": True, "moved_by_hand": False}]
+                else:
+                    assert item == 8 and cfg["ambiguous"]
+                    cfg["ambiguous"] = False
+                    cfg["work"].append(["uncertain", 44, False])
+                    created = []  # raced another manager; post-state alone grants no ownership
+                (root/"confirmations.log").open("a").write(story + "\n")
+                write(root/"factory.json", cfg)
+                data = {"decided_by": "manager", "proposal": {"proposal": "wo2"}, "created": created}
             elif tool == "factory_operations":
                 data = {"snapshot": {"control": {"paused": cfg["paused"]}, "holds": []}}
             elif tool == "list_my_work":
@@ -54,23 +80,30 @@ def fake_server():
                 current = next(((r, c) for s,r,c in cfg["work"] if s == story), None)
                 data = {"factory": {"factory": "factoryA"}, "workflow": {"workflow": "wf9"},
                         "run_location": {"where": "here", "person": {"is_you": True}},
-                        "in_backlog": story == "newStory" and cfg["ready"], "run": None, "waiting": None}
+                        "in_backlog": (story == "newStory" and cfg["ready"]) or (story == "uncertain" and cfg.get("ambiguous")),
+                        "station": {"name": "QA", "worker": {"type": "agent", "name": "Jade"}},
+                        "run": None, "waiting": None}
                 if current:
                     run, claimed = current
                     data.update(run={"run": run, "status": "external"},
-                                waiting={"run": run, "on": "runner", "on_you": True, "claimed": claimed})
+                                waiting={"run": run, "on": "runner", "on_you": True, "claimed": claimed,
+                                         "lease": {"fence": 1, "expired": False} if claimed else None})
             else:
                 raise AssertionError(tool)
             value = {"isError": False, "structuredContent": data, "content": []}
         elif method == "turn/start":
-            assert params["threadId"] == "dedicated-manager"
-            turn = {"id": "t"+str(len(turns)+1), "status": "inProgress",
+            assert params["threadId"].startswith("worker-")
+            turn = {"id": "t"+str(len(turns)+1), "status": "inProgress", "workerThread": params["threadId"],
                     "items": [{"type": "userMessage", "content": params["input"]}]}
             turns.insert(0, turn)
             write(root/"turns.json", turns)
             value = {"turn": turn}
         elif method == "thread/turns/list":
-            value = {"data": turns}
+            if cfg.get("approval_thread") == params["threadId"] and not (root/"approval").exists():
+                (root/"approval").touch()
+                print(json.dumps({"id": "request-approval", "method": "item/commandExecution/requestApproval",
+                                  "params": {"threadId": params["threadId"]}}), flush=True)
+            value = {"data": [t for t in turns if t["workerThread"] == params["threadId"]]}
         elif method == "turn/interrupt":
             pass
         elif method != "initialize":
@@ -106,7 +139,7 @@ def rehearsal():
             return json.loads(state.read_text()) if state.exists() else {}
         def turns():
             return json.loads((root/"turns.json").read_text())
-        cfg = {"cursor": 7, "paused": False, "ready": True, "work": [["foreign", 20, False], ["claimed", 21, True]]}
+        cfg = {"cursor": 7, "paused": False, "ready": True, "ambiguous": True, "work": [["foreign", 20, False], ["claimed", 21, True]]}
         write(root/"factory.json", cfg)
         write(root/"turns.json", [])
         def acknowledged():
@@ -117,7 +150,7 @@ def rehearsal():
         try:
             cli("start", "--cwd", str(root))
             until(acknowledged)
-            assert not turns() and status()["cursor"] == 7
+            assert not turns() and status()["cursor"] == 7 and not (root/"confirmations.log").exists()
             assert cli("start", "--cwd", str(root), check=False).returncode
             stop()
             cfg["paused"] = True
@@ -130,51 +163,48 @@ def rehearsal():
             cli("follow", "--story", "claimed")
             until(lambda: len(turns()) == 1)
             first = turns()[0]
-            assert "[CodeBook local wake newStory:wo2:9]" in first["items"][0]["content"][0]["text"]
-            assert "foreign" not in first["items"][0]["content"][0]["text"]
-            # Stopping/restarting keeps the submitted turn in history; observing it cannot issue another wake.
+            assert "[CodeBook local wake newStory:22]" in first["items"][0]["content"][0]["text"]
+            assert "claim_work" in first["items"][0]["content"][0]["text"]
+            assert status()["adopted"] == ["newStory"]
+            assert (root/"confirmations.log").read_text().splitlines() == ["uncertain", "newStory"]
+            assert not any("uncertain:44" in t["items"][0]["content"][0]["text"] for t in turns())
             stop()
             cli("start", "--cwd", str(root))
             until(lambda: status().get("phase") == "working")
             assert len(turns()) == 1
-            cfg.update(cursor=8, ready=False, work=[["foreign", 20, False], ["newStory", 22, False], ["claimed", 21, True]])
+            cfg = json.loads((root/"factory.json").read_text())
+            cfg.update(cursor=8, work=[["foreign", 20, False], ["newStory", 22, True], ["other", 23, False]])
             write(root/"factory.json", cfg)
-            first["status"] = "completed"
-            first["items"].append({"type": "mcpToolCall", "server": "codebook", "tool": "confirm_stories",
-                "status": "completed", "arguments": {"proposal": "wo2", "stories": [9], "decided_by": "manager"},
-                "result": {"structuredContent": {"created": [{"item": 9, "story": "newStory", "run_location": "here"}]}}})
-            write(root/"turns.json", [first])
-            cli("follow", "--story", "idle1")  # local control change requests prompt reconciliation
+            cli("follow", "--story", "other")
             until(lambda: len(turns()) == 2)
-            assert "newStory" in status()["adopted"] and status()["cursor"] == 8
-            second, previous = turns()
-            assert "[CodeBook local wake newStory:22]" in second["items"][0]["content"][0]["text"]
-            second["status"] = "completed"  # successful transport with unchanged server state
-            write(root/"turns.json", [second, previous])
+            assert "newStory:22" in status()["workers"] and turns()[1]["status"] == "inProgress"
+            second, first = turns()
+            assert second["workerThread"] != first["workerThread"]
+            assert "[CodeBook local wake other:23]" in second["items"][0]["content"][0]["text"]
+            second["status"] = "completed"  # transport success without actual station transition
+            write(root/"turns.json", [second, first])
             cli("follow", "--story", "idle2")
             until(lambda: not status().get("active"))
-            notice = status()["notices"]["newStory:22"]
+            notice = status()["notices"]["other:23"]
             assert notice["attempts"] == 1 and not notice.get("done") and notice["next"] > time.time()
             assert len(turns()) == 2
-            cfg.update(cursor=9, work=[["newStory", 23, False]])
-            write(root/"factory.json", cfg)
-            cli("follow", "--story", "idle3")
-            until(lambda: len(turns()) == 3)
-            active_turns = turns()
-            active_turns[0]["status"] = "completed"
-            cfg["work"] = [["newStory", 23, True]]
-            write(root/"factory.json", cfg)
-            write(root/"turns.json", active_turns)
-            cli("follow", "--story", "idle4")
-            until(lambda: status()["notices"].get("newStory:23", {}).get("done"))
             # A real expired lease reopens the same run. Duplicate feed delivery creates one fresh wake.
-            cfg.update(cursor=10, work=[["newStory", 23, False], ["foreign", 24, False]],
-                       events=[{"id": 10, "kind": "run.claim_expired", "card": {"key": "newStory"}, "run": 23}])
+            cfg.update(cursor=10, work=[["newStory", 22, False], ["foreign", 24, False]],
+                       events=[{"id": 10, "kind": "run.claim_expired", "card": {"key": "newStory"}, "run": 22}])
             write(root/"factory.json", cfg)
             cli("follow", "--story", "idle5")
-            until(lambda: len(turns()) == 4)
-            assert "[CodeBook local wake newStory:23:expiry:10]" in turns()[0]["items"][0]["content"][0]["text"]
+            until(lambda: len(turns()) == 3)
+            assert "[CodeBook local wake newStory:22:expiry:10]" in turns()[0]["items"][0]["content"][0]["text"]
+            records = turns()
+            records[0]["status"] = "completed"
+            cfg["approval_thread"] = records[0]["workerThread"]
+            write(root/"factory.json", cfg)
+            write(root/"turns.json", records)
             cli("follow", "--story", "idle6")
+            until(lambda: status()["notices"]["newStory:22:expiry:10"].get("operator_hold"))
+            assert len(turns()) == 3
+            cli("retry", "--story", "newStory")
+            until(lambda: len(turns()) == 4)
             stop()
             assert len(turns()) == 4 and not json.loads(cli("status").stdout)["enabled"]
         finally:

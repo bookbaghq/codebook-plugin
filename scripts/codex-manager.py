@@ -14,6 +14,7 @@ import sys
 import tempfile
 import threading
 import time
+from urllib.parse import parse_qs, urlsplit
 
 IDENT = re.compile(r"[A-Za-z0-9_-]{1,70}")
 STORY = re.compile(r"(?:#[1-9][0-9]{0,9}|[A-Za-z0-9_-]{1,70})")
@@ -78,7 +79,7 @@ class Host:
                                      stderr=subprocess.DEVNULL, text=True, bufsize=1)
         self.answers = queue.Queue()
         self.serial = 0
-        self.approval = False
+        self.approval_threads = set()
         threading.Thread(target=self.listen, daemon=True).start()
 
     def send(self, message):
@@ -107,7 +108,7 @@ class Host:
                 raise Hold("Codex app server disconnected.")
             if "method" in msg:
                 # This unattended transport never answers approval, elicitation or tool requests for a person.
-                self.approval = True
+                self.approval_threads.add((msg.get("params") or {}).get("threadId"))
                 self.send({"id": msg["id"], "error": {"code": -32603, "message": "Operator interaction required."}})
             elif msg.get("id") == self.serial:
                 if "error" in msg:
@@ -161,7 +162,7 @@ def hosted_here(status):
     return location == "here"
 
 
-def eligible(host, config, adopted):
+def eligible(host, config, adopted, only=None):
     scope = {k: config[k] for k in ("factory", "workflow")}
     allowed = set(config["stories"]) | set(adopted)
     if not allowed and not config["manage_ready"]:
@@ -201,11 +202,12 @@ def eligible(host, config, adopted):
     while True:
         for row in page.get("stories", []):
             proposal = row.get("proposal") or {}
-            if (row.get("ready") is True and row.get("start_with") and row.get("workflow") == name
-                    and (config["manage_ready"] or row.get("story") in allowed or row.get("reference") in allowed)
+            if (config["manage_ready"] and row.get("ready") is True and row.get("workflow") == name
                     and isinstance(proposal.get("proposal"), str) and IDENT.fullmatch(proposal["proposal"])
                     and type(proposal.get("item")) is int and proposal["item"] > 0):
-                candidates.append((validated(row["story"]), 0, proposal["proposal"], proposal["item"]))
+                action = 'confirm_stories { proposal: "%s", stories: [%d], decided_by: "manager" }' % (proposal["proposal"], proposal["item"])
+                if row.get("start_with") == action:
+                    candidates.append((validated(row["story"]), 0, proposal["proposal"], proposal["item"]))
         following = page.get("next_offset")
         if following is None:
             break
@@ -215,6 +217,8 @@ def eligible(host, config, adopted):
         page = host.tool("manager_brief", **scope, backlog_offset=offset)["backlog"]
     ready = []
     for story, run, proposal, item in dict.fromkeys(candidates):
+        if only and (story, proposal, item) != (only["story"], only["proposal"], only["item"]):
+            continue
         status = host.tool("story_status", **scope, story=story, limit=1)
         if (status.get("factory", {}).get("factory") != scope["factory"]
                 or status.get("workflow", {}).get("workflow") != scope["workflow"] or not hosted_here(status)):
@@ -227,7 +231,21 @@ def eligible(host, config, adopted):
         elif not status.get("in_backlog") or status.get("run"):
             continue
         key = f"{story}:{run}" if run else f"{story}:{proposal}:{item}"
-        ready.append({"key": key, "story": story, "run": run, "proposal": proposal, "item": item})
+        candidate = {"key": key, "story": story, "run": run, "proposal": proposal, "item": item}
+        if run:
+            station = status.get("station") or {}
+            worker = station.get("worker") or {}
+            if worker.get("type") != "agent":
+                continue
+            for field, label in (("station", station.get("name")), ("agent", worker.get("name"))):
+                candidate[field] = label if isinstance(label, str) and re.fullmatch(r"[A-Za-z][A-Za-z0-9 ._-]{0,47}", label) else field
+            uri = urlsplit(status.get("url") or "")
+            board = parse_qs(uri.query).get("board", [""])[0]
+            if (uri.scheme == "https" and uri.netloc == "app.codebook.work"
+                    and re.fullmatch(r"/workspace/[A-Za-z0-9_-]+/factory/"+re.escape(config["factory"]), uri.path)
+                    and parse_qs(uri.query).get("card") == [story] and board.isascii() and board.isdecimal()):
+                candidate["url"] = "https://app.codebook.work" + uri.path + "?card=" + story + "&board=" + board
+        ready.append(candidate)
     return ready, "Waiting for fresh eligible local work in this scope."
 
 
@@ -236,36 +254,27 @@ def marker(key):
 
 
 def prompt(scope, item):
-    return (f"{marker(item['key'])}\nManage only factory {scope['factory']}, workflow {scope['workflow']}, "
-            f"story {item['story']}, " + (f"local station run {item['run']}. " if item["run"] else "manager-ready backlog item. ") +
-            "Read the current CodeBook manager brief and revalidate this exact item's ownership, local location, "
-            "approval, prerequisites, current stage and capacity before acting. If another manager or worker owns it, leave it. "
-            "Use only normal CodeBook stations. Delegate each eligible station to an independent local worker to claim "
-            "with a fresh fence and follow its frozen brief. Never self-QA. An approved backlog item may start only "
-            "through the current server-provided start operation. Keep production, human decisions, spending and proof gates intact. "
-            "For a ready drawer item, confirm only its exact proposal/item on this manager thread so the host can verify ownership. "
-            "Return a short dispatch acknowledgement once the independent worker holds a fresh claim, or report the actual hold. "
-            "Reuse matching exact-head proof. This wake gives no additional authorization.")
+    return (f"{marker(item['key'])}\nYou are the independently assigned {item['agent']} station worker at "
+            f"{item['station']}. Your only assignment is CodeBook run {item['run']} on story {item['story']}, "
+            f"factory {scope['factory']}, workflow {scope['workflow']}. "
+            + (f"Card: {item['url']}. " if item.get("url") else "") +
+            "The local manager already validated station, ownership and readiness. First call CodeBook claim_work "
+            "for this run. If refused, leave it to its holder and finish. Follow the returned frozen brief, agent "
+            "instructions and exact fence, heartbeating during work. Start with the server PR and proof records and "
+            "git worktree list --porcelain to find the exact local checkout. Claiming needs no remote git operation, "
+            "repo search, work-order history or test. Reuse matching verified receipts, investigate only actual gaps, "
+            "and finish using complete_work with your valid fence. Respect the approved scope, proof and human gates. "
+            "Do not run another station or manager, self-QA, merge or change settings.")
 
 
-def builder_confirmed(item, target):
-    """Only a successful confirmation in our dedicated thread establishes continued ownership."""
-    if item.get("type") != "mcpToolCall" or item.get("server") != "codebook" or item.get("tool") != "confirm_stories":
+def exact_confirmation(result, target):
+    created = result.get("created")
+    if (result.get("decided_by") != "manager" or (result.get("proposal") or {}).get("proposal") != target["proposal"]
+            or not isinstance(created, list) or len(created) != 1):
         return False
-    args = item.get("arguments") or {}
-    result = item.get("result") or {}
-    body = result.get("structuredContent")
-    if not isinstance(body, dict):
-        try:
-            body = json.loads(result["content"][0]["text"])
-        except (KeyError, IndexError, ValueError, TypeError):
-            return False
-    created = body.get("created", []) if isinstance(body, dict) else []
-    actually_started = any(row.get("story") == target["story"] and row.get("item") == target["item"]
-                           and row.get("run_location") == "here" and not row.get("moved_by_hand") for row in created)
-    return (actually_started and item.get("status") == "completed" and not item.get("error")
-            and args.get("proposal") == target["proposal"] and args.get("stories") == [target["item"]]
-            and args.get("decided_by") == "manager" and args.get("run_location", "here") == "here")
+    row = created[0]
+    return (isinstance(row, dict) and row.get("story") == target["story"] and row.get("item") == target["item"]
+            and row.get("run_location") == "here" and row.get("from_backlog") is True and row.get("moved_by_hand") is False)
 
 
 class Manager:
@@ -274,33 +283,55 @@ class Manager:
         self.state = read(folder / "status.json", {"cursor": 0, "notices": {}})
         self.state.setdefault("adopted", [])
         self.state.setdefault("lease_events", {})
+        self.state.setdefault("workers", {})
         self.state.update(pid=os.getpid(), phase="starting")
         self.last_scan = 0
+        self.immediate = False
         self.worker = None
 
     def record(self, reason):
         self.state["reason"] = reason
         save(self.folder / "status.json", self.state)
 
-    def worker_thread(self):
-        if self.worker:
-            return self.worker
+    def worker_thread(self, previous=None):
+        if previous and previous == self.worker:
+            return previous
         params = {"cwd": self.config["cwd"], "sandbox": "workspace-write", "approvalPolicy": "on-request",
                   "modelProvider": "openai"}
-        previous = self.state.get("thread")
         if previous:
             info = self.host.call("thread/resume", {**params, "threadId": previous})
         else:
             info = self.host.call("thread/start", {**params, "allowProviderModelFallback": False})
         self.worker = self.state["thread"] = info["thread"]["id"]
-        self.record("Connected to the dedicated Codex manager thread.")
+        self.record("Connected to the independent station worker thread.")
         return self.worker
+
+    def approvals(self):
+        sessions = {**self.state["workers"]}
+        active = self.state.get("active")
+        if active:
+            sessions[active["key"]] = active
+        for thread in self.host.approval_threads:
+            for key, details in sessions.items():
+                if details.get("thread") == thread or (thread is None and len(sessions) == 1):
+                    self.hold_for_operator(key)
+        self.host.approval_threads.clear()
+
+    def observe_workers(self):
+        for key, worker in list(self.state["workers"].items()):
+            try:
+                page = self.host.call("thread/turns/list", {"threadId": worker["thread"], "limit": 1})
+            except Refused:
+                continue
+            if any(t["id"] == worker["turn"] and t["status"] != "inProgress" for t in page["data"]):
+                self.approvals()
+                del self.state["workers"][key]
 
     def reconcile(self):
         active = self.state.get("active")
         if not active:
             return False
-        thread = self.worker_thread()
+        thread = self.worker_thread(active.get("thread") or self.state.get("thread"))
         page = self.host.call("thread/turns/list", {"threadId": thread, "limit": 3, "itemsView": "full"})
         for turn in page["data"]:
             found = turn["id"] == active.get("turn") or any(
@@ -309,10 +340,6 @@ class Manager:
                 for i in turn.get("items", []))
             if not found:
                 continue
-            if turn["status"] == "inProgress":
-                self.state["phase"] = "working"
-                self.record("Dedicated manager turn is active.")
-                return True
             active["turn"] = turn["id"]
             active["result"] = turn["status"]
             target = active["item"]
@@ -320,15 +347,24 @@ class Manager:
                                     story=target["story"], limit=1)
             waiting = status.get("waiting") or {}
             current = status.get("run") or {}
-            if target["run"]:
-                progressed = (current.get("run") != target["run"] or waiting.get("claimed") is True
-                              or current.get("status") in {"completed", "blocked", "failed", "cancelled"}
-                              or status.get("finished") or status.get("question"))
-            else:
-                progressed = status.get("in_backlog") is False
-                if progressed and any(builder_confirmed(i, target) for i in turn.get("items", [])):
-                    if target["story"] not in self.state["adopted"]:
-                        self.state["adopted"].append(target["story"])
+            self.approvals()
+            if turn["status"] == "inProgress":
+                lease = waiting.get("lease") or {}
+                if (target["run"] and current.get("run") == target["run"] and waiting.get("claimed") is True
+                        and type(lease.get("fence")) is int and lease["fence"] > 0 and lease.get("expired") is False):
+                    self.state["workers"][active["key"]] = {"thread": thread, "turn": turn["id"], "run": target["run"]}
+                    self.state["notices"][active["key"]]["done"] = True
+                    self.state.pop("active")
+                    self.last_scan = 0
+                    self.record("The station run has a live fence. The independent worker is continuing.")
+                    return False
+                self.state["phase"] = "working"
+                self.record("Waiting for the independently dispatched worker's live station claim.")
+                return True
+            # A pre-upgrade backlog turn cannot establish ownership from a model transcript.
+            progressed = (current.get("run") != target["run"] or waiting.get("claimed") is True
+                          or current.get("status") in {"completed", "blocked", "failed", "cancelled"}
+                          or status.get("finished") or status.get("question"))
             self.state.pop("active")
             if progressed:
                 self.state["notices"][active["key"]]["done"] = True
@@ -344,6 +380,34 @@ class Manager:
         self.last_scan = 0
         self.record("The unacknowledged wake will be checked against current eligibility.")
         return False
+
+    def hold_for_operator(self, key):
+        self.state["notices"][key]["operator_hold"] = time.time_ns()
+        self.state["interaction_required"] = True
+        self.record("An operator decision is required for " + key + "; retry that story explicitly after resolution.")
+
+    def confirm(self, item, entry):
+        """Caller holds the control fence; record intent before the single allowed MCP mutation."""
+        if not self.config["manage_ready"]:
+            return
+        fresh, _ = eligible(self.host, self.config, self.state["adopted"], only=item)
+        if not any(row["key"] == item["key"] and not row["run"] for row in fresh):
+            return
+        entry["confirmation"] = "awaiting_receipt"
+        self.record("Submitting one manager-authorized local backlog confirmation for " + item["key"] + ".")
+        # A lost reply or crash retains the intent. A later snapshot alone cannot establish our ownership.
+        reply = self.host.tool("confirm_stories", factory=self.config["factory"], proposal=item["proposal"],
+                               stories=[item["item"]], decided_by="manager", run_location="here", start=True)
+        if exact_confirmation(reply, item):
+            entry["confirmation"] = "confirmed"
+            if item["story"] not in self.state["adopted"]:
+                self.state["adopted"].append(item["story"])
+        else:
+            entry["confirmation"] = "no_matching_receipt"
+        entry["done"] = True
+        self.last_scan = 0
+        self.immediate = True
+        self.record("Received " + entry["confirmation"] + " for " + item["key"] + ".")
 
     def tick(self):
         if not self.config["running"]:
@@ -366,6 +430,8 @@ class Manager:
         self.state["last_read"] = int(time.time())
         changed = self.state["cursor"] != cursor
         self.state["cursor"] = cursor
+        self.approvals()
+        self.observe_workers()
         if self.reconcile():
             self.record(self.state.get("reason", "Waiting for the manager receipt."))
             return
@@ -390,26 +456,37 @@ class Manager:
                 del self.state["lease_events"][base]
         for item in ready:
             entry = notices.setdefault(item["key"], {"attempts": 0})
-            if entry.get("done"):
+            if entry.get("done") or entry.get("confirmation"):
                 continue
+            if entry.get("operator_hold"):
+                retry = self.config.get("retries", {}).get(item["story"], 0)
+                if retry <= entry["operator_hold"]:
+                    reason = "Operator decision pending for " + item["key"] + "; other eligible work can continue."
+                    continue
+                entry.update(operator_hold=0, attempts=0, next=0)
+                self.state["interaction_required"] = any(n.get("operator_hold") for n in notices.values())
             if entry["attempts"] >= MAX_ATTEMPTS:
                 reason = "Wake retry limit reached for " + item["key"] + "; inspect the dedicated thread."
                 continue
             if time.time() < entry.get("next", 0):
                 reason = "Waiting for the bounded retry of " + item["key"] + "."
                 continue
-            thread = self.worker_thread()
             with locked(self.folder / "control.lock"):
                 current = read(self.folder / "control.json", {})
                 if current != self.config or not current.get("running"):
                     return
+                if not item["run"]:
+                    self.confirm(item, entry)
+                    return
+                thread = self.worker_thread()
                 entry["attempts"] += 1
                 entry["next"] = int(time.time()) + min(900, 60 * 2**(entry["attempts"]-1))
-                self.state["active"] = {"key": item["key"], "item": item, "at": int(time.time())}
+                self.state["active"] = {"key": item["key"], "item": item, "thread": thread, "at": int(time.time())}
                 self.record("Submitting one scoped Codex manager wake.")
                 try:
                     turn = self.host.call("turn/start", {"threadId": thread, "input": [{"type": "text", "text": prompt(scope, item)}]})
                 except Refused:
+                    self.approvals()
                     self.state.pop("active")
                     self.last_scan = 0
                     self.record("Codex rejected the wake. Bounded retry pending; check account limits or access.")
@@ -418,6 +495,9 @@ class Manager:
                 self.state["phase"] = "working"
                 self.record("Dedicated manager turn accepted.")
             return
+        uncertain = [k for k, n in notices.items() if n.get("confirmation") == "awaiting_receipt"]
+        if uncertain:
+            reason += " Confirmation receipt missing for " + ", ".join(uncertain[:3]) + "; ownership will require an explicit handoff."
         self.record(reason)
 
 
@@ -441,10 +521,7 @@ def supervise(folder):
                     manager.worker = None
                     manager.last_scan = 0
                 manager.tick()
-                if manager.host.approval:
-                    manager.state["interaction_required"] = True
-                    manager.record("An operator decision was requested. Inspect the dedicated Codex thread.")
-                    manager.host.approval = False
+                manager.approvals()
                 failures = 0
             except (OSError, Hold, ValueError, KeyError, TypeError) as error:
                 manager.state["phase"] = "held"
@@ -454,7 +531,8 @@ def supervise(folder):
                     manager.host.close()
                     manager.host = None
                 failures = min(failures+1, 5)
-            delay = min(300, INTERVAL * 2**failures)
+            delay = 0 if manager.immediate and not failures else min(300, INTERVAL * 2**failures)
+            manager.immediate = False
             # Recheck local controls promptly without polling CodeBook or a model.
             for _ in range(delay):
                 if stop.wait(1) or read(folder / "control.json", {}) != config:
@@ -462,8 +540,11 @@ def supervise(folder):
     finally:
         try:
             active = manager.state.get("active") or {}
-            if manager.host and active.get("turn") and manager.state.get("thread"):
-                manager.host.call("turn/interrupt", {"threadId": manager.state["thread"], "turnId": active["turn"]})
+            workers = list(manager.state["workers"].values()) + [active]
+            for worker in workers:
+                thread = worker.get("thread") or manager.state.get("thread")
+                if manager.host and worker.get("turn") and thread:
+                    manager.host.call("turn/interrupt", {"threadId": thread, "turnId": worker["turn"]})
         except (OSError, Hold):
             pass
         finally:
@@ -475,17 +556,17 @@ def supervise(folder):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["start", "status", "stop", "follow"])
+    parser.add_argument("action", choices=["start", "status", "stop", "follow", "retry"])
     parser.add_argument("--factory", required=True, type=validated)
     parser.add_argument("--workflow", required=True, type=validated)
     parser.add_argument("--cwd", type=Path)
     parser.add_argument("--manage-ready", action="store_true", help="also manage new server-approved local drawer items")
     parser.add_argument("--story", action="append", type=lambda x: validated(x, STORY), default=[])
     args = parser.parse_args()
-    if args.action == "follow" and not args.story:
-        parser.error("follow requires an expressly assigned --story")
-    if args.story and args.action not in ("follow", "start"):
-        parser.error("--story is only valid on start or follow")
+    if args.action in ("follow", "retry") and not args.story:
+        parser.error("follow/retry requires --story")
+    if args.story and args.action not in ("follow", "start", "retry"):
+        parser.error("--story is valid on start, follow or retry")
     if args.manage_ready and args.action != "start":
         parser.error("--manage-ready is an option for start")
     if args.cwd and args.action != "start":
@@ -506,6 +587,16 @@ def main():
             save(folder/"control.json", {**config, "running": False})
             print("Stop recorded. Check status for process exit.")
             return
+        if args.action == "retry":
+            # The status display provides the opaque story ID embedded in each recorded wake.
+            state = read(folder/"status.json", {})
+            held = {key.split(":")[0] for key, entry in state.get("notices", {}).items() if entry.get("operator_hold")}
+            if not set(args.story).issubset(held):
+                parser.error("retry requires the opaque story ID of a recorded operator hold")
+            retries = {**config.get("retries", {}), **{story: time.time_ns() for story in args.story}}
+            save(folder/"control.json", {**config, "retries": retries})
+            print("Retry recorded for the held story. Local eligibility will be checked again.")
+            return
         if args.action == "follow":
             if not running(folder) or not config.get("running"):
                 parser.error("start the local manager before assigning a story")
@@ -523,7 +614,7 @@ def main():
         stories = sorted(set(args.story or config.get("stories", [])))
         if len(stories) > 64:
             parser.error("use at most 64 explicitly owned stories per workflow")
-        config = {"factory": args.factory, "workflow": args.workflow, "cwd": cwd, "stories": stories, "manage_ready": args.manage_ready or config.get("manage_ready", False), "running": True}
+        config = {"factory": args.factory, "workflow": args.workflow, "cwd": cwd, "stories": stories, "retries": config.get("retries", {}), "manage_ready": args.manage_ready or config.get("manage_ready", False), "running": True}
         owner = (folder/"owner.lock").open("a+")
         fcntl.flock(owner, fcntl.LOCK_EX | fcntl.LOCK_NB)
         save(folder/"control.json", config)
