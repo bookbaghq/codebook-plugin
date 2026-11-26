@@ -35,6 +35,10 @@ class Hold(Exception):
     pass
 
 
+class ProposalPaused(Hold):
+    """CodeBook explicitly refused the confirmation before creating any stories."""
+
+
 class Refused(Hold):
     pass
 
@@ -179,11 +183,20 @@ class Host:
     def tool_in(self, thread, name, **args):
         result = self.call("mcpServer/tool/call", {"threadId": thread, "server": "codebook",
                                                   "tool": name, "arguments": args})
-        if result.get("isError"):
-            raise Hold(f"CodeBook refused {name}; check OAuth access and the selected scope.")
         data = result.get("structuredContent")
         if not isinstance(data, dict):
-            data = json.loads(result["content"][0]["text"])
+            text = next((part.get("text") for part in result.get("content", []) if part.get("type") == "text"), None)
+            try:
+                data = json.loads(text) if isinstance(text, str) else None
+            except ValueError:
+                data = None
+        if result.get("isError"):
+            error = data.get("error") if isinstance(data, dict) else None
+            if name == "confirm_stories" and isinstance(error, dict) and error.get("code") == "CONFLICT":
+                route = error.get("goes_alone")
+                if isinstance(route, dict) and route.get("next_action") == "wait_for_resume":
+                    raise ProposalPaused("CodeBook paused this proposal. Waiting for resume and current readiness.")
+            raise Hold(f"CodeBook refused {name}; check OAuth access and the selected scope.")
         if not isinstance(data, dict):
             raise Hold(f"CodeBook returned an unsupported response for {name}.")
         return data
@@ -846,8 +859,13 @@ class Manager:
         entry["confirmation"] = "awaiting_receipt"
         self.record("Submitting one manager-authorized local backlog confirmation for " + item["key"] + ".")
         # A lost reply or crash retains the intent. A later snapshot alone cannot establish our ownership.
-        reply = self.host.tool("confirm_stories", factory=self.config["factory"], proposal=item["proposal"],
-                               stories=[item["item"]], decided_by="manager", run_location="here", start=True)
+        try:
+            reply = self.host.tool("confirm_stories", factory=self.config["factory"], proposal=item["proposal"],
+                                   stories=[item["item"]], decided_by="manager", run_location="here", start=True)
+        except ProposalPaused as pause:
+            del entry["confirmation"]
+            self.record(str(pause))
+            return
         if exact_confirmation(reply, item):
             entry["confirmation"] = "confirmed"
             if item["story"] not in self.state["adopted"]:

@@ -9,6 +9,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { CodebookActive, CodebookCheckout, CodebookClaim, CodebookLink, CodebookMode, CodebookStory, CodebookWatch } from '../types'
 import { call, words } from './connector'
+import { proposalGuidance } from '../skills/factory-manager/scripts/proposal-guidance.mjs'
 import { continuationCurrent, continuationGeneration, flushContinuation, hasContinuation, manageUsage, pollContinuation, restoreContinuation, watchContinuation, watchWorkflow, workflowStatus } from './continuation'
 import { carriesKey, claimOf, defaultBranchesOf, expiresOf, leaseOf, liveClaims, mayReach, ownedOf, readCommand } from './guard'
 import type { Target } from './guard'
@@ -406,9 +407,15 @@ export const register: Register = (on, options) => {
     const generation = await continuationGeneration($)
     const ran = await next(e)
     const tool = String(e.tool)
-    if (!tool.startsWith(OWN_TOOLS) || ran.deny !== undefined || ran.isError) return ran
+    if (!tool.startsWith(OWN_TOOLS) || ran.deny !== undefined) return ran
     const name = tool.slice(OWN_TOOLS.length)
     const data = payloadOf(ran) as { run?: number; brief?: unknown; recorded?: boolean; lease?: unknown } | null
+    const guidance = proposalGuidance(name, data)
+    if (ran.isError) {
+      if (name !== 'confirm_stories' || !guidance) return ran
+      await adopt($, name, { next: guidance }, generation)
+      return { ...ran, context: [...(ran.context ?? []), guidance] }
+    }
     // Where each repository's code is on this computer, for /factory status.
     const local = checkoutsOf(name, data)
     if (local !== null) await update($, checkouts, list => mergeCheckouts(list, local))
@@ -463,7 +470,7 @@ export const register: Register = (on, options) => {
         return { ...ran, context: [...(ran.context ?? []), told] }
       }
     }
-    return ran
+    return guidance ? { ...ran, context: [...(ran.context ?? []), guidance] } : ran
   }).catch(($, e, next) => (next.called ? next(e) : String(e.tool) === OWN_CLAIM ? { deny: CLAIM_REFUSED } : next(e)))
 
   // The repository guard (G5 decision 6), per run (P2): a run's lease is the agent loop's that claimed it. That loop
