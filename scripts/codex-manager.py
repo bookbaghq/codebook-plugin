@@ -277,6 +277,19 @@ def exact_confirmation(result, target):
             and row.get("run_location") == "here" and row.get("from_backlog") is True and row.get("moved_by_hand") is False)
 
 
+def run_holds(state):
+    # Older checkpoints attached their holds to individual lease generations.
+    if "run_holds" not in state:
+        held = {}
+        for key, entry in state.get("notices", {}).items():
+            since = entry.get("operator_hold")
+            if since:
+                run = key.partition(":expiry:")[0]
+                held[run] = max(since, held.get(run, 0))
+        state["run_holds"] = held
+    return state["run_holds"]
+
+
 class Manager:
     def __init__(self, folder, config, host):
         self.folder, self.config, self.host = folder, config, host
@@ -284,6 +297,7 @@ class Manager:
         self.state.setdefault("adopted", [])
         self.state.setdefault("lease_events", {})
         self.state.setdefault("workers", {})
+        self.holds = run_holds(self.state)
         self.state.update(pid=os.getpid(), phase="starting")
         self.last_scan = 0
         self.immediate = False
@@ -382,7 +396,7 @@ class Manager:
         return False
 
     def hold_for_operator(self, key):
-        self.state["notices"][key]["operator_hold"] = time.time_ns()
+        self.holds[key.partition(":expiry:")[0]] = time.time_ns()
         self.state["interaction_required"] = True
         self.record("An operator decision is required for " + key + "; retry that story explicitly after resolution.")
 
@@ -458,13 +472,15 @@ class Manager:
             entry = notices.setdefault(item["key"], {"attempts": 0})
             if entry.get("done") or entry.get("confirmation"):
                 continue
-            if entry.get("operator_hold"):
+            held_run = item["key"].partition(":expiry:")[0]
+            if held_run in self.holds:
                 retry = self.config.get("retries", {}).get(item["story"], 0)
-                if retry <= entry["operator_hold"]:
+                if retry <= self.holds[held_run]:
                     reason = "Operator decision pending for " + item["key"] + "; other eligible work can continue."
                     continue
-                entry.update(operator_hold=0, attempts=0, next=0)
-                self.state["interaction_required"] = any(n.get("operator_hold") for n in notices.values())
+                del self.holds[held_run]
+                entry.update(attempts=0, next=0)
+                self.state["interaction_required"] = bool(self.holds)
             if entry["attempts"] >= MAX_ATTEMPTS:
                 reason = "Wake retry limit reached for " + item["key"] + "; inspect the dedicated thread."
                 continue
@@ -478,9 +494,16 @@ class Manager:
                 if not item["run"]:
                     self.confirm(item, entry)
                     return
-                thread = self.worker_thread()
+                # The attempt starts with worker creation. Persist it before either host RPC.
                 entry["attempts"] += 1
                 entry["next"] = int(time.time()) + min(900, 60 * 2**(entry["attempts"]-1))
+                self.record("Starting an independent station thread for " + item["key"] + ".")
+                try:
+                    thread = self.worker_thread()
+                except Refused:
+                    self.last_scan = 0
+                    self.record("Codex refused worker startup for " + item["key"] + "; bounded retry pending.")
+                    return
                 self.state["active"] = {"key": item["key"], "item": item, "thread": thread, "at": int(time.time())}
                 self.record("Submitting one scoped Codex manager wake.")
                 try:
@@ -590,7 +613,7 @@ def main():
         if args.action == "retry":
             # The status display provides the opaque story ID embedded in each recorded wake.
             state = read(folder/"status.json", {})
-            held = {key.split(":")[0] for key, entry in state.get("notices", {}).items() if entry.get("operator_hold")}
+            held = {run.split(":")[0] for run in run_holds(state)}
             if not set(args.story).issubset(held):
                 parser.error("retry requires the opaque story ID of a recorded operator hold")
             retries = {**config.get("retries", {}), **{story: time.time_ns() for story in args.story}}

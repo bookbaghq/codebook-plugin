@@ -1,11 +1,13 @@
 """One disposable local host lifecycle. No network, account, model or actual factory."""
 import json
 import os
+import runpy
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import time
+from unittest.mock import patch
 
 NAME = "Codex local manager resumes one owned workflow from actionable CodeBook events without idle model calls"
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts/codex-manager.py"
@@ -201,8 +203,14 @@ def rehearsal():
             write(root/"factory.json", cfg)
             write(root/"turns.json", records)
             cli("follow", "--story", "idle6")
-            until(lambda: status()["notices"]["newStory:22:expiry:10"].get("operator_hold"))
+            until(lambda: status().get("run_holds", {}).get("newStory:22"))
             assert len(turns()) == 3
+            stop()
+            cfg.update(cursor=11, events=[{"id": 11, "kind": "run.claim_expired", "card": {"key": "newStory"}, "run": 22}])
+            write(root/"factory.json", cfg)
+            cli("start", "--cwd", str(root))
+            until(lambda: status().get("cursor") == 11 and "Operator decision pending" in status().get("reason", ""))
+            assert len(turns()) == 3 and status()["run_holds"]["newStory:22"]
             cli("retry", "--story", "newStory")
             until(lambda: len(turns()) == 4)
             stop()
@@ -212,10 +220,44 @@ def rehearsal():
                 stop()
 
 
+def refused_worker_creation():
+    # Advance only the fixture clock. Each observer reconnects with the real durable checkpoint.
+    api = runpy.run_path(str(SCRIPT))
+    manager_class = api["Manager"]
+    globals_for_tick = manager_class.tick.__globals__
+    item = {"key": "startup:17", "story": "startup", "run": 17}
+    attempts = []
+
+    class DeniedHost:
+        approval_threads = set()
+
+        def call(self, method, params):
+            assert method == "thread/start"
+            attempts.append(method)
+            raise api["Refused"]("Worker startup denied.")
+
+    with tempfile.TemporaryDirectory(prefix="codebook-refused-worker-") as scratch:
+        folder = Path(scratch)
+        config = {**SCOPE, "running": True, "cwd": scratch, "stories": ["startup"], "manage_ready": False}
+        write(folder/"control.json", config)
+        with patch.dict(globals_for_tick, {
+                "read_events": lambda host, scope, cursor: (cursor + 1, []),
+                "eligible": lambda *args: ([item.copy()], "Eligible.")}):
+            for i in range(5):
+                manager = manager_class(folder, config, DeniedHost())
+                with patch.object(time, "time", return_value=10000 + i*1000):
+                    manager.tick()
+            assert len(attempts) == 3
+            checkpoint = json.loads((folder/"status.json").read_text())
+            assert checkpoint["notices"]["startup:17"]["attempts"] == 3
+            assert "retry limit reached" in checkpoint["reason"]
+
+
 if __name__ == "__main__":
     if sys.argv[1:] == ["--host-fixture"]:
         fake_server()
     else:
         rehearsal()
+        refused_worker_creation()
         print("ok 1 - "+NAME)
         print("1..1")
