@@ -100,7 +100,7 @@ Run app checks only on owned disposable local fixtures, never production or the 
 
 After a station finishes, inspect its actual outcome and gaps. For a code failure, route the precise fix; for missing capability, wait for a material capability change rather than replay the same tests. After two retries for the same cause, stop retrying and say in one line what blocks it. Preserve branches and evidence. Questions, human review, waits and failed merges follow [review and recovery](references/review-and-recovery.md).
 
-After each finished story, inspect queued runs, open proposals and the Backlog under the current autonomy policy. Read [next story](references/next-story.md) for exact readiness and older-server behavior. Do not start another session's work or duplicate a run the scheduler already queued. Keep other ready work moving while a reserved decision waits.
+After each finished story, inspect queued runs, open proposals and the separate proposed stories drawer under the current autonomy policy. A configured station named Backlog holds active board cards. Read every page of the drawer before declaring the factory idle. Read [next story](references/next-story.md) for exact readiness and older-server behavior. Do not start another session's work or duplicate a run the scheduler already queued. Keep other ready work moving while a reserved decision waits.
 
 ## 5. Narrate meaningful changes
 
