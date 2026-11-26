@@ -429,10 +429,6 @@ async function caseDirectory($: EngineInterface, root: string, relative: string,
   if (!CASE_DIRECTORY.test(relative) || relative.length > 200 || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(sha)) return null
   const git = (...args: string[]) => quiet($, ['git', '-C', root, ...args], undefined, 30000, true)
   const head = await git('rev-parse', 'HEAD')
-  // Ordinary cached entries have tag H. Refuse entries Git can omit from worktree checks.
-  const index = await git('ls-files', '--cached', '-v', '-z')
-  if (index.exitCode !== 0 || !index.stdout.endsWith('\0')
-      || !index.stdout.slice(0, -1).split('\0').every(entry => entry.startsWith('H '))) return false
   const status = await git('status', '--porcelain')
   const extra = await git('ls-files', '--others', '--directory', '-z', '--', relative)
   if (head.exitCode || head.stdout.trim() !== sha || status.exitCode || status.stdout || extra.exitCode || extra.stdout) return null
