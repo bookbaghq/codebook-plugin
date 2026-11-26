@@ -9,13 +9,13 @@ python3 scripts/codex-manager.py start --factory FACTORY_ID --workflow wf22 --cw
 python3 scripts/codex-manager.py status --factory FACTORY_ID --workflow wf22
 ```
 
-First start observes CodeBook events with zero model calls. To put this manager in charge of a particular existing story, explicitly transfer its ownership from the previous session, then run the following command.
+A first start with no assignments observes CodeBook events with zero model calls. To follow a single existing story in this mode, select its ID with the following command. Any active station lease stays with its current worker.
 
 ```sh
 python3 scripts/codex-manager.py follow --factory FACTORY_ID --workflow wf22 --story '#123'
 ```
 
-To let the manager pick newly authorized local backlog items itself, add `--manage-ready` to the start command. It reads the manager's workflow readiness pages, follows the existing approval and dependency rules, and verifies the current story before submitting a turn. It records its confirmation intent before contacting CodeBook and adopts the story only after receiving the exact manager-authorized local creation receipt. A lost or mismatched reply requires an explicit handoff before that story can be followed. An existing local run needs an explicit story assignment or the manager's own recorded confirmation. An active claim stays with its current worker.
+To manage the whole local workflow, add `--manage-ready` when starting the supervisor. It rechecks CodeBook’s current Run here assignments for this account and dispatches an unclaimed agent station even when another signed-in client confirmed the story. It also confirms manager-ready local backlog items after checking the approval and dependency rules. The confirmation journal records which stories this supervisor created. Each station worker still needs its own live claim. Human decisions, existing leases and repository capability holds stay visible in their normal locations. Subsequent starts preserve the saved workflow opt-in. With explicit story assignments alone, the supervisor limits dispatch to those stories and its previously adopted work.
 
 For Development, select an existing isolated HTTPS clone for each approved GitHub repository and a named Codex permissions profile. If you keep that profile in a separate Codex config overlay, also supply its name. This option requires Python 3.11+ and reads only the selected filesystem and domain permission table. A direct story-to-repository assignment is optional when CodeBook already reports an unambiguous repository. Passing `--story` here selects its repository and does not transfer ownership.
 

@@ -69,15 +69,15 @@ def fake_server():
                     assert item == 8 and cfg["ambiguous"]
                     cfg["ambiguous"] = False
                     cfg["work"].append(["uncertain", 44, False])
-                    created = []  # raced another manager; post-state alone grants no ownership
+                    created = []  # A race is not a creation receipt, and this station belongs to another person.
                 (root/"confirmations.log").open("a").write(story + "\n")
                 write(root/"factory.json", cfg)
                 data = {"decided_by": "manager", "proposal": {"proposal": "wo2"}, "created": created}
             elif tool == "factory_operations":
-                data = {"snapshot": {"control": {"paused": cfg["paused"]}, "holds": []}}
+                data = {"snapshot": {"control": {"paused": cfg["paused"]}, "tiles": cfg.get("tiles", {}), "holds": []}}
             elif tool == "list_my_work":
                 data = {"work": [{"story": story, "run": run, "claimed": claimed, "where": "here",
-                                  "factory": {"factory": "factoryA"}, "workflow": {"workflow": "wf9"}}
+                                  "factory": {"factory": "factoryA"}, "workflow": {"workflow": "other" if story == "foreign" else "wf9"}}
                                  for story, run, claimed in cfg["work"]]}
             elif tool == "story_status":
                 story = args["story"]
@@ -87,6 +87,14 @@ def fake_server():
                         "in_backlog": (story == "newStory" and cfg["ready"]) or (story == "uncertain" and cfg.get("ambiguous")),
                         "station": {"name": "QA", "worker": {"type": "agent", "name": "Jade"}},
                         "run": None, "waiting": None}
+                if story == "uncertain" and current:
+                    data["run_location"] = {"where": "here", "person": {"is_you": False}}
+                if story == "person":
+                    data["station"]["worker"] = {"type": "person", "name": "Owner"}
+                if story == "approval":
+                    data["question"] = {"question": "Review this station"}
+                if story == "noRoute":
+                    data["station"]["name"] = "Development"
                 if current:
                     run, claimed = current
                     data.update(run={"run": run, "status": "external"},
@@ -234,6 +242,30 @@ def rehearsal():
             until(lambda: len(turns()) == 5)
             stop()
             assert len(turns()) == 5 and not json.loads(cli("status").stdout)["enabled"]
+            # Another client confirms the next story after the last followed station has finished.
+            last = turns()
+            last[0]["status"] = "completed"
+            write(root/"turns.json", last)
+            cfg.update(cursor=13, work=[["foreign",30,False],["person",31,False],["approval",32,False],
+                                       ["alreadyClaimed",33,True],["noRoute",34,False],["externalStory",35,False]],
+                       tiles={"working":1,"max_concurrent_runs":1}, events=[])
+            write(root/"factory.json", cfg)
+            cli("start", "--cwd", str(root))
+            until(lambda: "concurrency limit" in status().get("reason",""))
+            assert len(turns()) == 5
+            stop()
+            cfg.update(cursor=14, tiles={"working":0,"max_concurrent_runs":1})
+            write(root/"factory.json", cfg)
+            cli("start", "--cwd", str(root))  # persisted workflow opt-in, no story assignment
+            until(lambda: len(turns()) == 6)
+            assert "[CodeBook local wake externalStory:35]" in turns()[0]["items"][0]["content"][0]["text"]
+            assert "noRoute:34" in status()["development_holds"]
+            assert "externalStory" not in status()["adopted"] and "externalStory" not in json.loads(cli("status").stdout)["stories"]
+            stop()
+            cli("start", "--cwd", str(root))
+            until(lambda: status().get("phase") == "working" and status().get("active", {}).get("key") == "externalStory:35")
+            assert len(turns()) == 6 and status()["notices"]["externalStory:35"]["attempts"] == 1
+            stop()
         finally:
             if json.loads(cli("status").stdout)["running"]:
                 stop()
@@ -577,4 +609,5 @@ if __name__ == "__main__":
         print("ok 3 - Paired local Git operations bind the worker checkout and keep device signing outside the worker")
         obsolete_operator_holds()
         print("ok 4 - local manager reconciles obsolete operator holds while preserving live decisions")
-        print("1..4")
+        print("ok 5 - manage-ready continues eligible local station work after completion and restart")
+        print("1..5")
