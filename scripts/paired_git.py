@@ -95,7 +95,7 @@ def isolated_key(host, scope, route):
     require(control.returncode == 0 and control.stdout.strip() == b"0", "The operator cannot verify the protected device item.")
     base = Path(__file__).resolve().parent
     state = Path(scope["state_directory"]).resolve()
-    protected = [base, base/"codex-manager.py", base/"paired_git.py", base/"git-device-key.swift",
+    protected = [base, base/"codex-manager.py", base/"paired_git.py", base/"native_usage.py", base/"git-device-key.swift",
                  state, state/"control.json", state/"status.json"]
     response = host.call("command/exec", {"command": [*args, *map(str, protected)], "cwd": route["checkout"], "permissionProfile": route["permissions"],
                                         "timeoutMs": 5000, "outputBytesCap": 128})

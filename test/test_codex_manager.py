@@ -37,6 +37,8 @@ def fake_server():
         elif method == "thread/start":
             count = len(turns) + 1
             value = {"thread": {"id": "observe" if params.get("ephemeral") else f"worker-{count}"}}
+        elif method == "thread/read":
+            value = {"thread": {"id": params["threadId"], "path": None}}
         elif method == "thread/resume":
             value = {"thread": {"id": params["threadId"]}}
         elif method == "mcpServer/tool/call":
@@ -178,7 +180,7 @@ def rehearsal():
             until(lambda: len(turns()) == 1)
             first = turns()[0]
             assert "[CodeBook local wake newStory:22]" in first["items"][0]["content"][0]["text"]
-            assert "claim_work" in first["items"][0]["content"][0]["text"]
+            assert "factory_station_claim" in first["items"][0]["content"][0]["text"]
             assert status()["adopted"] == ["newStory"]
             assert (root/"confirmations.log").read_text().splitlines() == ["uncertain", "newStory"]
             assert not any("uncertain:44" in t["items"][0]["content"][0]["text"] for t in turns())

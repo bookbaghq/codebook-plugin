@@ -20,6 +20,7 @@ from urllib.parse import parse_qs, urlsplit
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import paired_git
+import native_usage
 
 IDENT = re.compile(r"[A-Za-z0-9_-]{1,70}")
 REPOSITORY = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}")
@@ -27,6 +28,7 @@ STORY = re.compile(r"(?:#[1-9][0-9]{0,9}|[A-Za-z0-9_-]{1,70})")
 INTERVAL = 30
 RECONCILE = 180
 MAX_ATTEMPTS = 3
+CLAIM_TOOL = "factory_station_claim"
 
 
 class Hold(Exception):
@@ -131,8 +133,8 @@ class Host:
         try:
             for line in self.proc.stdout:
                 message = json.loads(line)
-                if (self.accept_git and message.get("method") == "item/tool/call" and "id" in message
-                        and (message.get("params") or {}).get("tool") in paired_git.TOOLS):
+                if (message.get("method") == "item/tool/call" and "id" in message and ((message.get("params") or {}).get("tool") == CLAIM_TOOL
+                        or (self.accept_git and (message.get("params") or {}).get("tool") in paired_git.TOOLS))):
                     self.git_requests.put(message)
                 elif "id" in message:
                     self.answers.put(message)
@@ -469,7 +471,7 @@ def marker(key):
 def prompt(scope, item):
     route = item.get("route") or {}
     paired = bool(route.get("git_pairing"))
-    claim = "factory_git_claim" if paired else "CodeBook claim_work"
+    claim = "factory_git_claim" if paired else CLAIM_TOOL
     routing = ""
     if paired:
         routing = ("The supervisor has verified the paired clone for " + route["repository"] +
@@ -560,6 +562,8 @@ class Manager:
         self.immediate = False
         self.worker = None
         self.development_hosts = {}
+        self.usage_thread = None
+        self.usage_results = queue.Queue()
         self.capability_holds = self.state.setdefault("development_holds", {})
 
     def record(self, reason):
@@ -601,10 +605,16 @@ class Manager:
         if previous:
             info = host.call("thread/resume", {**params, "threadId": previous})
         else:
-            if route and route.get("git_pairing"):
+            if not (route and route.get("git_pairing")):
+                params["dynamicTools"] = [{"type": "function", "name": CLAIM_TOOL,
+                    "description": "Claim the station assigned to this thread. Returns its frozen brief and lease.",
+                    "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}}]
+            else:
                 params["dynamicTools"] = [{"type": "function", "name": name, "description": desc,
                                            "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}}
                                           for name, desc in paired_git.TOOLS.items()]
+            # Compact only this station thread; global account and model selection remain the operator's.
+            params["config"] = {"model_auto_compact_token_limit": 64000}
             info = host.call("thread/start", {**params, "allowProviderModelFallback": False})
         self.worker = self.state["thread"] = info["thread"]["id"]
         self.record("Connected to the independent station worker thread.")
@@ -642,6 +652,66 @@ class Manager:
                     host.close()
                 self.development_hosts.clear()
 
+    def queue_usage(self, worker, turn):
+        # Keep recovery pointers in the existing private supervisor state. No transcript is copied.
+        target = worker.get("item") or worker
+        thread = worker["thread"]
+        self.state.setdefault("usage_pending", {})[thread] = {
+            "run": target["run"], "thread": thread, "turn": turn["id"],
+            "fence": worker.get("native_fence") or (worker.get("git") or {}).get("fence") or native_usage.completion_fence(turn, target["run"]),
+        }
+
+    def deliver_usage(self, entry):
+        # Separate read-only observer transport. Slow disk, OAuth or network cannot hold a station.
+        host = None
+        try:
+            host = Host(self.config["cwd"])
+            host.open(self.config["cwd"])
+            thread = entry["thread"]
+            if not entry.get("fence"):
+                turns = host.call("thread/turns/list", {"threadId": thread, "itemsView": "full", "limit": 3})
+                turn = next((t for t in turns["data"] if t["id"] == entry["turn"]), {})
+                entry["fence"] = native_usage.completion_fence(turn, entry["run"])
+            if not entry.get("usage"):
+                info = host.call("thread/read", {"threadId": thread, "includeTurns": False})["thread"]
+                if info.get("id") == thread and not info.get("forkedFromId") and info.get("path"):
+                    entry["usage"] = native_usage.turn_usage(info["path"], thread, entry["turn"])
+            if not entry.get("fence") or entry.get("usage") is None:
+                raise Hold("Final native usage or claim receipt unavailable.")
+            result = host.tool("report_native_usage", run=entry["run"], fence=entry["fence"], usage=entry["usage"])
+            if result.get("recorded") is not True or result.get("run") != entry["run"]:
+                raise Hold("Native usage delivery is awaiting a receipt.")
+            entry["delivered"] = True
+        except (Hold, OSError, KeyError, TypeError, ValueError):
+            attempts = entry["attempts"] = entry.get("attempts", 0) + 1
+            entry["next"] = int(time.time()) + min(3600, 30 * 2 ** min(attempts, 7))
+            if attempts >= 8:
+                entry["unavailable"] = True
+                entry["reason"] = "Missing native measurement or claim" if not entry.get("usage") or not entry.get("fence") else "No server receipt after eight attempts"
+        finally:
+            self.usage_results.put(entry)
+            if host:
+                host.close()
+
+    def report_usage(self):
+        pending = self.state.setdefault("usage_pending", {})
+        try:
+            answered = self.usage_results.get_nowait()
+        except queue.Empty:
+            pass
+        else:
+            if answered.get("delivered"):
+                pending.pop(answered["thread"], None)
+            else:
+                pending[answered["thread"]] = answered
+        if self.usage_thread and self.usage_thread.is_alive():
+            return
+        for entry in pending.values():
+            if int(time.time()) >= entry.get("next", 0) and not entry.get("unavailable"):
+                self.usage_thread = threading.Thread(target=self.deliver_usage, args=(dict(entry),), daemon=True)
+                self.usage_thread.start()
+                break
+
     def observe_workers(self):
         for key, worker in list(self.state["workers"].items()):
             try:
@@ -652,7 +722,9 @@ class Manager:
                 if worker.get("route"):
                     continue
                 raise
-            if any(t["id"] == worker["turn"] and t["status"] != "inProgress" for t in page["data"]):
+            ended = next((t for t in page["data"] if t["id"] == worker["turn"] and t["status"] != "inProgress"), None)
+            if ended:
+                self.queue_usage(worker, ended)
                 self.approvals()
                 del self.state["workers"][key]
 
@@ -683,7 +755,7 @@ class Manager:
                 if (target["run"] and current.get("run") == target["run"] and waiting.get("claimed") is True
                         and type(lease.get("fence")) is int and lease["fence"] > 0 and lease.get("expired") is False):
                     self.state["workers"][active["key"]] = {"thread": thread, "turn": turn["id"], "run": target["run"],
-                            "story": target["story"], "route": target.get("route"), "git": active.get("git", {})}
+                            "story": target["story"], "route": target.get("route"), "git": active.get("git", {}), "native_fence": active.get("native_fence")}
                     self.state["notices"][active["key"]]["done"] = True
                     self.state.pop("active")
                     self.last_scan = 0
@@ -692,6 +764,8 @@ class Manager:
                 self.state["phase"] = "working"
                 self.record("Waiting for the independently dispatched worker's live station claim.")
                 return True
+            if target.get("run"):
+                self.queue_usage(active, turn)
             # A pre-upgrade backlog turn cannot establish ownership from a model transcript.
             progressed = (current.get("run") != target["run"] or waiting.get("claimed") is True
                           or current.get("status") in {"completed", "blocked", "failed", "cancelled"}
@@ -783,7 +857,7 @@ class Manager:
         return True
 
     def service_git(self):
-        for host_key, host in list(self.development_hosts.items()):
+        for host_key, host in [(None, self.host), *self.development_hosts.items()]:
             pending = getattr(host, "git_requests", None)
             for _ in range(8):
                 if not pending:
@@ -806,7 +880,7 @@ class Manager:
         verify = paired_git.require
         thread, turn = params.get("threadId"), params.get("turnId")
         name, call = params.get("tool"), params.get("callId")
-        verify(name in paired_git.TOOLS and params.get("arguments") == {} and not params.get("namespace")
+        verify((name == CLAIM_TOOL or name in paired_git.TOOLS) and params.get("arguments") == {} and not params.get("namespace")
                and isinstance(call, str) and len(call) <= 160 and bool(call) and thread and turn,
                "Invalid native station operation.")
         sessions = dict(self.state["workers"])
@@ -817,7 +891,19 @@ class Manager:
         verify(len(matches) == 1, "This request has no current assigned worker.")
         key, worker = matches[0]
         item = worker.get("item") or worker
-        route, story, run = item["route"], item["story"], item["run"]
+        route, story, run = item.get("route"), item["story"], item["run"]
+        if name == CLAIM_TOOL:
+            verify((self.route_key(route) if route else None) == host_key and not (route or {}).get("git_pairing"),
+                   "This claim does not belong to this worker host.")
+            verify(read(self.folder/"control.json", {}) == self.config and self.config.get("running"),
+                   "The operator changed or stopped this worker.")
+            receipt = host.tool_in(thread, "claim_work", run=run)
+            fence = (receipt.get("lease") or {}).get("fence")
+            verify(receipt.get("run") == run and receipt.get("where") == "here" and type(fence) is int and fence > 0,
+                   "CodeBook did not confirm the assigned local claim.")
+            worker["native_fence"] = fence
+            self.record("Recorded this native thread's station claim.")
+            return receipt
         binding = route.get("git_pairing")
         verify(binding and self.route_key(route) == host_key, "This worker has no paired Development route.")
         scope = {field: self.config[field] for field in ("factory", "workflow")}
@@ -914,6 +1000,7 @@ class Manager:
         self.approvals()
         self.service_git()
         self.observe_workers()
+        self.report_usage()
         statuses = {}
         self.reconcile_operator_holds(scope, statuses)
         if self.reconcile():
