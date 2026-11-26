@@ -14,6 +14,7 @@ const QUIET_MS = 30000
 let saving = Promise.resolve()
 let polling = false
 let flushing = false
+let lastBackgroundStory: string | undefined
 let previousCheckpoint: { key: string; value: string | null } | undefined
 
 // These counters schedule work in this process. A resumed manager reconciles from the first page.
@@ -250,8 +251,26 @@ async function pollWorkflow($: EngineInterface, before: CodebookContinuation, no
   if (persist) await save($, before.generation)
 }
 
+// Manual follow can replace the pane while the previous story remains owned by this session.
+// Probe one such story per quiet interval, including after a restart or missed release event.
+async function pollBackgroundStory($: EngineInterface, before: CodebookContinuation, monitored: Set<string>): Promise<void> {
+  const watch = before.manager
+  if (!watch) return
+  const owned = Object.entries(before.stories).filter(([story, item]) => !monitored.has(story) && item.factory === watch.factory)
+  if (!owned.length) return
+  const previous = owned.findIndex(([story]) => story === lastBackgroundStory)
+  const [story] = owned[(previous + 1) % owned.length]!
+  lastBackgroundStory = story
+  const got = await call<Status>($, 'story_status', { factory: watch.factory, workflow: watch.workflow, story, limit: 1 })
+  if (!got.ok || !await continuationCurrent($, before.generation)) return
+  const status = got.data
+  if (status.story.story === story && status.factory.factory === watch.factory && status.workflow?.workflow === watch.workflow) {
+    await observeContinuation($, story, status, before.generation)
+  }
+}
+
 /** One page and one owned-order snapshot per quiet interval, round robin. No catch-up loop or model on empty reads. */
-export async function pollContinuation($: EngineInterface): Promise<ReadFailure | void> {
+export async function pollContinuation($: EngineInterface, monitored: Set<string>): Promise<ReadFailure | void> {
   if (polling) return
   const before = await read($, state), now = await $.clock.now()
   if (before.checkedAt && now - before.checkedAt < QUIET_MS) return
@@ -269,7 +288,8 @@ export async function pollContinuation($: EngineInterface): Promise<ReadFailure 
         ? { ...current, manager: { ...current.manager, readError: workflowFailure?.code } } : current)
       await save($, generation)
     }
-    if (!factory) return workflowFailure
+    await pollBackgroundStory($, before, monitored)
+    if (!factory || !await continuationCurrent($, generation)) return workflowFailure
     const feed = await call<Feed>($, 'factory_events', { factory, after: before.feeds[factory] ?? 0, limit: 50 })
     let failure: ReadFailure | undefined = feed.ok ? workflowFailure || undefined : feed
     if (!await continuationCurrent($, generation)) return

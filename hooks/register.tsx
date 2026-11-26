@@ -82,7 +82,9 @@ async function tick($: EngineInterface): Promise<void> {
     lastPoll = now
     if (a !== null) await refresh($)
     await refreshWatched($)
-    const observation = await pollContinuation($)
+    const monitored = new Set(others.map(one => one.story))
+    if (a) monitored.add(a.story)
+    const observation = await pollContinuation($, monitored)
     if (observation) await setLink($, observation)
   } finally {
     isPolling = false

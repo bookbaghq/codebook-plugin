@@ -237,5 +237,17 @@ test('a moving page, a held followed card and a newly claimed local run do not w
   await clock.advance(65000)
   expect(localReads).toBeGreaterThan(oldReads)
   expect(delivered.length).toBe(1)
+
+  // The previous story is still explicitly owned although the pane remains on the human-held story.
+  // There is no pending notice to revalidate: the manager must discover the new release itself.
+  const readsWhileClaimed = localReads
+  claimed = false
+  await start()
+  await clock.advance(305000)
+  expect(localReads).toBeGreaterThan(readsWhileClaimed)
+  expect(delivered.length).toBe(2)
+  expect(delivered[1]).toContain('#17 has local run 819')
+  await clock.advance(65000)
+  expect(delivered.length).toBe(2)
   await $.command.run(typed('stop'))
 })
