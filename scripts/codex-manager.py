@@ -237,21 +237,55 @@ gitdir=$(cd "$common" && pwd -P) || exit 2
 case "$gitdir/" in "$root/"*) ;; *) exit 2 ;; esac
 origin=$(git remote get-url origin | tr '[:upper:]' '[:lower:]') || exit 2
 case "$origin" in "https://github.com/$1"|"https://github.com/$1.git") ;; *) exit 2 ;; esac
-# A fetch of an already-cached HEAD may never write an object.
-for dir in "$root" "$gitdir" "$gitdir/objects" "$gitdir/objects/pack" "$gitdir/refs"; do
+# A fetch of a cached head may never write the object store. Check its real path, too.
+for dir in "$root" "$gitdir" "$gitdir/objects" "$gitdir/objects/pack" "$gitdir/refs/heads" "$gitdir/refs/remotes/origin" "$gitdir/worktrees"; do
+    # Origin refs and worktree administration may legitimately be created for the first time below.
+    test -d "$dir" || continue
     physical=$(cd "$dir" && pwd -P) || exit 3
     case "$physical/" in "$root/"*) ;; *) exit 2 ;; esac
     tmp=$(mktemp "$dir/.codebook-preflight-XXXXXXXX") || exit 3
     rm -f "$tmp" || exit 3
 done
-# Explicitly suppress updates to the checkout's refs and FETCH_HEAD during the transfer.
-if ! diagnostic=$(git fetch --no-tags --no-recurse-submodules --no-write-fetch-head --refmap= origin HEAD 2>&1); then
+scratch=$(mktemp -d "$root/.codebook-preflight-XXXXXXXX") || exit 3
+name=${scratch##*/}
+name=${name#.}
+branch="codebook/$name"
+tracked="refs/remotes/origin/$name"
+localref="refs/heads/$branch"
+if git show-ref --verify --quiet "$tracked" || git show-ref --verify --quiet "$localref"; then
+    rmdir "$scratch"
+    exit 3
+fi
+commit=
+cleanup() {
+    result=$?
+    trap - EXIT
+    if test -e "$scratch/tree/.git"; then
+        git -c core.hooksPath=/dev/null worktree remove --force "$scratch/tree" >/dev/null 2>&1 || result=3
+    fi
+    # Remove only the private refs at the object fetched by this invocation.
+    if test -n "$commit"; then
+        if git show-ref --verify --quiet "$localref"; then
+            git update-ref -d "$localref" "$commit" >/dev/null 2>&1 || result=3
+        fi
+        git update-ref -d "$tracked" "$commit" >/dev/null 2>&1 || result=3
+    fi
+    rmdir "$scratch" || result=3
+    exit "$result"
+}
+trap cleanup EXIT
+trap 'exit 3' HUP INT TERM
+# Exercise real origin tracking locks without changing any pre-existing ref or FETCH_HEAD.
+if ! diagnostic=$(git fetch --no-tags --no-recurse-submodules --no-write-fetch-head --refmap= origin "HEAD:$tracked" 2>&1); then
     case "$diagnostic" in
-        *"repository database"*|*"insufficient permission"*|*"unable to create temporary file"*|*"unable to write"*|*"cannot store"*) exit 3 ;;
+        *"cannot lock ref"*|*"unable to update"*|*"repository database"*|*"insufficient permission"*|*"unable to create temporary file"*|*"unable to write"*|*"cannot store"*) exit 3 ;;
         *uthenticat*|*"could not read Username"*|*"could not read Password"*|*"terminal prompts disabled"*|*eychain*|*securityd*|*"epository not found"*|*"ccess denied"*) exit 5 ;;
         *) exit 4 ;;
     esac
 fi
+commit=$(git rev-parse --verify "$tracked^{commit}") || exit 3
+# Use Git's own branch, reflog, and worktree registration paths for the factory branch namespace.
+git -c core.hooksPath=/dev/null worktree add --quiet --no-checkout -b "$branch" "$scratch/tree" "$commit" || exit 3
 """
 
 
@@ -276,7 +310,7 @@ def preflight(host, route):
     code = result.get("exitCode")
     if code != 0:
         reasons = {2: "The isolated clone or its HTTPS origin does not match the assigned repository.",
-                   3: "The selected profile cannot write the isolated checkout, Git object store or ref metadata.",
+                   3: "The selected profile cannot write the isolated checkout, Git object store, branch, remote-tracking ref or worktree metadata.",
                    4: "The selected profile cannot reach the assigned HTTPS Git remote.",
                    5: "Git authentication or private repository access failed. Use an approved repository-scoped credential or another eligible host."}
         raise Hold(reasons.get(code, "The sandboxed Development capability check did not pass."))

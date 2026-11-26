@@ -418,30 +418,37 @@ def development_routing():
             assert not (project/".git"/"FETCH_HEAD").exists()
             assert not subprocess.check_output([git, "-C", str(project), "for-each-ref"])
 
-            # Cached HEAD must not hide a read-only object store. The checkout and .git stay writable.
-            held_folder = root/"held"
-            held_folder.mkdir()
-            held_config = {**config, "stories": ["public", "review"]}
-            write(held_folder/"control.json", held_config)
-            manager = manager_type(held_folder, held_config, Observer())
-            claimed.clear()
-            objects = project/".git"/"objects"
-            mode = objects.stat().st_mode
-            objects.chmod(0o555)
-            try:
+            # Exercise the same cached clone with each denied Git metadata path and a writable control.
+            repository = project/".git"
+            subprocess.run([git, "-C", str(project), "update-ref", "refs/remotes/origin/main", upstream_head], check=True)
+            for index, relative in enumerate(("objects", "refs/heads", "refs/remotes/origin")):
+                held_folder = root/("held-"+str(index))
+                held_folder.mkdir()
+                held_config = {**config, "stories": ["public", "review"]}
+                write(held_folder/"control.json", held_config)
+                manager = manager_type(held_folder, held_config, Observer())
+                claimed.clear()
+                target = repository/relative
+                mode = target.stat().st_mode
+                target.chmod(0o555)
+                try:
+                    manager.tick()
+                    assert manager.state["active"]["key"] == "review:12" and probes[-1] == ("acme/plugin", 3), relative
+                    assert "Git object store" in manager.state["development_holds"]["public:11"]["reason"]
+                    claimed.add("review")
+                    probe_count = len(probes)
+                    manager.tick()
+                    assert len(probes) == probe_count and "active" not in manager.state
+                finally:
+                    target.chmod(mode)
+                manager.config = {**held_config, "retries": {"public": 1}}
+                write(held_folder/"control.json", manager.config)
                 manager.tick()
-                assert manager.state["active"]["key"] == "review:12" and probes[-1] == ("acme/plugin", 3)
-                assert "Git object store" in manager.state["development_holds"]["public:11"]["reason"]
-                claimed.add("review")
-                probe_count = len(probes)
-                manager.tick()
-                assert len(probes) == probe_count and "active" not in manager.state
-            finally:
-                objects.chmod(mode)
-            manager.config = {**held_config, "retries": {"public": 1}}
-            write(held_folder/"control.json", manager.config)
-            manager.tick()
-            assert probes[-1] == ("acme/plugin", 0) and manager.state["active"]["key"] == "public:11"
+                assert probes[-1] == ("acme/plugin", 0) and manager.state["active"]["key"] == "public:11"
+                refs = subprocess.check_output([git, "-C", str(project), "for-each-ref", "--format=%(refname)"], text=True)
+                assert refs.splitlines() == ["refs/remotes/origin/main"] and not list(project.glob(".codebook-preflight-*"))
+                trees = subprocess.check_output([git, "-C", str(project), "worktree", "list", "--porcelain"], text=True)
+                assert trees.count("worktree ") == 1 and not (repository/"FETCH_HEAD").exists()
 
 
 
