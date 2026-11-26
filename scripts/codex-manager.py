@@ -459,6 +459,9 @@ class Manager:
         self.state.setdefault("lease_events", {})
         self.state.setdefault("workers", {})
         self.holds = run_holds(self.state)
+        self.state["interaction_required"] = bool(self.holds)
+        self.next_hold_read = 0
+        self.last_held_story = ""
         self.state.update(pid=os.getpid(), phase="starting")
         self.last_scan = 0
         self.immediate = False
@@ -615,6 +618,39 @@ class Manager:
         self.state["interaction_required"] = True
         self.record("An operator decision is required for " + key + "; retry that story explicitly after resolution.")
 
+    def reconcile_operator_holds(self, scope):
+        """Retire old host decisions only after CodeBook confirms the run has ended."""
+        now = time.monotonic()
+        if not self.holds or now < self.next_hold_read:
+            return
+        self.next_hold_read = now + INTERVAL
+        by_story = {}
+        for key in self.holds:
+            story, _, number = key.partition(":")
+            if STORY.fullmatch(story) and re.fullmatch(r"[1-9][0-9]{0,18}", number):
+                by_story.setdefault(story, []).append((key, int(number)))
+        # Rotate a small batch. A live hold or an unavailable story cannot starve the others.
+        stories = sorted(by_story, key=lambda story: (story <= self.last_held_story, story))
+        for story in stories[:4]:
+            self.last_held_story = story
+            try:
+                status = self.host.tool("story_status", **scope, story=story, limit=1)
+            except Hold:
+                break
+            if ((status.get("factory") or {}).get("factory") != scope["factory"]
+                    or (status.get("workflow") or {}).get("workflow") != scope["workflow"]
+                    or (status.get("story") or {}).get("story") != story):
+                continue
+            run = status.get("run") or {}
+            current = run.get("run")
+            story_done = not run and status.get("finished") == "done"
+            ended = run.get("finished_at") and run.get("state") in {"passed", "failed", "blocked", "cancelled"}
+            for key, held in by_story[story]:
+                superseded = type(current) is int and current > held
+                if story_done or superseded or (current == held and type(current) is int and ended):
+                    del self.holds[key]
+        self.state["interaction_required"] = bool(self.holds)
+
     def confirm(self, item, entry):
         """Caller holds the control fence; record intent before the single allowed MCP mutation."""
         if not self.config["manage_ready"]:
@@ -684,6 +720,7 @@ class Manager:
             self.record(self.state.get("reason", "Waiting for the manager receipt."))
             return
         self.state["phase"] = "observing"
+        self.reconcile_operator_holds(scope)
         if not changed and time.monotonic() - self.last_scan < RECONCILE:
             self.record(self.state.get("reason", "Waiting for a CodeBook event."))
             return

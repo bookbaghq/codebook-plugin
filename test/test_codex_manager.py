@@ -239,6 +239,56 @@ def rehearsal():
                 stop()
 
 
+def obsolete_operator_holds():
+    api = runpy.run_path(str(SCRIPT))
+    records = {
+        "done": {"finished": "done"},
+        "ended": {"run": {"run": 7, "state": "blocked", "finished_at": "2026-11-25"}},
+        "foreign": {"workflow": {"workflow": "another"}, "finished": "done"},
+        "later": {"run": {"run": 8, "state": "queued"}},
+        "live": {"run": {"run": 7, "state": "with_outside_agent"}},
+        "older": {"run": {"run": 6, "state": "passed", "finished_at": "2026-11-25"}},
+        "unknown": None,
+    }
+    calls = []
+
+    class Observer:
+        approval_threads = set()
+
+        def tool(self, name, **args):
+            if name == "factory_events":
+                return {"last_event": 99}
+            assert name == "story_status" and args["limit"] == 1
+            story = args["story"]
+            calls.append(story)
+            if records[story] is None:
+                raise api["Hold"]("Snapshot unavailable")
+            return {"factory": {"factory": "factoryA"}, "workflow": {"workflow": "wf9"},
+                    "story": {"story": story}, **records[story]}
+
+    cfg = {**SCOPE, "stories": [], "manage_ready": False, "running": True}
+    with tempfile.TemporaryDirectory() as directory:
+        folder = Path(directory)
+        notices = {story + ":7": {"operator_hold": 123} for story in records}
+        write(folder/"status.json", {"cursor": 99, "notices": notices})
+        manager = api["Manager"](folder, cfg, Observer())
+        manager.tick()
+        assert len(calls) == 4 and manager.state["interaction_required"]
+        manager.tick()
+        assert len(calls) == 4  # no repeated reads while polling
+        manager.next_hold_read = 0
+        manager.tick()
+        expected = {key + ":7" for key in ("foreign", "live", "older", "unknown")}
+        assert set(manager.holds) == expected
+        assert manager.state["notices"] == notices
+        manager = api["Manager"](folder, cfg, Observer())
+        assert set(manager.holds) == expected
+        records.update({key.split(":")[0]: {"finished": "done"} for key in expected})
+        manager.tick()
+        persisted = json.loads((folder/"status.json").read_text())
+        assert persisted["run_holds"] == {} and not persisted["interaction_required"]
+
+
 def refused_worker_creation():
     # Advance only the fixture clock. Each observer reconnects with the real durable checkpoint.
     api = runpy.run_path(str(SCRIPT))
@@ -463,4 +513,6 @@ if __name__ == "__main__":
         print("ok 1 - "+NAME)
         development_routing()
         print("ok 2 - Development dispatch respects repository capabilities and leaves proof permissions intact")
-        print("1..2")
+        obsolete_operator_holds()
+        print("ok 3 - local manager reconciles obsolete operator holds while preserving live decisions")
+        print("1..3")
