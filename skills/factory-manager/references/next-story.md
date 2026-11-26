@@ -25,7 +25,9 @@ Either way, look for the next ready story yourself after each story reaches Done
    the pending proposal. Follow `goes_alone.next_action` as in [story planning](story-planning.md).
    For `wait_for_resume`, report the pause once and leave the item pending. After resume, refresh readiness for
    those same items. Confirm only those CodeBook now authorizes for the manager. Show the stories and criteria and
-   ask “Proceed?” for a current `ask_person` decision.
+   ask “Proceed?” for a current `ask_person` decision. For a `split`, request approval only for the current
+   `person_items`. Handle the current `manager_items` independently when active, with an explicit
+   `stories` selection. While paused, keep those manager items pending and refresh their route after resume.
 3. **The proposed stories drawer.** After each finished story, look at the Backlog too. Start the stories that are ready, as the
    factory's setting for new stories allows, and tell the person which ones are parked and on what. It is in
    `manager_brief.backlog` (call `manager_brief` again after each finished story: the brief is read fresh each time):
