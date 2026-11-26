@@ -316,6 +316,8 @@ def development_routing():
                 return {"thread": {"id": "qa-thread"}}
             if method == "turn/start":
                 return {"turn": {"id": "qa-turn"}}
+            if method == "thread/turns/list":
+                return {"data": [{"id": "qa-turn", "status": "inProgress", "items": []}]}
             raise AssertionError(method)
 
     with tempfile.TemporaryDirectory(prefix="codebook-dev-route-") as scratch:
@@ -328,13 +330,18 @@ def development_routing():
             subprocess.run([git, "-C", str(project), "remote", "add", "origin", f"https://github.com/{repo}.git"], check=True)
             routes[repo] = {"repository": repo, "checkout": str(project), "permissions": project.name+"-permissions",
                             "config_profile": "development-fixture", "revision": 1, "stories": []}
-        # Real temporary clones and write probes. The Git network command is intercepted in the disposable fixture.
+        # Replace only the HTTPS endpoint with a disposable local Git repository.
+        upstream = root/"fixture-upstream"
+        subprocess.run([git, "init", "-q", str(upstream)], check=True)
+        subprocess.run([git, "-C", str(upstream), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test",
+                        "-c", "commit.gpgsign=false", "commit", "-qm", "upstream", "--allow-empty"], check=True)
+        upstream_head = subprocess.check_output([git, "-C", str(upstream), "rev-parse", "HEAD"], text=True).strip()
         standin = root/"bin"
         standin.mkdir()
         (standin/"git").write_text("#!"+sys.executable+"\nimport os,sys\nfrom pathlib import Path\n"
-                "if sys.argv[1:2] == ['ls-remote']:\n"
+                "if sys.argv[1:2] == ['fetch']:\n"
                 " if Path.cwd().name == 'app':\n  print('could not read Username: terminal prompts disabled',file=sys.stderr); sys.exit(128)\n"
-                " print('0123456789012345678901234567890123456789\\tHEAD'); sys.exit(0)\n"
+                " sys.argv[sys.argv.index('origin')] = "+repr(str(upstream))+"\n"
                 "os.execv("+repr(git)+", ['git', *sys.argv[1:]])\n")
         (standin/"git").chmod(0o700)
         env = {**os.environ, "PATH": str(standin)+os.pathsep+os.environ["PATH"]}
@@ -406,6 +413,36 @@ def development_routing():
             qa_start = next(params for repo, method, params in calls if repo == "ordinary" and method == "thread/start")
             assert qa_start["sandbox"] == "workspace-write" and "permissions" not in qa_start and qa_start["cwd"] == scratch
             assert not any("proof" in method for _, method, _ in calls)
+            project = Path(routes["acme/plugin"]["checkout"])
+            subprocess.run([git, "-C", str(project), "cat-file", "-e", upstream_head+"^{commit}"], check=True)
+            assert not (project/".git"/"FETCH_HEAD").exists()
+            assert not subprocess.check_output([git, "-C", str(project), "for-each-ref"])
+
+            # Cached HEAD must not hide a read-only object store. The checkout and .git stay writable.
+            held_folder = root/"held"
+            held_folder.mkdir()
+            held_config = {**config, "stories": ["public", "review"]}
+            write(held_folder/"control.json", held_config)
+            manager = manager_type(held_folder, held_config, Observer())
+            claimed.clear()
+            objects = project/".git"/"objects"
+            mode = objects.stat().st_mode
+            objects.chmod(0o555)
+            try:
+                manager.tick()
+                assert manager.state["active"]["key"] == "review:12" and probes[-1] == ("acme/plugin", 3)
+                assert "Git object store" in manager.state["development_holds"]["public:11"]["reason"]
+                claimed.add("review")
+                probe_count = len(probes)
+                manager.tick()
+                assert len(probes) == probe_count and "active" not in manager.state
+            finally:
+                objects.chmod(mode)
+            manager.config = {**held_config, "retries": {"public": 1}}
+            write(held_folder/"control.json", manager.config)
+            manager.tick()
+            assert probes[-1] == ("acme/plugin", 0) and manager.state["active"]["key"] == "public:11"
+
 
 
 if __name__ == "__main__":

@@ -237,14 +237,17 @@ gitdir=$(cd "$common" && pwd -P) || exit 2
 case "$gitdir/" in "$root/"*) ;; *) exit 2 ;; esac
 origin=$(git remote get-url origin | tr '[:upper:]' '[:lower:]') || exit 2
 case "$origin" in "https://github.com/$1"|"https://github.com/$1.git") ;; *) exit 2 ;; esac
-for dir in "$root" "$gitdir"; do
+# A fetch of an already-cached HEAD may never write an object.
+for dir in "$root" "$gitdir" "$gitdir/objects" "$gitdir/objects/pack" "$gitdir/refs"; do
+    physical=$(cd "$dir" && pwd -P) || exit 3
+    case "$physical/" in "$root/"*) ;; *) exit 2 ;; esac
     tmp=$(mktemp "$dir/.codebook-preflight-XXXXXXXX") || exit 3
     rm -f "$tmp" || exit 3
 done
-if remote=$(git ls-remote --exit-code origin HEAD 2>&1); then
-    test -n "$remote" || exit 4
-else
-    case "$remote" in
+# Explicitly suppress updates to the checkout's refs and FETCH_HEAD during the transfer.
+if ! diagnostic=$(git fetch --no-tags --no-recurse-submodules --no-write-fetch-head --refmap= origin HEAD 2>&1); then
+    case "$diagnostic" in
+        *"repository database"*|*"insufficient permission"*|*"unable to create temporary file"*|*"unable to write"*|*"cannot store"*) exit 3 ;;
         *uthenticat*|*"could not read Username"*|*"could not read Password"*|*"terminal prompts disabled"*|*eychain*|*securityd*|*"epository not found"*|*"ccess denied"*) exit 5 ;;
         *) exit 4 ;;
     esac
@@ -273,7 +276,7 @@ def preflight(host, route):
     code = result.get("exitCode")
     if code != 0:
         reasons = {2: "The isolated clone or its HTTPS origin does not match the assigned repository.",
-                   3: "The selected profile cannot write both the isolated checkout and its private Git metadata.",
+                   3: "The selected profile cannot write the isolated checkout, Git object store or ref metadata.",
                    4: "The selected profile cannot reach the assigned HTTPS Git remote.",
                    5: "Git authentication or private repository access failed. Use an approved repository-scoped credential or another eligible host."}
         raise Hold(reasons.get(code, "The sandboxed Development capability check did not pass."))
