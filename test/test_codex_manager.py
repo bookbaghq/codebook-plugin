@@ -463,4 +463,8 @@ if __name__ == "__main__":
         print("ok 1 - "+NAME)
         development_routing()
         print("ok 2 - Development dispatch respects repository capabilities and leaves proof permissions intact")
-        print("1..2")
+        sys.dont_write_bytecode = True
+        from paired_git_fixture import exercise
+        exercise(runpy.run_path(str(SCRIPT)))
+        print("ok 3 - Paired local Git operations bind the worker checkout and keep device signing outside the worker")
+        print("1..3")
