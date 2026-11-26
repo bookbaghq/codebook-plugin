@@ -476,6 +476,9 @@ export const register: Register = (on, options) => {
       return { deny: `CodeBook: the repository guard cannot tell where this command pushes or opens a pull request, so it was not run while CodeBook run ${runs} is worked here (${holdersOf(held)}). Run the push on its own, plainly: git -C <checkout> push <remote> <branch>, and open the pull request with gh pr create --repo <owner/name>. ${ONE_AT_A_TIME}` }
     }
     const say = (why: string) => ({ deny: `CodeBook: the repository guard did not run this while CodeBook run ${runs} is worked here: ${why}` })
+    if (lease.kind === 'worker' && (reading.merges.length > 0 || reading.makesReady)) {
+      return say('Station workers keep pull requests as drafts. The factory merges them at Done.')
+    }
     // The person's own shell aliases and functions (`gp` for `git push fork`), probed once every ten minutes.
     const shell = await shellState($)
     const ownWords = await checkShellWords($, reading.programs, shell)

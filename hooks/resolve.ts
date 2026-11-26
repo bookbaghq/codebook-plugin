@@ -318,7 +318,7 @@ function textPushes(text: string, isShell: boolean): boolean {
   if (scriptPushes(text)) return true
   if (!isShell) return false
   const read = readCommand(text)
-  return read === null || read.targets.length > 0
+  return read === null || read.targets.length > 0 || read.merges.length > 0 || read.makesReady
 }
 
 const isShellScript = (path: string, text: string): boolean => /\.(?:sh|bash|zsh|ksh)$/.test(path) || /^#!.*\b(?:sh|bash|zsh|ksh|dash)\b/.test(text) || !/\.[A-Za-z0-9]+$/.test(path.replace(/^.*\//, ''))
@@ -344,7 +344,7 @@ export async function checkOne($: EngineInterface, check: Check, commandPushes =
       const at = line.indexOf(':')
       if (at < 0 || line.slice(0, at).trim() !== check.name) continue
       const expansion = line.slice(at + 1).trim()
-      if (expansion.startsWith('!') || /\bpr\s+(?:create|new)\b|\bapi\b|\brepo\s+create\b|\balias\b/.test(expansion)) return { deny: `gh ${check.name} is an alias for "${expansion.slice(0, 120)}". Run the gh command itself (gh pr create --repo <owner/name>).` }
+      if (expansion.startsWith('!') || /\bpr\s+(?:create|new|merge|ready)\b|\bapi\b|\brepo\s+create\b|\balias\b/.test(expansion)) return { deny: `gh ${check.name} is an alias for "${expansion.slice(0, 120)}". Run the gh command itself (gh pr create --repo <owner/name>).` }
       return null
     }
     const extensions = lines(await run($, ['gh', 'extension', 'list']))

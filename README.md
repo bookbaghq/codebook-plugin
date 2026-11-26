@@ -162,6 +162,9 @@ attribute with confidence (through a wrapper such as `timeout` or `xargs`, a sub
 configuration or a remote changed in the same command, or a `gh api` write to pull requests) is refused too, with the
 plain `git -C <checkout> push <remote> <branch>` or `gh pr create --repo <owner/name>` to run instead.
 
+Station workers leave pull requests as drafts. The guard refuses a worker's `gh pr merge` and `gh pr ready` as well
+as `gh api` writes that merge or enable auto-merge. CodeBook merges at Done according to the factory's workflow.
+
 Where a command does not say where it goes, the guard asks git and gh as they would decide: a plain `git push` goes to
 the branch's push remote (`pushRemote`, `remote.pushDefault`, its tracking remote, then `origin`); an address is
 rewritten by `pushInsteadOf` / `insteadOf` first; `gh pr create` without `--repo` goes to `GH_REPO`, the
