@@ -146,12 +146,12 @@ class Host:
             self.proc.wait()
 
 
-def event_cursor(host, scope, cursor):
+def read_events(host, scope, cursor):
     result = host.tool("factory_events", **scope, **({"after": cursor} if cursor else {}), limit=50)
     last = result.get("last_event")
     if last is not None and (type(last) is not int or last < 0):
         raise Hold("Unexpected CodeBook event cursor.")
-    return max(cursor, last or 0)
+    return max(cursor, last or 0), result.get("events", [])
 
 
 def hosted_here(status):
@@ -273,6 +273,7 @@ class Manager:
         self.folder, self.config, self.host = folder, config, host
         self.state = read(folder / "status.json", {"cursor": 0, "notices": {}})
         self.state.setdefault("adopted", [])
+        self.state.setdefault("lease_events", {})
         self.state.update(pid=os.getpid(), phase="starting")
         self.last_scan = 0
         self.worker = None
@@ -348,7 +349,20 @@ class Manager:
         if not self.config["running"]:
             return
         scope = {k: self.config[k] for k in ("factory", "workflow")}
-        cursor = event_cursor(self.host, scope, self.state["cursor"])
+        previous = self.state["cursor"]
+        cursor, events = read_events(self.host, scope, previous)
+        # Expiry gives an already delivered local station a new opportunity on its SAME job ID.
+        # Keep the event generation with the cursor and only act after re-reading the current unclaimed state.
+        for event in events:
+            card = event.get("card") or {}
+            story, run, event_id = card.get("key"), event.get("run"), event.get("id")
+            if (event.get("kind") != "run.claim_expired" or not isinstance(story, str)
+                    or not IDENT.fullmatch(story) or type(run) is not int or run < 1
+                    or type(event_id) is not int or not previous < event_id <= cursor):
+                continue
+            base = f"{story}:{run}"
+            if base in self.state["notices"] or base in self.state["lease_events"]:
+                self.state["lease_events"][base] = event_id
         self.state["last_read"] = int(time.time())
         changed = self.state["cursor"] != cursor
         self.state["cursor"] = cursor
@@ -361,12 +375,19 @@ class Manager:
             return
         self.last_scan = time.monotonic()
         ready, reason = eligible(self.host, self.config, self.state["adopted"])
+        for item in ready:
+            expired_at = self.state["lease_events"].get(item["key"])
+            if item["run"] and expired_at:
+                item["key"] += f":expiry:{expired_at}"
         keys = {item["key"] for item in ready}
         notices = self.state["notices"]
         # Keep all currently eligible keys. Discard superseded terminal identities to bound storage.
         for key in list(notices):
             if key not in keys and len(notices) > 128:
                 del notices[key]
+        for base in list(self.state["lease_events"]):
+            if not any(key == base or key.startswith(base + ":expiry:") for key in notices):
+                del self.state["lease_events"][base]
         for item in ready:
             entry = notices.setdefault(item["key"], {"attempts": 0})
             if entry.get("done"):

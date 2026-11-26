@@ -36,7 +36,7 @@ def fake_server():
             assert params["threadId"] == "observe"
             tool, args = params["tool"], params["arguments"]
             if tool == "factory_events":
-                data = {"last_event": cfg["cursor"]}
+                data = {"last_event": cfg["cursor"], "events": cfg.get("events", [])}
             elif tool == "manager_brief":
                 row = {"ready": cfg["ready"], "workflow": "Software", "story": "newStory", "reference": "#301",
                        "start_with": "confirm via current server", "proposal": {"proposal": "wo2", "item": 9}}
@@ -156,8 +156,27 @@ def rehearsal():
             notice = status()["notices"]["newStory:22"]
             assert notice["attempts"] == 1 and not notice.get("done") and notice["next"] > time.time()
             assert len(turns()) == 2
+            cfg.update(cursor=9, work=[["newStory", 23, False]])
+            write(root/"factory.json", cfg)
+            cli("follow", "--story", "idle3")
+            until(lambda: len(turns()) == 3)
+            active_turns = turns()
+            active_turns[0]["status"] = "completed"
+            cfg["work"] = [["newStory", 23, True]]
+            write(root/"factory.json", cfg)
+            write(root/"turns.json", active_turns)
+            cli("follow", "--story", "idle4")
+            until(lambda: status()["notices"].get("newStory:23", {}).get("done"))
+            # A real expired lease reopens the same run. Duplicate feed delivery creates one fresh wake.
+            cfg.update(cursor=10, work=[["newStory", 23, False], ["foreign", 24, False]],
+                       events=[{"id": 10, "kind": "run.claim_expired", "card": {"key": "newStory"}, "run": 23}])
+            write(root/"factory.json", cfg)
+            cli("follow", "--story", "idle5")
+            until(lambda: len(turns()) == 4)
+            assert "[CodeBook local wake newStory:23:expiry:10]" in turns()[0]["items"][0]["content"][0]["text"]
+            cli("follow", "--story", "idle6")
             stop()
-            assert len(turns()) == 2 and not json.loads(cli("status").stdout)["enabled"]
+            assert len(turns()) == 4 and not json.loads(cli("status").stdout)["enabled"]
         finally:
             if json.loads(cli("status").stdout)["running"]:
                 stop()
