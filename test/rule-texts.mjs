@@ -253,3 +253,56 @@ test('legacy approval metadata preserves ask-first fallback', () => {
   assert.match(guidanceFor('propose_stories', proposed({ next_action: 'unknown', may_confirm_yourself: true })), /Leave this proposal pending/)
   assert.equal(guidanceFor('propose_stories', { proposal: { proposal: 'wo7' }, stories: [], already_there: [{}] }), '')
 })
+
+const mixedRoute = { next_action: 'split', decision_owner: 'mixed', manager_items: [5, 9], person_items: [12, 3], factory_paused: false }
+const mixedProposal = {
+  proposal: { proposal: 'wo7' },
+  stories: [12, 5, 3, 9].map(item => ({ item, title: `Story ${item}`, criteria: [{ text: `Criterion ${item}` }] })),
+  goes_alone: mixedRoute,
+}
+
+function checkItemSelections(guidance, paused) {
+  assert.match(guidance, /titles and recorded criteria for person items \[12, 3\] and ask for approval only for those IDs/)
+  assert.match(guidance, /stories: \[12, 3\], decided_by: "person". For partial approval, pass only the IDs they approved/)
+  const selections = [...guidance.matchAll(/stories: (\[[^\]]*\]), decided_by: "(manager|person)"/g)]
+    .map(([, ids, owner]) => [owner, JSON.parse(ids)])
+  if (paused) {
+    assert.deepEqual(selections, [['person', [12, 3]]])
+    assert.match(guidance, /Manager items \[5, 9\] are waiting.*re-read their current route and readiness after resume/)
+    assert.match(guidance, /After their yes and factory resume, recheck the route/)
+  } else {
+    assert.deepEqual(selections, [['manager', [5, 9]], ['person', [12, 3]]])
+    assert.match(guidance, /independently of the person’s answer/)
+  }
+  assert.doesNotMatch(guidance, /each proposed story|ask “Proceed\?”/i)
+}
+
+test('mixed proposals route numeric items to their decision owners', () => {
+  for (const paused of [false, true]) {
+    checkItemSelections(guidanceFor('propose_stories', { ...mixedProposal, goes_alone: { ...mixedRoute, factory_paused: paused } }), paused)
+  }
+  for (const overrides of [{ decision_owner: 'person' }, { manager_items: [] }, { person_items: ['12', 3] },
+    { manager_items: [5, 5] }, { person_items: [12, 5] }, { manager_items: [5, 77] }, { person_items: [12] },
+    { next_action: undefined, may_confirm_yourself: true }, { factory_paused: null }]) {
+    const text = guidanceFor('propose_stories', { ...mixedProposal, goes_alone: { ...mixedRoute, ...overrides } })
+    assert.match(text, /pending and refresh/)
+    assert.doesNotMatch(text, /confirm_stories|Proceed\?/)
+  }
+})
+
+test('mixed confirmation refusals restrict retries to the routed items', () => {
+  for (const code of ['FORBIDDEN', 'CONFLICT']) {
+    for (const paused of [true, false]) {
+      const error = { code, goes_alone: { ...mixedRoute, factory_paused: paused } }
+      // The refusal's current selection supersedes the earlier proposal response.
+      const text = guidanceFor('confirm_stories', { ...proposed({ next_action: 'confirm' }), error })
+      assert.match(text, /refused confirmation applied no items/)
+      checkItemSelections(text, paused)
+    }
+  }
+  for (const route of [{ ...mixedRoute, person_items: undefined }, { ...mixedRoute, manager_items: [5, 12] }]) {
+    const text = guidanceFor('confirm_stories', { error: { code: 'FORBIDDEN', goes_alone: route } })
+    assert.match(text, /pending and refresh/)
+    assert.doesNotMatch(text, /confirm_stories|Proceed\?/)
+  }
+})
