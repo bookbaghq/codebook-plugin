@@ -13,6 +13,7 @@ type World = {
   /** What each recipe line exits with and prints, by the folder it ran in ("head" or "baseline"). */
   results: Record<string, { exit: number; output: string }>
   collector?: { tree?: string; physical?: string; untracked?: string }
+  indexListing?: string
   delegated?: boolean
   claimedHead?: string
   dirty?: boolean
@@ -66,6 +67,7 @@ function world(on: On, w: World) {
     if (w.delegated && argv[0] === 'git' && (argv.includes('--absolute-git-dir') || argv.includes('--git-common-dir'))) return out(DIR+'/.git\n') as never
     if (w.delegated && argv.includes('/usr/bin/env') && argv.includes('git')) {
       if (argv.includes('HEAD')) return out(HEAD+'\n') as never
+      if (argv.includes('--cached')) return out(w.indexListing ?? 'H test/local.mjs\0') as never
       if (argv.includes('status')) return out(w.dirty ? ' M file\n' : '') as never
       return out('') as never
     }
@@ -265,6 +267,11 @@ test('delegated local proof requires a clean pinned sandbox and strict loopback'
   expect(w.reports[0]?.body.commit).toBe(HEAD)
   expect(w.processes.some(argv => argv.includes('fetch'))).toBe(false)
 
+  for (const tag of ['h', 'S']) {
+    state.indexListing = tag + ' test/local.mjs\0'
+    await run()
+  }
+  state.indexListing = undefined
   state.dirty = true
   await run()
   state.dirty = false
