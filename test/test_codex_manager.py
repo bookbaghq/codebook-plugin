@@ -417,6 +417,9 @@ def development_routing():
             subprocess.run([git, "-C", str(project), "cat-file", "-e", upstream_head+"^{commit}"], check=True)
             assert upstream_head in (project/".git"/"FETCH_HEAD").read_text()
             assert subprocess.check_output([git, "-C", str(project), "rev-parse", "refs/remotes/origin/main"], text=True).strip() == upstream_head
+            list_refs = [git, "-C", str(project), "for-each-ref", "--format=%(refname)"]
+            normal_refs = subprocess.check_output(list_refs, text=True).splitlines()
+            assert set(normal_refs) in ({"refs/remotes/origin/main"}, {"refs/remotes/origin/HEAD", "refs/remotes/origin/main"})
 
             # Exercise the same cached clone with each denied Git metadata path and a writable control.
             repository = project/".git"
@@ -444,8 +447,8 @@ def development_routing():
                 write(held_folder/"control.json", manager.config)
                 manager.tick()
                 assert probes[-1] == ("acme/plugin", 0) and manager.state["active"]["key"] == "public:11"
-                refs = subprocess.check_output([git, "-C", str(project), "for-each-ref", "--format=%(refname)"], text=True)
-                assert refs.splitlines() == ["refs/remotes/origin/main"] and not list(project.glob(".codebook-preflight-*"))
+                assert subprocess.check_output(list_refs, text=True).splitlines() == normal_refs
+                assert not list(project.glob(".codebook-preflight-*"))
                 trees = subprocess.check_output([git, "-C", str(project), "worktree", "list", "--porcelain"], text=True)
                 assert trees.count("worktree ") == 1 and upstream_head in (repository/"FETCH_HEAD").read_text()
 
