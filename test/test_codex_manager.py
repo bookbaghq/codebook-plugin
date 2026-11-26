@@ -2,6 +2,8 @@
 import json
 import os
 import runpy
+import shutil
+import threading
 from pathlib import Path
 import subprocess
 import sys
@@ -270,6 +272,142 @@ def refused_worker_creation():
             assert "retry limit reached" in checkpoint["reason"]
 
 
+def development_routing():
+    api = runpy.run_path(str(SCRIPT))
+    manager_type = api["Manager"]
+    declared = [{"name": repo, "url": "https://github.com/"+repo, "writable": True} for repo in ("acme/app", "acme/plugin")]
+    states = {"private": (10, "Development", "acme/app"), "public": (11, "Development", "acme/plugin"),
+              "review": (12, "QA", "acme/app")}
+    claimed = set()
+    calls = []
+    probes = []
+    cursor = 0
+
+    class Observer:
+        approval_threads = set()
+
+        def tool(self, name, **args):
+            nonlocal cursor
+            if name == "factory_events":
+                cursor += 1
+                return {"last_event": cursor}
+            if name == "manager_brief":
+                return {"factory": {"factory": "factoryA"}, "workflow": {"workflow": "wf9", "name": "Software"},
+                        "repositories": declared, "you": {"may_run_here": True, "on_my_computer": {"working_now": len(claimed), "limit": 2}}}
+            if name == "factory_operations":
+                return {"snapshot": {"control": {"paused": False}, "tiles": {"working": len(claimed), "max_concurrent_runs": 2}}}
+            if name == "list_my_work":
+                return {"work": [{"story": story, "where": "here", "run": run, "claimed": story in claimed,
+                                  "factory": {"factory": "factoryA"}, "workflow": {"workflow": "wf9"}}
+                                 for story, (run, _, _) in states.items()]}
+            assert name == "story_status"
+            story = args["story"]
+            run, station, repo = states[story]
+            return {"story": {"story": story, "repository": repo}, "run": {"run": run},
+                    "factory": {"factory": "factoryA"}, "workflow": {"workflow": "wf9"},
+                    "station": {"name": station, "worker": {"type": "agent", "name": "Alex" if station == "Development" else "Jade"}},
+                    "run_location": {"where": "here", "person": {"is_you": True}},
+                    "waiting": {"run": run, "on": "runner", "on_you": True, "claimed": story in claimed,
+                                "lease": {"fence": 1, "expired": False} if story in claimed else None}}
+
+        def call(self, method, params):
+            calls.append(("ordinary", method, params))
+            if method == "thread/start":
+                return {"thread": {"id": "qa-thread"}}
+            if method == "turn/start":
+                return {"turn": {"id": "qa-turn"}}
+            raise AssertionError(method)
+
+    with tempfile.TemporaryDirectory(prefix="codebook-dev-route-") as scratch:
+        root = Path(scratch)
+        git = shutil.which("git")
+        routes = {}
+        for repo in ("acme/app", "acme/plugin"):
+            project = root/repo.split("/")[1]
+            subprocess.run([git, "init", "-q", str(project)], check=True)
+            subprocess.run([git, "-C", str(project), "remote", "add", "origin", f"https://github.com/{repo}.git"], check=True)
+            routes[repo] = {"repository": repo, "checkout": str(project), "permissions": project.name+"-permissions",
+                            "config_profile": "development-fixture", "revision": 1, "stories": []}
+        # Real temporary clones and write probes. The Git network command is intercepted in the disposable fixture.
+        standin = root/"bin"
+        standin.mkdir()
+        (standin/"git").write_text("#!"+sys.executable+"\nimport os,sys\nfrom pathlib import Path\n"
+                "if sys.argv[1:2] == ['ls-remote']:\n"
+                " if Path.cwd().name == 'app':\n  print('could not read Username: terminal prompts disabled',file=sys.stderr); sys.exit(128)\n"
+                " print('0123456789012345678901234567890123456789\\tHEAD'); sys.exit(0)\n"
+                "os.execv("+repr(git)+", ['git', *sys.argv[1:]])\n")
+        (standin/"git").chmod(0o700)
+        env = {**os.environ, "PATH": str(standin)+os.pathsep+os.environ["PATH"]}
+
+        class RoutedHost:
+            def __init__(self, cwd, development):
+                self.route = development
+                assert cwd == development["checkout"] and development["config_profile"] == "development-fixture"
+                self.approval_threads = set()
+
+            def open(self, cwd, observe):
+                assert cwd == self.route["checkout"] and not observe
+
+            def call(self, method, params):
+                route = self.route
+                calls.append((route["repository"], method, params))
+                if method == "experimentalFeature/list":
+                    return {"data": [{"name": "network_proxy", "enabled": True}]}
+                if method == "permissionProfile/list":
+                    return {"data": [{"id": route["permissions"], "allowed": True}]}
+                if method == "command/exec":
+                    assert params["cwd"] == route["checkout"] and params["permissionProfile"] == route["permissions"]
+                    child = subprocess.run(params["command"], cwd=params["cwd"], env={**env, **params["env"]},
+                                           capture_output=True, timeout=10)
+                    probes.append((route["repository"], child.returncode))
+                    return {"exitCode": child.returncode}
+                if method == "thread/start":
+                    assert params["permissions"] == route["permissions"] and params["runtimeWorkspaceRoots"] == [route["checkout"]]
+                    assert params["cwd"] == route["checkout"] and "sandbox" not in params
+                    return {"thread": {"id": "development-thread"}}
+                if method == "turn/start":
+                    return {"turn": {"id": "development-turn"}}
+                if method == "thread/turns/list":
+                    return {"data": [{"id": "development-turn", "status": "inProgress", "items": []}]}
+                raise AssertionError(method)
+
+        overlay = root/"development-fixture.config.toml"
+        overlay.write_text('[permissions.plugin-permissions.filesystem]\n":minimal" = "read"\n'
+                           '[permissions.plugin-permissions.network]\nenabled = true\n'
+                           '[permissions.plugin-permissions.network.domains]\n"github.com" = "allow"\n'
+                           '[permissions.unrelated]\ndescription = "other"\n')
+        with patch.dict(os.environ, {"CODEX_HOME": scratch}), patch.object(subprocess, "Popen") as spawn, patch.object(threading.Thread, "start"):
+            if sys.version_info >= (3, 11):
+                api["Host"](routes["acme/plugin"]["checkout"], development=routes["acme/plugin"])
+                argv = spawn.call_args.args[0]
+                assert argv[:4] == ["codex", "-c", "features.network_proxy=true", "-c"]
+                assert argv[5:] == ["-c", 'default_permissions="plugin-permissions"', "app-server", "--stdio"]
+                assert argv[4].startswith("permissions.plugin-permissions=") and '"github.com" = "allow"' in argv[4] and "unrelated" not in argv[4]
+            else:
+                try:
+                    api["Host"](routes["acme/plugin"]["checkout"], development=routes["acme/plugin"])
+                except api["Hold"]:
+                    assert not spawn.called
+                else:
+                    raise AssertionError("An unavailable overlay parser must hold before dispatch.")
+        config = {**SCOPE, "running": True, "cwd": scratch, "stories": list(states), "manage_ready": False, "development_routes": routes}
+        write(root/"control.json", config)
+        manager = manager_type(root, config, Observer())
+        with patch.dict(manager_type.tick.__globals__, {"Host": RoutedHost}):
+            manager.tick()
+            assert manager.state["active"]["key"] == "public:11"
+            assert probes == [("acme/app", 5), ("acme/plugin", 0)]
+            assert "authentication" in manager.state["development_holds"]["private:10"]["reason"]
+            claimed.add("public")
+            manager.tick()
+            assert manager.state["active"]["key"] == "review:12" and len(probes) == 2
+            turns = [(repo, method) for repo, method, _ in calls if method == "turn/start"]
+            assert turns == [("acme/plugin", "turn/start"), ("ordinary", "turn/start")]
+            qa_start = next(params for repo, method, params in calls if repo == "ordinary" and method == "thread/start")
+            assert qa_start["sandbox"] == "workspace-write" and "permissions" not in qa_start and qa_start["cwd"] == scratch
+            assert not any("proof" in method for _, method, _ in calls)
+
+
 if __name__ == "__main__":
     if sys.argv[1:] == ["--host-fixture"]:
         fake_server()
@@ -277,4 +415,6 @@ if __name__ == "__main__":
         rehearsal()
         refused_worker_creation()
         print("ok 1 - "+NAME)
-        print("1..1")
+        development_routing()
+        print("ok 2 - Development dispatch respects repository capabilities and leaves proof permissions intact")
+        print("1..2")

@@ -17,6 +17,7 @@ import time
 from urllib.parse import parse_qs, urlsplit
 
 IDENT = re.compile(r"[A-Za-z0-9_-]{1,70}")
+REPOSITORY = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}")
 STORY = re.compile(r"(?:#[1-9][0-9]{0,9}|[A-Za-z0-9_-]{1,70})")
 INTERVAL = 30
 RECONCILE = 180
@@ -68,13 +69,46 @@ def running(folder):
         return False
 
 
+def development_options(route):
+    options = ["-c", "features.network_proxy=true"]
+    name = route.get("config_profile")
+    if not name:
+        return options
+    # app-server rejects the runtime CLI's -p option. Pass only the selected permission table.
+    try:
+        import tomllib
+        config_home = Path(os.environ.get("CODEX_HOME", Path.home()/".codex"))
+        with (config_home/(validated(name) + ".config.toml")).open("rb") as stream:
+            profile = tomllib.load(stream)["permissions"][validated(route["permissions"])]
+        filesystem, network = profile["filesystem"], profile["network"]
+        if (set(profile) - {"description", "filesystem", "network"}
+                or set(network) - {"enabled", "allow_local_binding", "domains"}
+                or not all(isinstance(value, str) for value in filesystem.values())
+                or network.get("enabled") is not True or not isinstance(network.get("domains"), dict)):
+            raise ValueError
+        # A single TOML inline table preserves literal filesystem paths and dotted domain names.
+        def inline(value):
+            if isinstance(value, dict):
+                return "{" + ", ".join(json.dumps(k, ensure_ascii=False) + " = " + inline(v) for k,v in value.items()) + "}"
+            if not isinstance(value, (str, bool)):
+                raise ValueError
+            return json.dumps(value, ensure_ascii=False)
+        table = inline({"filesystem": filesystem, "network": network})
+        options += ["-c", "permissions." + route["permissions"] + "=" + table,
+                    "-c", "default_permissions=" + json.dumps(route["permissions"])]
+    except (ImportError, OSError, ValueError, TypeError, KeyError, AttributeError) as error:
+        raise Hold("Cannot load the selected filesystem and domain permission table from the local overlay (Python 3.11+ required).") from error
+    return options
+
+
 class Host:
     """Use Codex's own OAuth transport. Only the app server receives credentials."""
-    def __init__(self, cwd):
+    def __init__(self, cwd, development=None):
         env = dict(os.environ)
         for key in ("OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL"):
             env.pop(key, None)
-        self.proc = subprocess.Popen(["codex", "app-server", "--stdio"], cwd=cwd, env=env,
+        argv = ["codex"] + (development_options(development) if development else [])
+        self.proc = subprocess.Popen(argv + ["app-server", "--stdio"], cwd=cwd, env=env,
                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      stderr=subprocess.DEVNULL, text=True, bufsize=1)
         self.answers = queue.Queue()
@@ -116,15 +150,16 @@ class Host:
                 return msg["result"]
         raise Hold(f"Codex timed out during {method}.")
 
-    def open(self, cwd):
+    def open(self, cwd, observe=True):
         self.call("initialize", {"clientInfo": {"name": "codebook_local_manager", "version": "1"},
                                  "capabilities": {"experimentalApi": True}})
         self.send({"method": "initialized", "params": {}})
         account = self.call("account/read", {"refreshToken": False}).get("account") or {}
         if account.get("type") != "chatgpt":
             raise Hold("Sign in to Codex using ChatGPT before starting this manager.")
-        self.observer = self.call("thread/start", {"ephemeral": True, "cwd": cwd, "sandbox": "read-only",
-                                                  "approvalPolicy": "on-request"})["thread"]["id"]
+        if observe:
+            self.observer = self.call("thread/start", {"ephemeral": True, "cwd": cwd, "sandbox": "read-only",
+                                                      "approvalPolicy": "on-request"})["thread"]["id"]
 
     def tool(self, name, **args):
         result = self.call("mcpServer/tool/call", {"threadId": self.observer, "server": "codebook",
@@ -160,6 +195,88 @@ def hosted_here(status):
     if isinstance(location, dict):
         return location.get("where") == "here" and (location.get("person") or {}).get("is_you") is True
     return location == "here"
+
+
+def development_route(config, brief, status, story):
+    """A host assignment never authorizes a new story or an unrelated checkout."""
+    routes = config.get("development_routes", {})
+    fields = status.get("story") or {}
+    selected = {name for name, route in routes.items()
+                if {story, fields.get("reference")} & set(route.get("stories", []))}
+    declared = {row["repository"].lower() for row in (status.get("working_on") or {}).get("work", [])
+                if row.get("source") == "declared" and isinstance(row.get("repository"), str)}
+    assigned = fields.get("repository")
+    if isinstance(assigned, dict):
+        assigned = assigned.get("full_name") or assigned.get("name")
+    if isinstance(assigned, str) and REPOSITORY.fullmatch(assigned):
+        declared.add(assigned.lower())
+    names = selected | declared
+    if len(names) != 1:
+        return None, "Set one unambiguous repository assignment for this story."
+    repo = next(iter(names))
+    origins = {"https://github.com/" + repo, "https://github.com/" + repo + ".git"}
+    allowed = any(row.get("name", "").lower() == repo and row.get("writable") is True
+                  and (row.get("url") or "").lower() in origins
+                  for row in brief.get("repositories", []))
+    if not allowed or not REPOSITORY.fullmatch(repo):
+        return None, "The story repository is unavailable for writes in this workflow."
+    route = routes.get(repo)
+    if not route:
+        return None, f"Configure a Development route for {repo} or hand this run to an eligible host."
+    return route, None
+
+
+# Run through command/exec inside the exact worker permissions. Print only an exit code.
+GIT_PROBE = r"""
+set -eu
+root=$(pwd -P)
+top=$(git rev-parse --show-toplevel) || exit 2
+test "$(cd "$top" && pwd -P)" = "$root" || exit 2
+common=$(git rev-parse --path-format=absolute --git-common-dir) || exit 2
+gitdir=$(cd "$common" && pwd -P) || exit 2
+case "$gitdir/" in "$root/"*) ;; *) exit 2 ;; esac
+origin=$(git remote get-url origin | tr '[:upper:]' '[:lower:]') || exit 2
+case "$origin" in "https://github.com/$1"|"https://github.com/$1.git") ;; *) exit 2 ;; esac
+for dir in "$root" "$gitdir"; do
+    tmp=$(mktemp "$dir/.codebook-preflight-XXXXXXXX") || exit 3
+    rm -f "$tmp" || exit 3
+done
+if remote=$(git ls-remote --exit-code origin HEAD 2>&1); then
+    test -n "$remote" || exit 4
+else
+    case "$remote" in
+        *uthenticat*|*"could not read Username"*|*"could not read Password"*|*"terminal prompts disabled"*|*eychain*|*securityd*|*"epository not found"*|*"ccess denied"*) exit 5 ;;
+        *) exit 4 ;;
+    esac
+fi
+"""
+
+
+def preflight(host, route):
+    # Both the command sandbox and subsequent worker use this process's approved overlay and named permissions.
+    def enabled(method, params, field, identifier, flag):
+        while True:
+            page = host.call(method, params)
+            if any(row.get(field) == identifier and row.get(flag) is True for row in page["data"]):
+                return True
+            cursor = page.get("nextCursor")
+            if not cursor or cursor == params.get("cursor"):
+                return False
+            params = {**params, "cursor": cursor}
+    if not enabled("experimentalFeature/list", {}, "name", "network_proxy", "enabled"):
+        raise Hold("Codex has not enabled the network proxy for this Development host.")
+    if not enabled("permissionProfile/list", {"cwd": route["checkout"]}, "id", route["permissions"], "allowed"):
+        raise Hold("Codex does not allow the selected Development permissions profile.")
+    result = host.call("command/exec", {"command": ["/bin/sh", "-c", GIT_PROBE, "codebook-git-probe", route["repository"]],
+                      "cwd": route["checkout"], "permissionProfile": route["permissions"], "timeoutMs": 15000,
+                      "outputBytesCap": 256, "env": {"GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never"}})
+    code = result.get("exitCode")
+    if code != 0:
+        reasons = {2: "The isolated clone or its HTTPS origin does not match the assigned repository.",
+                   3: "The selected profile cannot write both the isolated checkout and its private Git metadata.",
+                   4: "The selected profile cannot reach the assigned HTTPS Git remote.",
+                   5: "Git authentication or private repository access failed. Use an approved repository-scoped credential or another eligible host."}
+        raise Hold(reasons.get(code, "The sandboxed Development capability check did not pass."))
 
 
 def eligible(host, config, adopted, only=None):
@@ -245,6 +362,9 @@ def eligible(host, config, adopted, only=None):
                     and re.fullmatch(r"/workspace/[A-Za-z0-9_-]+/factory/"+re.escape(config["factory"]), uri.path)
                     and parse_qs(uri.query).get("card") == [story] and board.isascii() and board.isdecimal()):
                 candidate["url"] = "https://app.codebook.work" + uri.path + "?card=" + story + "&board=" + board
+        if candidate.get("station") == "Development":
+            route, problem = development_route(config, brief, status, story)
+            candidate.update(development=True, route=route, capability_problem=problem)
         ready.append(candidate)
     return ready, "Waiting for fresh eligible local work in this scope."
 
@@ -258,6 +378,8 @@ def prompt(scope, item):
             f"{item['station']}. Your only assignment is CodeBook run {item['run']} on story {item['story']}, "
             f"factory {scope['factory']}, workflow {scope['workflow']}. "
             + (f"Card: {item['url']}. " if item.get("url") else "") +
+            (("Your current directory is the isolated clone for " + item["route"]["repository"] +
+              ". Create a per-run worktree within that clone and leave the clone's checked-out branch in place. ") if item.get("route") else "") +
             "The local manager already validated station, ownership and readiness. First call CodeBook claim_work "
             "for this run. If refused, leave it to its holder and finish. Follow the returned frozen brief, agent "
             "instructions and exact fence, heartbeating during work. Start with the server PR and proof records and "
@@ -302,20 +424,48 @@ class Manager:
         self.last_scan = 0
         self.immediate = False
         self.worker = None
+        self.development_hosts = {}
+        self.capability_holds = self.state.setdefault("development_holds", {})
 
     def record(self, reason):
         self.state["reason"] = reason
         save(self.folder / "status.json", self.state)
 
-    def worker_thread(self, previous=None):
+    @staticmethod
+    def route_key(route):
+        return (route["repository"], route["checkout"], route["permissions"], route.get("config_profile"), route.get("revision"))
+
+    def host_for(self, route):
+        if not route:
+            return self.host
+        key = self.route_key(route)
+        process = getattr(self.development_hosts.get(key), "proc", None)
+        if process and process.poll() is not None:
+            del self.development_hosts[key]
+        if key not in self.development_hosts:
+            host = Host(route["checkout"], development=route)
+            try:
+                host.open(route["checkout"], observe=False)
+            except Exception:
+                host.close()
+                raise
+            self.development_hosts[key] = host
+        return self.development_hosts[key]
+
+    def worker_thread(self, previous=None, route=None):
+        host = self.host_for(route)
         if previous and previous == self.worker:
             return previous
-        params = {"cwd": self.config["cwd"], "sandbox": "workspace-write", "approvalPolicy": "on-request",
-                  "modelProvider": "openai"}
-        if previous:
-            info = self.host.call("thread/resume", {**params, "threadId": previous})
+        params = {"cwd": route["checkout"] if route else self.config["cwd"],
+                  "approvalPolicy": "on-request", "modelProvider": "openai"}
+        if route:
+            params.update(permissions=route["permissions"], runtimeWorkspaceRoots=[route["checkout"]])
         else:
-            info = self.host.call("thread/start", {**params, "allowProviderModelFallback": False})
+            params["sandbox"] = "workspace-write"
+        if previous:
+            info = host.call("thread/resume", {**params, "threadId": previous})
+        else:
+            info = host.call("thread/start", {**params, "allowProviderModelFallback": False})
         self.worker = self.state["thread"] = info["thread"]["id"]
         self.record("Connected to the independent station worker thread.")
         return self.worker
@@ -325,11 +475,19 @@ class Manager:
         active = self.state.get("active")
         if active:
             sessions[active["key"]] = active
-        for thread in self.host.approval_threads:
+        for host_key, host in [(None, self.host), *self.development_hosts.items()]:
+            if not host or not host.approval_threads:
+                continue
+            assigned = {}
             for key, details in sessions.items():
-                if details.get("thread") == thread or (thread is None and len(sessions) == 1):
-                    self.hold_for_operator(key)
-        self.host.approval_threads.clear()
+                route = details.get("route") or (details.get("item") or {}).get("route")
+                if (self.route_key(route) if route else None) == host_key:
+                    assigned[key] = details.get("thread")
+            for thread in host.approval_threads:
+                for key, worker_thread in assigned.items():
+                    if worker_thread == thread or (thread is None and len(assigned) == 1):
+                        self.hold_for_operator(key)
+            host.approval_threads.clear()
 
     def close_host(self):
         if self.host:
@@ -340,13 +498,20 @@ class Manager:
             finally:
                 self.host.close()
                 self.host = None
+                for host in self.development_hosts.values():
+                    host.close()
+                self.development_hosts.clear()
 
     def observe_workers(self):
         for key, worker in list(self.state["workers"].items()):
             try:
-                page = self.host.call("thread/turns/list", {"threadId": worker["thread"], "limit": 1})
+                page = self.host_for(worker.get("route")).call("thread/turns/list", {"threadId": worker["thread"], "limit": 1})
             except Refused:
                 continue
+            except (OSError, Hold):
+                if worker.get("route"):
+                    continue
+                raise
             if any(t["id"] == worker["turn"] and t["status"] != "inProgress" for t in page["data"]):
                 self.approvals()
                 del self.state["workers"][key]
@@ -355,8 +520,9 @@ class Manager:
         active = self.state.get("active")
         if not active:
             return False
-        thread = self.worker_thread(active.get("thread") or self.state.get("thread"))
-        page = self.host.call("thread/turns/list", {"threadId": thread, "limit": 3, "itemsView": "full"})
+        route = active["item"].get("route")
+        thread = self.worker_thread(active.get("thread") or self.state.get("thread"), route)
+        page = self.host_for(route).call("thread/turns/list", {"threadId": thread, "limit": 3, "itemsView": "full"})
         for turn in page["data"]:
             found = turn["id"] == active.get("turn") or any(
                 i.get("type") == "userMessage" and any(t.get("type") == "text" and
@@ -376,7 +542,7 @@ class Manager:
                 lease = waiting.get("lease") or {}
                 if (target["run"] and current.get("run") == target["run"] and waiting.get("claimed") is True
                         and type(lease.get("fence")) is int and lease["fence"] > 0 and lease.get("expired") is False):
-                    self.state["workers"][active["key"]] = {"thread": thread, "turn": turn["id"], "run": target["run"]}
+                    self.state["workers"][active["key"]] = {"thread": thread, "turn": turn["id"], "run": target["run"], "route": target.get("route")}
                     self.state["notices"][active["key"]]["done"] = True
                     self.state.pop("active")
                     self.last_scan = 0
@@ -432,6 +598,25 @@ class Manager:
         self.last_scan = 0
         self.immediate = True
         self.record("Received " + entry["confirmation"] + " for " + item["key"] + ".")
+
+    def development_ready(self, item, base):
+        route = item.get("route")
+        retry = self.config.get("retries", {}).get(item["story"], 0)
+        signature = [route.get("revision") if route else None, retry, item.get("capability_problem")]
+        old = self.capability_holds.get(base, {})
+        if old.get("signature") == signature:
+            return False
+        try:
+            if item.get("capability_problem"):
+                raise Hold(item["capability_problem"])
+            preflight(self.host_for(route), route)
+        except (Hold, OSError) as error:
+            message = str(error) if isinstance(error, Hold) else "The configured isolated checkout or local host is unavailable."
+            self.capability_holds[base] = {"signature": signature, "reason": message}
+            self.record(f"Development hold {base}: {message}")
+            return False
+        self.capability_holds.pop(base, None)
+        return True
 
     def tick(self):
         if not self.config["running"]:
@@ -504,12 +689,15 @@ class Manager:
                 if not item["run"]:
                     self.confirm(item, entry)
                     return
+                if item.get("development") and not self.development_ready(item, held_run):
+                    reason = f"Development hold {held_run}: " + self.capability_holds[held_run]["reason"]
+                    continue
                 # The attempt starts with worker creation. Persist it before either host RPC.
                 entry["attempts"] += 1
                 entry["next"] = int(time.time()) + min(900, 60 * 2**(entry["attempts"]-1))
                 self.record("Starting an independent station thread for " + item["key"] + ".")
                 try:
-                    thread = self.worker_thread()
+                    thread = self.worker_thread(route=item.get("route"))
                 except Refused:
                     self.last_scan = 0
                     self.record("Codex refused worker startup for " + item["key"] + "; bounded retry pending.")
@@ -517,7 +705,7 @@ class Manager:
                 self.state["active"] = {"key": item["key"], "item": item, "thread": thread, "at": int(time.time())}
                 self.record("Submitting one scoped Codex manager wake.")
                 try:
-                    turn = self.host.call("turn/start", {"threadId": thread, "input": [{"type": "text", "text": prompt(scope, item)}]})
+                    turn = self.host_for(item.get("route")).call("turn/start", {"threadId": thread, "input": [{"type": "text", "text": prompt(scope, item)}]})
                 except Refused:
                     self.approvals()
                     self.state.pop("active")
@@ -575,7 +763,8 @@ def supervise(folder):
             for worker in workers:
                 thread = worker.get("thread") or manager.state.get("thread")
                 if manager.host and worker.get("turn") and thread:
-                    manager.host.call("turn/interrupt", {"threadId": thread, "turnId": worker["turn"]})
+                    route = worker.get("route") or (worker.get("item") or {}).get("route")
+                    manager.host_for(route).call("turn/interrupt", {"threadId": thread, "turnId": worker["turn"]})
         except (OSError, Hold):
             pass
         finally:
@@ -586,17 +775,26 @@ def supervise(folder):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["start", "status", "stop", "follow", "retry"])
+    parser.add_argument("action", choices=["start", "status", "stop", "follow", "retry", "route"])
     parser.add_argument("--factory", required=True, type=validated)
     parser.add_argument("--workflow", required=True, type=validated)
     parser.add_argument("--cwd", type=Path)
+    parser.add_argument("--repo", type=lambda value: validated(value, REPOSITORY).lower())
+    parser.add_argument("--checkout", type=Path)
+    parser.add_argument("--permissions", type=validated)
+    parser.add_argument("--config-profile", type=validated)
     parser.add_argument("--manage-ready", action="store_true", help="also manage new server-approved local drawer items")
     parser.add_argument("--story", action="append", type=lambda x: validated(x, STORY), default=[])
     args = parser.parse_args()
+    if args.action == "route":
+        if not (args.repo and args.checkout and args.permissions):
+            parser.error("route requires --repo, --checkout and --permissions")
+    elif any((args.repo, args.checkout, args.permissions, args.config_profile)):
+        parser.error("repository routes must be configured with the route command")
     if args.action in ("follow", "retry") and not args.story:
         parser.error("follow/retry requires --story")
-    if args.story and args.action not in ("follow", "start", "retry"):
-        parser.error("--story is valid on start, follow or retry")
+    if args.story and args.action not in ("follow", "start", "retry", "route"):
+        parser.error("--story is valid on start, follow, retry or route")
     if args.manage_ready and args.action != "start":
         parser.error("--manage-ready is an option for start")
     if args.cwd and args.action != "start":
@@ -609,10 +807,26 @@ def main():
         state = read(folder/"status.json", {})
         config = read(folder/"control.json", {})
         print(json.dumps({**state, "running": running(folder), "enabled": config.get("running", False),
-                          "stories": config.get("stories", []), "manage_ready": config.get("manage_ready", False), "state_directory": str(folder)}, indent=2))
+                          "stories": config.get("stories", []), "development_routes": config.get("development_routes", {}),
+                          "manage_ready": config.get("manage_ready", False), "state_directory": str(folder)}, indent=2))
         return
     with locked(folder/"control.lock"):
         config = read(folder/"control.json", {})
+        if args.action == "route":
+            if not args.checkout.is_absolute() or not args.checkout.is_dir():
+                parser.error("provide the absolute path of an existing isolated checkout")
+            checkout = str(args.checkout.resolve(strict=True))
+            routes = dict(config.get("development_routes", {}))
+            if any(r["checkout"] == checkout and name != args.repo for name, r in routes.items()):
+                parser.error("each repository must have its own isolated checkout")
+            rows = sorted(set(args.story))
+            if len(rows) > 64 or (args.repo not in routes and len(routes) >= 64):
+                parser.error("use at most 64 stories per route and 64 routes per workflow")
+            routes[args.repo] = {"repository": args.repo, "checkout": checkout, "permissions": args.permissions,
+                                 "config_profile": args.config_profile, "stories": rows, "revision": time.time_ns()}
+            save(folder/"control.json", {**config, "development_routes": routes})
+            print("Development route recorded. The supervisor verifies the repository and probes the selected sandbox before dispatch.")
+            return
         if args.action == "stop":
             save(folder/"control.json", {**config, "running": False})
             print("Stop recorded. Check status for process exit.")
@@ -620,9 +834,9 @@ def main():
         if args.action == "retry":
             # The status display provides the opaque story ID embedded in each recorded wake.
             state = read(folder/"status.json", {})
-            held = {run.split(":")[0] for run in run_holds(state)}
+            held = {run.split(":")[0] for run in (*run_holds(state), *state.get("development_holds", {}))}
             if not set(args.story).issubset(held):
-                parser.error("retry requires the opaque story ID of a recorded operator hold")
+                parser.error("retry requires the opaque story ID of a recorded operator or capability hold")
             retries = {**config.get("retries", {}), **{story: time.time_ns() for story in args.story}}
             save(folder/"control.json", {**config, "retries": retries})
             print("Retry recorded for the held story. Local eligibility will be checked again.")
@@ -644,7 +858,7 @@ def main():
         stories = sorted(set(args.story or config.get("stories", [])))
         if len(stories) > 64:
             parser.error("use at most 64 explicitly owned stories per workflow")
-        config = {"factory": args.factory, "workflow": args.workflow, "cwd": cwd, "stories": stories, "retries": config.get("retries", {}), "manage_ready": args.manage_ready or config.get("manage_ready", False), "running": True}
+        config = {"factory": args.factory, "workflow": args.workflow, "cwd": cwd, "stories": stories, "retries": config.get("retries", {}), "development_routes": config.get("development_routes", {}), "manage_ready": args.manage_ready or config.get("manage_ready", False), "running": True}
         owner = (folder/"owner.lock").open("a+")
         fcntl.flock(owner, fcntl.LOCK_EX | fcntl.LOCK_NB)
         save(folder/"control.json", config)
