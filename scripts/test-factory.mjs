@@ -34,6 +34,11 @@ try {
   else process.stdout.write(report.tap)
   if (result.error) console.error(result.error.message)
   process.exitCode = result.status !== 0 ? result.status ?? 1 : (result.error || report.error || report.failed ? 1 : 0)
+  if (!process.exitCode && files.includes(join(root,'test','proof.test.tsx'))) {
+    // The SDK event mocks cover orchestration. This fixture executes its process calls with the real OS sandbox.
+    const native = spawnSync(process.execPath,[join(root,'test/support/locked-proof-native.mjs')],{cwd:root,stdio:'inherit',timeout:90000})
+    if (native.error || native.status !== 0) process.exitCode=native.status || 1
+  }
 } finally {
   rmSync(stage, { recursive: true, force: true })
 }

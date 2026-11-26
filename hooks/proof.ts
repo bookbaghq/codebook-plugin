@@ -20,6 +20,7 @@ import type { EngineInterface } from 'claude-code'
 
 import type { CodebookCheckout, CodebookClaim } from '../types'
 import { call } from './connector'
+import { lockedDependencySource } from './lockedDependencies'
 import { FORWARD_PORT, forwarderSource, parseHosts, proxyEnvironment, proxySource, ruleText } from './egress'
 import type { HostRule } from './egress'
 
@@ -52,7 +53,7 @@ export type ProofWork = {
  * (today's CodeBook queues a model's request_proof with none). `run`, `branch` and `worktree` are what a newer CodeBook
  * may send of the run that asked (its declare_work); the plugin reads them when they are there.
  */
-export type ProofWaiting = { delegated_focused_version?: number; case_report_version?: number; proof: number; repository: string; commands: string[]; commit: string | null; default_branch?: string; run?: number | null; branch?: string | null; worktree?: string | null }
+export type ProofWaiting = { dependency_wait_version?: number; dependency_wait?: {code:string;detail:string;condition_hash:string}; delegated_focused_version?: number; case_report_version?: number; proof: number; repository: string; commands: string[]; commit: string | null; default_branch?: string; run?: number | null; branch?: string | null; worktree?: string | null }
 /** What this session knows of the run that asked for a proof: its worktree and branch (declare_work), the story's key and branch (its brief). */
 export type ProofHint = { run: number | null; worktree?: string; branch?: string; key?: string }
 export type Sandbox = { kind: 'seatbelt' | 'bubblewrap' | 'none'; bin: string | null }
@@ -472,15 +473,15 @@ const TOOL_PATH = '/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin'
 
 // A delegated command receives a read-only checkout, fresh HOME/temp and system runtimes.
 // The ordinary personal box may use saved host rules and shared caches; this one never starts that proxy.
-function delegatedBox(sandbox: Sandbox, dir: string, scratch: string, args: string[], gitDirIsFolder: boolean, metadata: string[] = []): string[] | null {
+function delegatedBox(sandbox: Sandbox, dir: string, scratch: string, args: string[], gitDirIsFolder: boolean | null, metadata: string[] = []): string[] | null {
   if (!sandbox.bin) return null
-  const path = metadata.length && sandbox.kind === 'seatbelt' ? '/Applications/Xcode.app/Contents/Developer/usr/bin:/Library/Developer/CommandLineTools/usr/bin:' + TOOL_PATH : TOOL_PATH
+  const path = sandbox.kind === 'seatbelt' ? '/Applications/Xcode.app/Contents/Developer/usr/bin:/Library/Developer/CommandLineTools/usr/bin:' + TOOL_PATH : TOOL_PATH
   const inner = ['/usr/bin/env', '-i', 'PATH=' + path, 'HOME=' + scratch, 'TMPDIR=' + scratch,
     'CI=1', 'GIT_TERMINAL_PROMPT=0', ...args]
   if (sandbox.kind === 'bubblewrap') return [sandbox.bin, '--unshare-all', '--die-with-parent', '--new-session',
     ...RUNTIME_PATHS.flatMap(path => ['--ro-bind-try', path, path]), '--dev', '/dev', '--proc', '/proc', '--tmpfs', '/tmp',
     '--ro-bind', dir, dir, ...metadata.flatMap(path => ['--ro-bind', path, path]),
-    ...(metadata.length ? [] : gitDirIsFolder ? ['--tmpfs', dir+'/.git'] : ['--ro-bind', '/dev/null', dir+'/.git']),
+    ...(metadata.length || gitDirIsFolder === null ? [] : gitDirIsFolder ? ['--tmpfs', dir+'/.git'] : ['--ro-bind', '/dev/null', dir+'/.git']),
     '--bind', scratch, scratch, '--chdir', dir, ...inner]
   if (sandbox.kind !== 'seatbelt') return null
   const readable = [...RUNTIME_PATHS, '/System', '/Library/Developer/CommandLineTools', '/usr/libexec', '/Applications/Xcode.app/Contents/Developer/usr', dir, scratch, ...metadata]
@@ -510,7 +511,51 @@ async function cleanPinned($: EngineInterface, sha: string, box: (argv: string[]
     && extra.exitCode === 0 && !extra.stdout
 }
 
-async function runDelegated($: EngineInterface, target: ProofWaiting, work: ProofWork, dir: string, sandbox: Sandbox) {
+type DependencyProblem = { code:'missing'|'lock_mismatch'|'runtime_mismatch'|'unsupported'; detail:string }
+type Prepared = { scratch:string; source:string; work:string; identity:string }
+const unavailable = (detail:string):DependencyProblem => ({code:'unsupported',detail})
+
+async function prepareLocked($:EngineInterface, target:ProofWaiting, dir:string, sandbox:Sandbox, scratch:string):Promise<Prepared | DependencyProblem> {
+  const physical = (await quiet($,['realpath',scratch])).stdout.trim()
+  const checkout = (await quiet($,['realpath',dir])).stdout.trim()
+  const home = await $.env.get('HOME')
+  const gitDir = await quiet($,['git','-C',dir,'rev-parse','--absolute-git-dir'])
+  const gitCommon = await quiet($,['git','-C',dir,'rev-parse','--path-format=absolute','--git-common-dir'])
+  const metadata = [...new Set([gitDir.stdout.trim(),gitCommon.stdout.trim()])]
+  if (!(physical===scratch || physical==='/private'+scratch) || !home?.startsWith('/') || !checkout.startsWith('/') || checkout==='/' || checkout===home ||
+      gitDir.exitCode || gitCommon.exitCode || metadata.some(path=>!path.startsWith('/') || !/\/\.git(?:\/worktrees\/[^/]+)?$/.test(path)))
+    return unavailable('The selected checkout or native scratch directory could not be verified.')
+  const source=physical+'/source', cache=home+'/.npm/_cacache/content-v2/sha512'
+  const headers=['/usr/local/include/node','/usr/include/node','/opt/homebrew/include/node']
+  let identity=''
+  for (const mode of ['stage','build']) {
+    // Only fixed preparer code sees the content-addressed cache or original Git metadata. The compiler receives neither.
+    const systemPython=sandbox.kind==='seatbelt'?['/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework']:[]
+    const scope=mode==='stage' ? [...metadata,cache,...systemPython] : [...headers,...systemPython]
+    const argv=delegatedBox(sandbox,mode==='stage'?checkout:source,physical,
+      ['python3','-I','-S','-c',lockedDependencySource,mode,checkout,target.commit!,physical,cache],null,scope)
+    if (!argv) return unavailable('The system cannot confine the offline dependency preparer.')
+    const ran=await quiet($,argv,physical,300000,true)
+    let answer:{ready?:boolean;identity?:string;code?:DependencyProblem['code'];detail?:string}
+    try { answer=JSON.parse(ran.stdout) } catch { return unavailable('The isolated '+mode+' process could not start or complete with the system Python, Git and Node runtimes.') }
+    if (ran.exitCode || !answer.ready) return answer.code && ['missing','lock_mismatch','runtime_mismatch','unsupported'].includes(answer.code) && typeof answer.detail==='string'
+      ? {code:answer.code,detail:answer.detail.slice(0,430)} : unavailable('The isolated dependency preparation failed.')
+    if (!/^[a-f0-9]{64}$/.test(answer.identity??'') || (identity && identity!==answer.identity)) return {code:'lock_mismatch',detail:'The staged lockfile or runtime identity changed.'}
+    identity=answer.identity!
+  }
+  return {scratch:physical,source,work:physical+'/work',identity}
+}
+
+async function parkDependency($:EngineInterface,target:ProofWaiting,problem:DependencyProblem) {
+  const condition_hash=await sha256Hex(JSON.stringify([target.repository,target.commit,problem.code,problem.detail]))
+  if (condition_hash!==target.dependency_wait?.condition_hash) {
+    const saved=await call<{waiting_for_dependencies?:boolean}>($,'claim_proof',{proof:target.proof,delegated_focused_version:1,dependency_wait:{...problem,condition_hash}})
+    if (!saved.ok || !saved.data.waiting_for_dependencies) return {isRun:false,text:'Offline dependencies: '+problem.detail+' CodeBook could not record the wait.'}
+  }
+  return {isRun:false,text:'Waiting for offline dependencies: '+problem.detail}
+}
+
+async function runDelegated($: EngineInterface, target: ProofWaiting, work: ProofWork, dir: string, sandbox: Sandbox, prepared?:Prepared) {
   const steps = work.steps ?? [], sha = work.expected_commit ?? ''
   const refused = 'Delegated proof requires a supported native sandbox, clean exact checkout and bounded loopback check without setup or baseline.'
   const valid = target.delegated_focused_version === 1 && target.commit === sha && FULL_COMMIT.test(sha) && !!sandbox.bin
@@ -523,7 +568,15 @@ async function runDelegated($: EngineInterface, target: ProofWaiting, work: Proo
   for (const step of steps) {
     let ran: Ran = { exitCode:null, output:'', isTruncated:false, isTimedOut:false, error:refused, ms:0 }
     let pinned = false
-    if (valid) {
+    if (valid && prepared) {
+      const command=delegatedCommand(step.line)
+      const argv=command ? delegatedBox(sandbox,prepared.source,prepared.work,command,null) : null
+      if (argv) {
+        ran=await runBoxed($,argv,prepared.source,step.timeout_seconds)
+        // The source and dependency tree were built from the pinned commit outside this command's write grants.
+        pinned=true
+      }
+    } else if (valid) {
       const temp = await quiet($, ['/usr/bin/mktemp', '-d', '/tmp/codebook-delegated-XXXXXXXX'])
       const scratch = temp.stdout.trim()
       if (!temp.exitCode && /^\/tmp\/codebook-delegated-[A-Za-z0-9]+$/.test(scratch)) {
@@ -593,7 +646,7 @@ export function summaryOf(repository: string, sandbox: Sandbox, outcomes: StepOu
 export async function runProof($: EngineInterface, { proof = null, known = [], hosts = null, hint = null }: { proof?: number | null; known?: CodebookCheckout[]; hosts?: unknown; hint?: ProofHint | null }): Promise<{ isRun: boolean; text: string }> {
   const peeked = await waitingProofs($)
   if (!peeked.ok) return { isRun: false, text: peeked.message }
-  const target = proof === null ? peeked.waiting[0] : peeked.waiting.find(one => one.proof === proof)
+  const target = proof === null ? (peeked.waiting.find(one=>!one.dependency_wait) ?? peeked.waiting[0]) : peeked.waiting.find(one => one.proof === proof)
   if (!target) return { isRun: false, text: proof === null ? 'No proof run is waiting for this computer.' : `Proof run ${proof} is not waiting for this computer (it may already have been run, or it was asked for someone else's).` }
 
   const delegated = target.delegated_focused_version !== undefined
@@ -613,6 +666,20 @@ export async function runProof($: EngineInterface, { proof = null, known = [], h
   const dir = placed.dir
 
   // The commit that is checked out, whether anything is uncommitted, and the default branch as this git knows it.
+  if (delegated && delegatedSandbox && target.dependency_wait_version===1) {
+    const temp=await quiet($,['/usr/bin/mktemp','-d','/tmp/codebook-delegated-XXXXXXXX'])
+    const scratch=temp.stdout.trim()
+    if (temp.exitCode || !/^\/tmp\/codebook-delegated-[A-Za-z0-9]+$/.test(scratch)) return parkDependency($,target,unavailable('Cannot allocate an isolated temporary checkout.'))
+    try {
+      const prepared=await prepareLocked($,target,dir,delegatedSandbox,scratch)
+      if ('code' in prepared) return await parkDependency($,target,prepared)
+      const claimed=await call<ProofWork>($,'claim_proof',{proof:target.proof,delegated_focused_version:1,dependency_wait_version:1})
+      if (!claimed.ok) return {isRun:false,text:claimed.message}
+      const work=claimed.data
+      if (work.proof!==target.proof || !work.token || !work.report_url || !work.steps) return {isRun:false,text:'The prepared proof was unavailable.'}
+      return await runDelegated($,target,work,dir,delegatedSandbox,prepared)
+    } finally { await quiet($,['/bin/rm','-rf',scratch]) }
+  }
   if (delegated && delegatedSandbox) {
     const claimed = await call<ProofWork>($, 'claim_proof', {proof:target.proof, delegated_focused_version:1})
     if (!claimed.ok) return {isRun:false, text:claimed.message}
