@@ -1,7 +1,7 @@
 // Read-only lifecycle observation. A wake asks the owning manager to check readiness; it grants no authority.
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface } from 'claude-code'
-import type { CodebookContinuation } from '../types'
+import type { CodebookContinuation, CodebookWorkflowWatch } from '../types'
 import type { Status } from './factory'
 import { call } from './connector'
 
@@ -14,14 +14,28 @@ const QUIET_MS = 30000
 let saving = Promise.resolve()
 let polling = false
 let flushing = false
+let lastBackgroundStory: string | undefined
+let previousCheckpoint: { key: string; value: string | null } | undefined
 
-async function save($: EngineInterface): Promise<void> {
+// These counters schedule work in this process. A resumed manager reconciles from the first page.
+function checkpoint(current: CodebookContinuation): CodebookContinuation {
+  return { ...current, checkedAt: 0, nextOrder: 0, nextFactory: 0,
+    ...(current.manager && { manager: { ...current.manager, offset: 0, seen: [], scannedAt: 0 } }) }
+}
+
+async function save($: EngineInterface, generation: number): Promise<void> {
   // Serialize storage writes so an older observation cannot overwrite a later stop.
   saving = saving.catch(() => {}).then(async () => {
+    const key = CONTINUATION_STORE + await $.session.id(), now = await $.clock.now()
     const current = await read($, state)
-    const key = CONTINUATION_STORE + await $.session.id()
-    if (!Object.keys(current.stories).length && !Object.keys(current.orders).length && !Object.keys(current.pending).length) await $.store.delete(key)
-    else await $.store.set(key, { at: await $.clock.now(), value: current })
+    if (current.generation !== generation) return
+    const value = !current.manager && !Object.keys(current.stories).length && !Object.keys(current.orders).length && !Object.keys(current.pending).length
+      ? null : checkpoint(current)
+    const signature = value ? JSON.stringify(value) : null
+    if (previousCheckpoint?.key === key && previousCheckpoint.value === signature) return
+    if (value) await $.store.set(key, { at: now, value })
+    else await $.store.delete(key)
+    previousCheckpoint = { key, value: signature }
   })
   await saving
 }
@@ -30,19 +44,97 @@ export async function continuationGeneration($: EngineInterface): Promise<number
 export async function continuationCurrent($: EngineInterface, generation: number): Promise<boolean> { return (await continuationGeneration($)) === generation }
 export async function hasContinuation($: EngineInterface): Promise<boolean> {
   const current = await read($, state)
-  return Object.keys(current.stories).length > 0 || Object.keys(current.orders).length > 0 || Object.keys(current.pending).length > 0
+  return !!current.manager || Object.keys(current.stories).length > 0 || Object.keys(current.orders).length > 0 || Object.keys(current.pending).length > 0
 }
 
 export async function restoreContinuation($: EngineInterface, generation: number): Promise<void> {
-  const kept = await $.store.get(CONTINUATION_STORE + await $.session.id()) as { at?: number; value?: CodebookContinuation } | undefined
+  const key = CONTINUATION_STORE + await $.session.id()
+  const kept = await $.store.get(key) as { at?: number; value?: CodebookContinuation } | undefined
   if (typeof kept?.at === 'number' && kept.at > await $.clock.now() - 30 * 24 * 3600 * 1000 && kept.value?.stories && kept.value.orders && kept.value.pending) {
-    await update($, state, current => current.generation === generation ? { ...kept.value!, generation, checkedAt: 0 } : current)
+    const restored = kept.value
+    previousCheckpoint = { key, value: JSON.stringify(checkpoint(restored)) }
+    await update($, state, current => {
+      if (current.generation !== generation) return current
+      return { ...restored, generation, checkedAt: 0, ...(restored.manager && { manager: { ...restored.manager, scannedAt: 0, offset: 0, seen: [] } }) }
+    })
   }
+}
+
+type ManagerBrief = {
+  factory?: { factory: string }
+  workflow?: { workflow: string; name: string }
+  you?: { may_run_here?: boolean; run_here_refusal?: string }
+  backlog?: { next_offset?: number | null; stories?: { story: string; reference?: string; workflow: string; ready: boolean; start_with?: string }[] }
+}
+
+export const manageUsage = '/factory manage <factory> [--workflow <name or ID>]'
+
+function observeReady(next: CodebookContinuation, watch: CodebookWorkflowWatch, brief: ManagerBrief, now: number): void {
+  const seen = new Set(watch.seen)
+  // Older checkpoints kept a single sentence containing the references that had failed to deliver.
+  const prefix = `Independent backlog work is ready in ${watch.name} (${watch.factory}, ${watch.workflow}): `
+  const suffix = '. Read the current manager brief and its readiness pages.'
+  const legacy = next.pending.workflow
+  const previous = legacy?.startsWith(prefix) && legacy.endsWith(suffix)
+    ? legacy.slice(prefix.length, -suffix.length).split(', ') : []
+  for (const row of brief.backlog?.stories ?? []) {
+    if (!row.ready || !row.start_with || row.workflow !== watch.name) continue
+    const label = row.reference || row.story
+    if ((!watch.ready.includes(row.story) && !seen.has(row.story)) || previous.includes(label)) {
+      next.pending[`workflow:${row.story}`] = prefix + label + suffix
+    }
+    seen.add(row.story)
+  }
+  const offset = brief.backlog?.next_offset
+  watch.offset = typeof offset === 'number' && offset > watch.offset ? offset : 0
+  watch.seen = watch.offset ? [...seen] : []
+  if (!watch.offset) {
+    delete next.pending.workflow
+    for (const key of Object.keys(next.pending)) {
+      if (key.startsWith('workflow:') && !seen.has(key.slice('workflow:'.length))) delete next.pending[key]
+    }
+    watch.ready = [...seen]
+    watch.scannedAt = now
+  }
+}
+
+export async function watchWorkflow($: EngineInterface, words: string[]): Promise<string> {
+  const option = words.indexOf('--workflow'), factory = words.slice(0, option < 0 ? words.length : option).join(' ')
+  if (!factory || words.some(word => word.startsWith('--') && word !== '--workflow') ||
+      (option >= 0 && (option !== words.lastIndexOf('--workflow') || !words[option + 1]))) return 'Usage: ' + manageUsage
+  const workflow = option < 0 ? undefined : words.slice(option + 1).join(' ')
+  const generation = await continuationGeneration($)
+  const got = await call<ManagerBrief>($, 'manager_brief', { factory, ...(workflow && { workflow }) })
+  if (!got.ok) return got.message
+  const brief = got.data
+  if (!brief.factory?.factory || !brief.workflow?.workflow || !Array.isArray(brief.backlog?.stories) || !brief.you?.may_run_here)
+    return brief.you?.run_here_refusal || 'CodeBook did not grant Run here access and return readiness for this workflow.'
+  const selected = brief.workflow, id = brief.factory.factory, now = await $.clock.now()
+  await update($, state, current => {
+    if (current.generation !== generation || current.manager) return current
+    const next = structuredClone(current)
+    next.manager = { factory: id, workflow: selected.workflow, name: selected.name, cursor: 0, scannedAt: 0, offset: 0, ready: [], seen: [] }
+    observeReady(next, next.manager, brief, now)
+    return next
+  })
+  await save($, generation)
+  const watch = (await read($, state)).manager
+  if (!watch) return 'The workflow watch was stopped.'
+  if (watch.factory !== id || watch.workflow !== selected.workflow) return 'This session already watches a different workflow. Use /factory stop before changing workflows.'
+  return `Watching ${watch.name} (${watch.factory}, ${watch.workflow}) for local manager work. Use /factory stop to stop watching.`
+}
+
+export async function workflowStatus($: EngineInterface): Promise<string> {
+  const current = await read($, state), watch = current.manager
+  const checked = current.checkedAt ? new Date(current.checkedAt).toISOString() : 'awaiting first poll'
+  const readError = watch?.readError ? ` Last readiness read failed (${watch.readError}).` : ''
+  const delivery = current.deliveryFailures ? ` Last prompt submission failed. Retry after ${new Date(current.retryAt ?? 0).toISOString()}.` : ''
+  return watch ? `Watching workflow ${watch.name} (${watch.factory}, ${watch.workflow}) for local manager work. Last poll: ${checked}. Pending notices: ${Object.keys(current.pending).length}.${readError}${delivery}` : ''
 }
 
 export async function stopContinuation($: EngineInterface): Promise<void> {
   await update($, state, current => empty(current.generation + 1))
-  await save($)
+  await save($, await continuationGeneration($))
 }
 
 export async function watchContinuation($: EngineInterface, story: string, reference: string, factory: string, fresh: boolean, generation: number): Promise<void> {
@@ -50,7 +142,7 @@ export async function watchContinuation($: EngineInterface, story: string, refer
     if (current.generation !== generation || current.stories[story] || Object.keys(current.stories).length >= MAX_STORIES) return current
     return { ...current, stories: { ...current.stories, [story]: { factory, reference, order: null, state: fresh ? 'moving' : null, event: 0 } } }
   })
-  await save($)
+  await save($, generation)
 }
 
 /** Only a successful confirmation in this session establishes ownership of this proposal. */
@@ -69,7 +161,7 @@ export async function adoptContinuation($: EngineInterface, data: unknown, gener
     }
     return next
   })
-  await save($)
+  await save($, generation)
 }
 
 function notice(current: CodebookContinuation, story: string, outcome: string): void {
@@ -89,6 +181,14 @@ export async function observeContinuation($: EngineInterface, story: string, sta
     one.factory = status.factory.factory
     if (one.order && next.orders[one.order]) next.orders[one.order]!.factory = one.factory
     const outcome = status.finished || (status.run?.state === 'blocked' ? `blocked:${status.run.run}` : null)
+    const watch = next.manager, waiting = status.waiting
+    if (watch && watch.factory === one.factory && watch.workflow === status.workflow?.workflow) {
+      const readyRun = !outcome && status.run?.where === 'here' && waiting?.on === 'runner' && waiting.on_you === true &&
+        waiting.claimed === false && status.run.run === waiting.run ? waiting.run : undefined
+      if (readyRun && readyRun !== one.waitingRun) next.pending[`runner:${story}`] = `${one.reference} has local run ${readyRun} waiting for its owner.`
+      if (!readyRun) delete next.pending[`runner:${story}`]
+      one.waitingRun = readyRun
+    }
     const initialized = one.state !== null
     for (const event of status.events ?? []) {
       if (event.id <= one.event) continue
@@ -104,27 +204,94 @@ export async function observeContinuation($: EngineInterface, story: string, sta
     if (status.finished) delete next.stories[story]
     return next
   })
-  await save($)
+  await save($, generation)
 }
 
 type Feed = { events?: { id: number; kind: string; outcome?: string; run?: number; card?: { key?: string }; work_order?: { reference?: string } }[]; last_event?: number | null }
-type ReadFailure = { ok: false; message: string; isSignIn: boolean }
+type ReadFailure = { ok: false; code: string; message: string; isSignIn: boolean }
 type Order = { order?: string; work_order?: { reference?: string; status?: string }; milestones?: { milestone: number; state?: string; check?: { latest?: { id?: number; status?: string } | null } | null }[] }
 
+// Read the most recent event, not the event history. A changed cursor asks for current readiness.
+// Reconcile periodically as well: operator actions on older servers need not emit an event.
+async function pollWorkflow($: EngineInterface, before: CodebookContinuation, now: number): Promise<ReadFailure | void> {
+  const watch = before.manager
+  if (!watch) return
+  const args = { factory: watch.factory, workflow: watch.workflow }
+  const feed = await call<Feed>($, 'factory_events', { ...args, limit: 1, kinds: ['card.created', 'card.moved', 'card.finished', 'work_order.created', 'work_order.replanned', 'work_order.milestone_failed', 'work_order.milestone_passed'] })
+  if (!feed.ok) return feed
+  const cursor = feed.data.last_event ?? 0
+  if (!watch.offset && watch.scannedAt && cursor === watch.cursor && now - watch.scannedAt < 300000) return
+  if (!await continuationCurrent($, before.generation)) return
+  // Offsets refer to the backlog at one cursor. A move between pages invalidates all preceding pages.
+  const restart = watch.offset > 0 && watch.cursor !== cursor
+  const offset = restart ? 0 : watch.offset
+  const got = await call<ManagerBrief>($, 'manager_brief', { ...args, ...(offset > 0 && { backlog_offset: offset }) })
+  if (!got.ok) return got
+  if (got.data.factory?.factory !== watch.factory || got.data.workflow?.workflow !== watch.workflow || !Array.isArray(got.data.backlog?.stories)) return
+  let persist = false
+  await update($, state, current => {
+    if (current.generation !== before.generation || !current.manager) return current
+    const next = structuredClone(current), manager = next.manager!
+    if (restart) { manager.offset = 0; manager.seen = [] }
+    if (!got.data.you?.may_run_here) {
+      for (const key of Object.keys(next.pending)) {
+        if (key === 'workflow' || key.startsWith('workflow:')) delete next.pending[key]
+      }
+      manager.ready = []
+      manager.seen = []
+      manager.offset = 0
+      manager.scannedAt = now
+    } else observeReady(next, manager, got.data, now)
+    manager.cursor = cursor
+    // A resume always scans again from page one. In-memory scan timing and partial pages need no checkpoint.
+    persist = current.manager.cursor !== cursor || JSON.stringify(current.manager.ready) !== JSON.stringify(manager.ready)
+      || JSON.stringify(current.pending) !== JSON.stringify(next.pending)
+    return next
+  })
+  if (persist) await save($, before.generation)
+}
+
+// Manual follow can replace the pane while the previous story remains owned by this session.
+// Probe one such story per quiet interval, including after a restart or missed release event.
+async function pollBackgroundStory($: EngineInterface, before: CodebookContinuation, monitored: Set<string>): Promise<void> {
+  const watch = before.manager
+  if (!watch) return
+  const owned = Object.entries(before.stories).filter(([story, item]) => !monitored.has(story) && item.factory === watch.factory)
+  if (!owned.length) return
+  const previous = owned.findIndex(([story]) => story === lastBackgroundStory)
+  const [story] = owned[(previous + 1) % owned.length]!
+  lastBackgroundStory = story
+  const got = await call<Status>($, 'story_status', { factory: watch.factory, workflow: watch.workflow, story, limit: 1 })
+  if (!got.ok || !await continuationCurrent($, before.generation)) return
+  const status = got.data
+  if (status.story.story === story && status.factory.factory === watch.factory && status.workflow?.workflow === watch.workflow) {
+    await observeContinuation($, story, status, before.generation)
+  }
+}
+
 /** One page and one owned-order snapshot per quiet interval, round robin. No catch-up loop or model on empty reads. */
-export async function pollContinuation($: EngineInterface): Promise<ReadFailure | void> {
+export async function pollContinuation($: EngineInterface, monitored: Set<string>): Promise<ReadFailure | void> {
   if (polling) return
   const before = await read($, state), now = await $.clock.now()
   if (before.checkedAt && now - before.checkedAt < QUIET_MS) return
   const factories = [...new Set([...Object.values(before.stories), ...Object.values(before.orders)].map(one => one.factory).filter(Boolean))]
-  if (!factories.length) return
+  if (!factories.length && !before.manager) return
   polling = true
   const generation = before.generation
   try {
-    const factory = factories[before.nextFactory % factories.length]!
+    const factory = factories.length ? factories[before.nextFactory % factories.length] : undefined
     await update($, state, current => current.generation === generation ? { ...current, checkedAt: now, nextFactory: current.nextFactory + 1 } : current)
+    const workflowFailure = await pollWorkflow($, before, now) || undefined
+    if (!await continuationCurrent($, generation)) return
+    if (before.manager && before.manager.readError !== workflowFailure?.code) {
+      await update($, state, current => current.generation === generation && current.manager
+        ? { ...current, manager: { ...current.manager, readError: workflowFailure?.code } } : current)
+      await save($, generation)
+    }
+    await pollBackgroundStory($, before, monitored)
+    if (!factory || !await continuationCurrent($, generation)) return workflowFailure
     const feed = await call<Feed>($, 'factory_events', { factory, after: before.feeds[factory] ?? 0, limit: 50 })
-    let failure: ReadFailure | undefined = feed.ok ? undefined : feed
+    let failure: ReadFailure | undefined = feed.ok ? workflowFailure || undefined : feed
     if (!await continuationCurrent($, generation)) return
     if (feed.ok) await update($, state, current => {
       const next = structuredClone(current)
@@ -169,31 +336,92 @@ export async function pollContinuation($: EngineInterface): Promise<ReadFailure 
         return next
       })
     }
-    await save($)
+    await save($, generation)
     if (await continuationCurrent($, generation)) return failure
   } finally { polling = false }
 }
 
-/** Only the timer calls this. Consume once before submit; an uncertain submission never causes a retry storm. */
+/** Keep notices until the host accepts the prompt. A persisted delay bounds retries across a restart. */
 export async function flushContinuation($: EngineInterface): Promise<boolean> {
   if (flushing) return false
   flushing = true
   try {
-    const before = await read($, state), lines = Object.values(before.pending)
-    if (!lines.length) return false
-    await update($, state, current => {
-      if (current.generation !== before.generation) return current
-      const pending = { ...current.pending }
-      for (const [key, line] of Object.entries(before.pending)) if (pending[key] === line) delete pending[key]
-      return { ...current, pending }
+    const before = await read($, state), now = await $.clock.now(), generation = before.generation
+    const candidates = Object.entries(before.pending).filter(([key]) => {
+      if (key === 'workflow') return false // Reconcile a legacy sentence into current story identities first.
+      if (!key.startsWith('workflow:')) return true
+      const watch = before.manager
+      return watch && !watch.readError && !watch.offset && watch.scannedAt > 0 && watch.ready.includes(key.slice('workflow:'.length))
     })
-    await save($)
+    if (!candidates.length || (before.retryAt ?? 0) > now) return false
+    const failures = Math.min(before.deliveryFailures ?? 0, 5)
+    const retryAt = now + Math.min(QUIET_MS * 2 ** failures, 15 * 60000)
+    await update($, state, current => current.generation === before.generation ? { ...current, retryAt } : current)
+    await save($, generation)
     if (!await continuationCurrent($, before.generation)) return false
+    // A different card can occupy the pane after resume. Recheck the queued run itself before delivery.
+    const deliver: [string, string][] = [], stale: [string, string][] = [], deferred: [string, string][] = []
+    let checked = 0
+    for (const [key, line] of candidates) {
+      if (!key.startsWith('runner:')) { deliver.push([key, line]); continue }
+      if (checked >= 8) continue
+      checked++
+      const story = key.slice('runner:'.length), owned = before.stories[story], watch = before.manager
+      if (!owned?.waitingRun || !watch || owned.factory !== watch.factory) { stale.push([key, line]); continue }
+      const got = await call<Status>($, 'story_status', { factory: watch.factory, workflow: watch.workflow, story, limit: 1 })
+      if (!await continuationCurrent($, generation)) return false
+      if (!got.ok) { deferred.push([key, line]); continue }
+      const status = got.data, waiting = status.waiting
+      if (status.story.story === story && status.factory.factory === watch.factory && status.workflow?.workflow === watch.workflow
+          && !status.finished && !status.in_backlog && status.run?.where === 'here' && status.run.run === owned.waitingRun
+          && waiting?.on === 'runner' && waiting.on_you === true && waiting.claimed === false && waiting.run === owned.waitingRun) {
+        deliver.push([key, line])
+      } else stale.push([key, line])
+    }
+    const readFailed = deferred.length > 0
+    if (stale.length || readFailed) await update($, state, current => {
+      if (current.generation !== generation) return current
+      const next = structuredClone(current)
+      for (const [key, line] of deferred) {
+        if (next.pending[key] !== line) continue
+        delete next.pending[key]
+        next.pending[key] = line // Rotate a failed read behind independent waiting notices.
+      }
+      for (const [key, line] of stale) {
+        if (next.pending[key] !== line) continue
+        delete next.pending[key]
+        const owned = next.stories[key.slice('runner:'.length)]
+        if (owned) delete owned.waitingRun
+      }
+      if (readFailed) next.deliveryFailures = failures + 1
+      else if (!Object.keys(next.pending).length) { next.deliveryFailures = 0; next.retryAt = 0 }
+      return next
+    })
+    if (stale.length || readFailed) await save($, generation)
+    const latest = await read($, state)
+    if (latest.generation !== generation) return false
+    const entries = deliver.filter(([key, line]) => latest.pending[key] === line)
+    if (!entries.length) return false
+    const lines = entries.map(([, line]) => line)
     const text = `CodeBook: ${lines.slice(0, 8).join(' ')}${lines.length > 8 ? ` ${lines.length - 8} other owned stories/orders changed.` : ''} ` +
       'Use the codebook:factory-manager skill: inspect this session\'s queued runs first, open proposals and the separate Backlog, then continue eligible authorized work. ' +
       'Preserve current approvals, capacity, budgets and deadlines; suggest policy still asks before new unapproved stories. Leave other sessions\' work alone. ' +
+      (before.manager ? 'Use Run here only. Check current readiness and ownership before acting. ' : '') +
       'Keep true blockers visible, inspect independent ready work, and do not repeat unchanged blocked tests or proof requests. This notice grants no approval to claim, confirm, merge or change settings.'
-    void $.prompt.submit({ text }).catch(() => {})
+    try {
+      await $.prompt.submit({ text })
+    } catch {
+      await update($, state, current => current.generation === before.generation ? { ...current, deliveryFailures: failures + 1 } : current)
+      await save($, generation)
+      return false
+    }
+    await update($, state, current => {
+      if (current.generation !== before.generation) return current
+      const pending = { ...current.pending }
+      for (const [key, line] of entries) if (pending[key] === line) delete pending[key]
+      return { ...current, pending, retryAt: readFailed ? retryAt : 0, deliveryFailures: readFailed ? failures + 1 : 0 }
+    })
+    await save($, generation)
     return true
   } finally { flushing = false }
 }

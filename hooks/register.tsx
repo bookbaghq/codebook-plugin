@@ -9,7 +9,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { CodebookActive, CodebookCheckout, CodebookClaim, CodebookLink, CodebookMode, CodebookStory, CodebookWatch } from '../types'
 import { call, words } from './connector'
-import { continuationCurrent, continuationGeneration, flushContinuation, hasContinuation, pollContinuation, restoreContinuation, watchContinuation } from './continuation'
+import { continuationCurrent, continuationGeneration, flushContinuation, hasContinuation, manageUsage, pollContinuation, restoreContinuation, watchContinuation, watchWorkflow, workflowStatus } from './continuation'
 import { carriesKey, claimOf, defaultBranchesOf, expiresOf, leaseOf, liveClaims, mayReach, ownedOf, readCommand } from './guard'
 import type { Target } from './guard'
 import { checkOne, checkShellWords, folderOf, ownPushOf, pushedFrom, reaches, shellState } from './resolve'
@@ -82,7 +82,9 @@ async function tick($: EngineInterface): Promise<void> {
     lastPoll = now
     if (a !== null) await refresh($)
     await refreshWatched($)
-    const observation = await pollContinuation($)
+    const monitored = new Set(others.map(one => one.story))
+    if (a) monitored.add(a.story)
+    const observation = await pollContinuation($, monitored)
     if (observation) await setLink($, observation)
   } finally {
     isPolling = false
@@ -102,6 +104,7 @@ const HELP = [
   overnightUsage + ' — propose a cloud work order with milestones',
   '/factory run <factory> "<story title>" [--here | --cloud] — start a story and follow it',
   "/factory status — where the followed story is, and where each repository's code is on this computer",
+  manageUsage + ' — watch for authorized local work after the current order ends',
   backlogUsage + ' — list unplaced stories and pending proposals',
   '/factory list — the factories you can see',
   '/factory follow <story> [<factory>] — follow a story on the board or in the backlog (#57 needs the factory)',
@@ -117,9 +120,10 @@ async function statusText($: EngineInterface): Promise<{ text: string; context?:
   const followed = await storyText($)
   // Whether the folder this session is in is a factory's checkout (checkout.ts).
   const here = await checkoutLine($).catch(() => null)
+  const manager = await workflowStatus($)
   // While the hooks run another version than the skills and agents were loaded from (#147).
   const versions = (await versionMismatch($).catch(() => null))?.line ?? ''
-  return { ...followed, text: [versions, followed.text, here ?? '', code].filter(Boolean).join('\n\n') }
+  return { ...followed, text: [versions, manager, followed.text, here ?? '', code].filter(Boolean).join('\n\n') }
 }
 
 /** The plugin's version as its files say now, from `.claude-plugin/plugin.json` (the engine names no version). */
@@ -592,7 +596,7 @@ export const register: Register = (on, options) => {
     await $.command.register({
       name: 'factory',
       description: 'CodeBook factories: open the Factory pane, start a story (run), or show its status',
-      argumentHint: '[overnight <factory> "<goal>" [--max-usd <amount>] [--deadline <ISO time>] | report <factory> <WO-7> | backlog <factory> | run <factory> "<story>" | status | follow <story> | here | cloud | stop | outside | inside | prove]',
+      argumentHint: '[overnight <factory> "<goal>" [--max-usd <amount>] [--deadline <ISO time>] | report <factory> <WO-7> | manage <factory> [--workflow <id>] | backlog <factory> | run <factory> "<story>" | status | follow <story> | here | cloud | stop | outside | inside | prove]',
     })
     // Which factory works on this folder's repository, asked now so the first prompt need not wait (never awaited, never fatal).
     try { await sweepCheckouts($) } catch { /* next session */ }
@@ -702,6 +706,7 @@ export const register: Register = (on, options) => {
       }
     }
 
+    if (lower === 'manage') return { text: await watchWorkflow($, rest) }
     if (lower === 'backlog') return { text: await backlogText($, rest) }
 
     if (lower === 'report') {
@@ -750,7 +755,7 @@ export const register: Register = (on, options) => {
 
     if (lower === 'stop') {
       await unfollow($)
-      return { text: 'Stopped following the story. It keeps moving on app.codebook.work.' }
+      return { text: 'Stopped following the story and watching for workflow readiness. The board keeps moving on app.codebook.work.' }
     }
 
     return { text: `I don't know "/factory ${verb}".\n\n${HELP}` }
