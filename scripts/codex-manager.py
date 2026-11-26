@@ -331,6 +331,16 @@ class Manager:
                     self.hold_for_operator(key)
         self.host.approval_threads.clear()
 
+    def close_host(self):
+        if self.host:
+            try:
+                # An interrupt or a failed final RPC can receive an approval before its reply.
+                # Attribute the denial while this host and its worker-to-thread mapping still exist.
+                self.approvals()
+            finally:
+                self.host.close()
+                self.host = None
+
     def observe_workers(self):
         for key, worker in list(self.state["workers"].items()):
             try:
@@ -550,9 +560,7 @@ def supervise(folder):
                 manager.state["phase"] = "held"
                 reason = str(error) if isinstance(error, Hold) else "Local host or CodeBook response unavailable (" + type(error).__name__ + ")."
                 manager.record(reason)
-                if manager.host:
-                    manager.host.close()
-                    manager.host = None
+                manager.close_host()
                 failures = min(failures+1, 5)
             delay = 0 if manager.immediate and not failures else min(300, INTERVAL * 2**failures)
             manager.immediate = False
@@ -571,8 +579,7 @@ def supervise(folder):
         except (OSError, Hold):
             pass
         finally:
-            if manager.host:
-                manager.host.close()
+            manager.close_host()
             manager.state["phase"] = "stopped"
             manager.record("The local manager is stopped.")
 

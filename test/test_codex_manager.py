@@ -107,7 +107,9 @@ def fake_server():
                                   "params": {"threadId": params["threadId"]}}), flush=True)
             value = {"data": [t for t in turns if t["workerThread"] == params["threadId"]]}
         elif method == "turn/interrupt":
-            pass
+            if cfg.get("shutdown_approval_thread") == params["threadId"]:
+                print(json.dumps({"id": "shutdown-approval", "method": "item/commandExecution/requestApproval",
+                                  "params": {"threadId": params["threadId"]}}), flush=True)
         elif method != "initialize":
             raise AssertionError(method)
         print(json.dumps({"id": msg["id"], "result": value}), flush=True)
@@ -213,8 +215,23 @@ def rehearsal():
             assert len(turns()) == 3 and status()["run_holds"]["newStory:22"]
             cli("retry", "--story", "newStory")
             until(lambda: len(turns()) == 4)
+            # The host can deliver a fresh approval during the final interrupt of a fenced worker.
+            cfg.update(shutdown_approval_thread=turns()[0]["workerThread"], work=[["newStory", 22, True]])
+            write(root/"factory.json", cfg)
+            cli("follow", "--story", "idle7")
+            until(lambda: status().get("workers", {}).get("newStory:22:expiry:11"))
             stop()
-            assert len(turns()) == 4 and not json.loads(cli("status").stdout)["enabled"]
+            assert status()["phase"] == "stopped" and status()["run_holds"].get("newStory:22")
+            cfg.update(cursor=12, work=[["newStory", 22, False]],
+                       events=[{"id": 12, "kind": "run.claim_expired", "card": {"key": "newStory"}, "run": 22}])
+            write(root/"factory.json", cfg)
+            cli("start", "--cwd", str(root))
+            until(lambda: status().get("cursor") == 12 and "Operator decision pending" in status().get("reason", ""))
+            assert len(turns()) == 4
+            cli("retry", "--story", "newStory")
+            until(lambda: len(turns()) == 5)
+            stop()
+            assert len(turns()) == 5 and not json.loads(cli("status").stdout)["enabled"]
         finally:
             if json.loads(cli("status").stdout)["running"]:
                 stop()
