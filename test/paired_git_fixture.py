@@ -126,10 +126,18 @@ else process.stdout.write(pub.export({format:'der',type:'spki'}).subarray(-32).t
             upstream = root/(repo.split("/")[1]+".git")
             argv = ["git", service, "--stateless-rpc"]
             records.append((repo, op))
+            tip = None
             if op.endswith("advertise"):
                 assert not data
-                return native.pkt(b"# service=git-"+service.encode()+b"\n")+b"0000"+subprocess.check_output([*argv, "--advertise-refs", str(upstream)])
-            return subprocess.check_output([*argv, str(upstream)], input=data, stderr=subprocess.DEVNULL)
+                reply = native.pkt(b"# service=git-"+service.encode()+b"\n")+b"0000"+subprocess.check_output([*argv, "--advertise-refs", str(upstream)])
+            else:
+                reply = subprocess.check_output([*argv, str(upstream)], input=data, stderr=subprocess.DEVNULL)
+                if op == "push_pack":
+                    tip = git(upstream, "rev-parse", ch["ref"]).decode().strip()
+            receipt = {k:ch[k] for k in ("repository", "ref", "run", "fence")}
+            receipt.update(outcome="done", commit=tip)
+            receipt.update(deny.get("receipt", {}))
+            return reply, base64.urlsafe_b64encode(json.dumps(receipt).encode()).decode().rstrip("=")
         real_exchange = native.exchange
         def exchange(*args):
             return real_exchange(*args, signer=device, send=send)
@@ -174,6 +182,10 @@ else process.stdout.write(pub.export({format:'der',type:'spki'}).subarray(-32).t
                                    "arguments":{}, "callId":"fixture-callback"}})
             manager.service_git()
             assert responses[0]["id"] == 10 and responses[0]["result"]["success"] is False and not records
+            deny["receipt"] = {"run":1024}
+            rejected(native.Unavailable, lambda: action("app","fetch"))
+            assert records == [("org/app", "fetch_advertise")]
+            deny.clear()
             for short in ("plugin","app"):
                 receipt = action(short,"fetch")
                 work = root/short/"run"

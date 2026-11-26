@@ -166,7 +166,7 @@ def post(url, data, headers, expected_type, timeout):
             sock.settimeout(remaining)
             chunk = reply.read1(min(65536, REPLY_LIMIT+1-len(body)))
             if not chunk:
-                return bytes(body)
+                return bytes(body), reply.headers.get("X-CodeBook-Git-Receipt")
             body.extend(chunk)
             require(len(body) <= REPLY_LIMIT, "The private Git response exceeds the native size limit.")
     except (OSError, http.client.HTTPException, ValueError):
@@ -199,8 +199,25 @@ def exchange(scope, route, binding, boundary, op, body, prepare, public, send=po
     require(remaining > 0, "The one-use Git challenge expired before transfer.")
     service = "upload-pack" if op.startswith("fetch_") else "receive-pack"
     content = "application/x-git-"+service+("-advertisement" if op.endswith("advertise") else "-result")
-    return send(ORIGIN+oid, body, {"Content-Type":"application/octet-stream", "X-CodeBook-Git-Digest":digest,
+    data, header = send(ORIGIN+oid, body, {"Content-Type":"application/octet-stream", "X-CodeBook-Git-Digest":digest,
                 "X-CodeBook-Git-Signature":signed}, content, min(120, remaining))
+    require(isinstance(header, str) and len(header) <= 2048 and re.fullmatch(r"[A-Za-z0-9_-]+", header),
+            "CodeBook did not supply the completed Git operation receipt.")
+    try:
+        receipt = json.loads(base64.b64decode(header+"="*(-len(header)%4), altchars=b"-_", validate=True))
+    except (ValueError, UnicodeError):
+        raise Unavailable("Invalid CodeBook operation receipt.") from None
+    expected = {k: boundary[k] for k in ("repository", "ref", "run", "fence")}
+    commit = None
+    if op == "push_pack":
+        # The native sender emits exactly one update command before the binary pack.
+        fields = body[4:4+82].split(b" ")
+        require(len(fields) >= 2 and SHA.fullmatch(fields[1]), "Invalid native push tip.")
+        commit = fields[1].decode()
+    require(isinstance(receipt, dict) and type(receipt.get("run")) is int and type(receipt.get("fence")) is int
+            and receipt == {**expected, "outcome": "done", "commit": commit},
+            "The completed Git receipt differs from the assigned run, branch or published commit.")
+    return data
 
 
 def pkt(data):
@@ -322,6 +339,7 @@ def perform(operation, boundary, run, transfer):
     origin = run(["remote", "get-url", "origin"]).decode().strip().lower()
     require(origin in {"https://github.com/"+boundary["repository"], "https://github.com/"+boundary["repository"]+".git"},
             "The local origin differs from the paired repository.")
+    outcome = "fetched"
     if operation == "fetch":
         default, selected, caps = refs(transfer("fetch_advertise", b""), b"upload-pack", ref)
         require(b"side-band-64k" in caps, "The upstream cannot provide bounded sideband Git data.")
@@ -351,6 +369,7 @@ def perform(operation, boundary, run, transfer):
         old = selected.get(ref, b"0"*40)
         baseline = selected.get(ref, selected[default])
         run(["merge-base", "--is-ancestor", baseline.decode(), commit.decode()])
+        outcome = "up_to_date" if old == commit else "pushed"
         if old != commit:
             pack = run(["pack-objects", "--stdout", "--revs", "--no-reuse-delta"], commit+b"\n^"+baseline+b"\n", LIMIT)
             require(pack.startswith(b"PACK"), "Local Git did not produce a pack.")
@@ -358,4 +377,4 @@ def perform(operation, boundary, run, transfer):
             result = list(packets(transfer("push_pack", body)))
             require(result == [b"unpack ok\n", b"ok "+ref.encode()+b"\n", None], "Upstream Git did not confirm the assigned branch update.")
     return {**{k: boundary[k] for k in ("repository", "ref", "run", "fence")},
-            "outcome": "pushed" if operation == "push" else "fetched", "commit": commit.decode()}
+            "outcome": outcome, "commit": commit.decode()}
