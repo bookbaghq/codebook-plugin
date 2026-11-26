@@ -82,7 +82,7 @@ def fake_server():
             elif tool == "story_status":
                 story = args["story"]
                 current = next(((r, c) for s,r,c in cfg["work"] if s == story), None)
-                data = {"factory": {"factory": "factoryA"}, "workflow": {"workflow": "wf9"},
+                data = {"story": {"story": story}, "factory": {"factory": "factoryA"}, "workflow": {"workflow": "wf9"},
                         "run_location": {"where": "here", "person": {"is_you": True}},
                         "in_backlog": (story == "newStory" and cfg["ready"]) or (story == "uncertain" and cfg.get("ambiguous")),
                         "station": {"name": "QA", "worker": {"type": "agent", "name": "Jade"}},
@@ -241,23 +241,47 @@ def rehearsal():
 
 def obsolete_operator_holds():
     api = runpy.run_path(str(SCRIPT))
+    ended = {"run": 7, "status": "completed", "state": "passed", "finished_at": "2026-11-25"}
+    history = {"run": None, "waiting": None, "stations": [{"station": "qa", **ended}]}
     records = {
+        "ambiguous": {"run": {"run": 7, "state": "with_outside_agent"}, "stations": [ended]},
         "done": {"finished": "done"},
+        "dropped": {**history, "finished": "dropped"},
         "ended": {"run": {"run": 7, "state": "blocked", "finished_at": "2026-11-25"}},
         "foreign": {"workflow": {"workflow": "another"}, "finished": "done"},
+        "history": history,
         "later": {"run": {"run": 8, "state": "queued"}},
         "live": {"run": {"run": 7, "state": "with_outside_agent"}},
+        "missing_finish": {"run": {"run": 7, "state": "superseded"}},
         "older": {"run": {"run": 6, "state": "passed", "finished_at": "2026-11-25"}},
+        "sent_back": {"run": {**ended, "status": "rejected", "state": "sent_back"}},
+        "superseded": {"run": {**ended, "status": "superseded", "state": "superseded"}},
+        "unrelated_history": {**history, "stations": [{**ended, "run": 6}]},
         "unknown": None,
+        "waiting": {**history, "waiting": {"run": 7, "on": "runner"}},
+        "wrong_story": {"story": {"story": "another"}, "finished": "done"},
     }
     calls = []
 
     class Observer:
         approval_threads = set()
 
+        def __init__(self, work=None):
+            self.turns = []
+            self.work = work or {}
+
         def tool(self, name, **args):
             if name == "factory_events":
                 return {"last_event": 99}
+            if name == "manager_brief":
+                return {"factory": {"factory": "factoryA"}, "workflow": {"workflow": "wf9", "name": "Software"},
+                        "you": {"may_run_here": True}}
+            if name == "factory_operations":
+                return {"snapshot": {"control": {"paused": False}}}
+            if name == "list_my_work":
+                return {"work": [{"story": story, "run": run, "where": "here", "claimed": False,
+                                  "factory": {"factory": "factoryA"}, "workflow": {"workflow": "wf9"}}
+                                 for story, run in self.work.items()]}
             assert name == "story_status" and args["limit"] == 1
             story = args["story"]
             calls.append(story)
@@ -265,6 +289,13 @@ def obsolete_operator_holds():
                 raise api["Hold"]("Snapshot unavailable")
             return {"factory": {"factory": "factoryA"}, "workflow": {"workflow": "wf9"},
                     "story": {"story": story}, **records[story]}
+
+        def call(self, method, params):
+            if method == "thread/start":
+                return {"thread": {"id": "ready-thread"}}
+            assert method == "turn/start"
+            self.turns.append(params["input"][0]["text"])
+            return {"turn": {"id": "ready-turn"}}
 
     cfg = {**SCOPE, "stories": [], "manage_ready": False, "running": True}
     with tempfile.TemporaryDirectory() as directory:
@@ -276,17 +307,44 @@ def obsolete_operator_holds():
         assert len(calls) == 4 and manager.state["interaction_required"]
         manager.tick()
         assert len(calls) == 4  # no repeated reads while polling
-        manager.next_hold_read = 0
-        manager.tick()
-        expected = {key + ":7" for key in ("foreign", "live", "older", "unknown")}
+        for _ in range(3):
+            manager.next_hold_read = 0
+            manager.tick()
+        assert "wrong_story" in calls  # keep rotating past the refused story in the same batch
+        expected = {key + ":7" for key in ("ambiguous", "foreign", "live", "missing_finish", "older",
+                                          "unknown", "unrelated_history", "waiting", "wrong_story")}
         assert set(manager.holds) == expected
         assert manager.state["notices"] == notices
         manager = api["Manager"](folder, cfg, Observer())
         assert set(manager.holds) == expected
         records.update({key.split(":")[0]: {"finished": "done"} for key in expected})
-        manager.tick()
+        for _ in range(3):
+            manager.next_hold_read = 0
+            manager.tick()
         persisted = json.loads((folder/"status.json").read_text())
         assert persisted["run_holds"] == {} and not persisted["interaction_required"]
+
+    with tempfile.TemporaryDirectory() as directory:
+        folder = Path(directory)
+        observer = Observer({"held": 7, "ready": 8})
+        cfg = {**cfg, "cwd": directory, "stories": list(observer.work)}
+        write(folder/"control.json", cfg)
+        write(folder/"status.json", {"cursor": 99, "notices": {"held:7": {"operator_hold": 123}},
+                                     "interaction_required": True})
+        records.update(held=None, ready={
+            "run": {"run": 8}, "waiting": {"run": 8, "on": "runner", "on_you": True, "claimed": False},
+            "station": {"name": "QA", "worker": {"type": "agent", "name": "Jade"}},
+            "run_location": {"where": "here", "person": {"is_you": True}},
+        })
+        calls.clear()
+        manager = api["Manager"](folder, cfg, observer)
+        with patch.object(time, "monotonic", return_value=100):
+            manager.tick()
+        persisted = json.loads((folder/"status.json").read_text())
+        assert persisted["run_holds"] == {"held:7": 123} and persisted["interaction_required"]
+        assert persisted["active"]["key"] == "ready:8"
+        assert calls == ["held", "ready"]
+        assert len(observer.turns) == 1 and observer.turns[0].startswith("[CodeBook local wake ready:8]")
 
 
 def refused_worker_creation():
@@ -311,7 +369,7 @@ def refused_worker_creation():
         write(folder/"control.json", config)
         with patch.dict(globals_for_tick, {
                 "read_events": lambda host, scope, cursor: (cursor + 1, []),
-                "eligible": lambda *args: ([item.copy()], "Eligible.")}):
+                "eligible": lambda *args, **kwargs: ([item.copy()], "Eligible.")}):
             for i in range(5):
                 manager = manager_class(folder, config, DeniedHost())
                 with patch.object(time, "time", return_value=10000 + i*1000):
