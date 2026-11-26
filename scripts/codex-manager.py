@@ -394,8 +394,10 @@ def eligible(host, config, adopted, only=None, statuses=None):
         return [], "The local worker capacity is full."
     candidates = []
     for row in host.tool("list_my_work", factory=scope["factory"])["work"]:
-        if (row.get("story") not in allowed and row.get("reference") not in allowed
-                or row.get("where") != "here" or row.get("claimed") is not False
+        followed = row.get("story") in allowed or row.get("reference") in allowed
+        if not followed and not config["manage_ready"]:
+            continue
+        if (row.get("where") != "here" or row.get("claimed") is not False
                 or row.get("factory", {}).get("factory") != scope["factory"]
                 or row.get("workflow", {}).get("workflow") != scope["workflow"]):
             continue
@@ -430,7 +432,10 @@ def eligible(host, config, adopted, only=None, statuses=None):
             continue
         waiting = status.get("waiting") or {}
         if run:
-            if (waiting.get("on") != "runner" or waiting.get("run") != run or waiting.get("on_you") is not True
+            current = status.get("run") or {}
+            if (status.get("finished") or status.get("in_backlog") or status.get("question")
+                    or current.get("run") != run or current.get("finished_at")
+                    or waiting.get("on") != "runner" or waiting.get("run") != run or waiting.get("on_you") is not True
                     or waiting.get("claimed") is not False):
                 continue
         elif not status.get("in_backlog") or status.get("run"):
@@ -988,7 +993,7 @@ class Manager:
             return
         uncertain = [k for k, n in notices.items() if n.get("confirmation") == "awaiting_receipt"]
         if uncertain:
-            reason += " Confirmation receipt missing for " + ", ".join(uncertain[:3]) + "; ownership will require an explicit handoff."
+            reason += " Confirmation receipt missing for " + ", ".join(uncertain[:3]) + "; a later station must independently qualify in this workflow."
         self.record(reason)
 
 
@@ -1054,7 +1059,7 @@ def main():
     parser.add_argument("--checkout", type=Path)
     parser.add_argument("--permissions", type=validated)
     parser.add_argument("--config-profile", type=validated)
-    parser.add_argument("--manage-ready", action="store_true", help="also manage new server-approved local drawer items")
+    parser.add_argument("--manage-ready", action="store_true", help="also manage server-authorized local agent runs and ready drawer items in this workflow")
     parser.add_argument("--story", action="append", type=lambda x: validated(x, STORY), default=[])
     args = parser.parse_args()
     if args.action == "route":
