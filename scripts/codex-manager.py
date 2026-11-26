@@ -275,15 +275,17 @@ cleanup() {
 }
 trap cleanup EXIT
 trap 'exit 3' HUP INT TERM
-# Exercise real origin tracking locks without changing any pre-existing ref or FETCH_HEAD.
-if ! diagnostic=$(git fetch --no-tags --no-recurse-submodules --no-write-fetch-head --refmap= origin "HEAD:$tracked" 2>&1); then
+# Perform the worker's actual fetch. The isolated clone retains the fetched state for its worker.
+if ! diagnostic=$(git fetch --no-tags --no-recurse-submodules origin 2>&1); then
     case "$diagnostic" in
-        *"cannot lock ref"*|*"unable to update"*|*"repository database"*|*"insufficient permission"*|*"unable to create temporary file"*|*"unable to write"*|*"cannot store"*) exit 3 ;;
+        *"FETCH_HEAD"*|*"cannot lock ref"*|*"unable to update"*|*"repository database"*|*"insufficient permission"*|*"unable to create temporary file"*|*"unable to write"*|*"cannot store"*) exit 3 ;;
         *uthenticat*|*"could not read Username"*|*"could not read Password"*|*"terminal prompts disabled"*|*eychain*|*securityd*|*"epository not found"*|*"ccess denied"*) exit 5 ;;
         *) exit 4 ;;
     esac
 fi
-commit=$(git rev-parse --verify "$tracked^{commit}") || exit 3
+commit=$(git rev-parse --verify 'FETCH_HEAD^{commit}') || exit 3
+# Even an up-to-date origin must permit a tracking-ref write for new work.
+git update-ref "$tracked" "$commit" "" || exit 3
 # Use Git's own branch, reflog, and worktree registration paths for the factory branch namespace.
 git -c core.hooksPath=/dev/null worktree add --quiet --no-checkout -b "$branch" "$scratch/tree" "$commit" || exit 3
 """
@@ -310,7 +312,7 @@ def preflight(host, route):
     code = result.get("exitCode")
     if code != 0:
         reasons = {2: "The isolated clone or its HTTPS origin does not match the assigned repository.",
-                   3: "The selected profile cannot write the isolated checkout, Git object store, branch, remote-tracking ref or worktree metadata.",
+                   3: "The selected profile cannot write the isolated checkout, Git object store, FETCH_HEAD, branch, remote-tracking ref or worktree metadata.",
                    4: "The selected profile cannot reach the assigned HTTPS Git remote.",
                    5: "Git authentication or private repository access failed. Use an approved repository-scoped credential or another eligible host."}
         raise Hold(reasons.get(code, "The sandboxed Development capability check did not pass."))
@@ -416,7 +418,7 @@ def prompt(scope, item):
             f"factory {scope['factory']}, workflow {scope['workflow']}. "
             + (f"Card: {item['url']}. " if item.get("url") else "") +
             (("Your current directory is the isolated clone for " + item["route"]["repository"] +
-              ". Create a per-run worktree within that clone and leave the clone's checked-out branch in place. ") if item.get("route") else "") +
+              ". The supervisor just ran git fetch --no-tags --no-recurse-submodules origin in this profile. Use the fetched refs, create a per-run worktree within this clone and leave its checked-out branch in place. ") if item.get("route") else "") +
             "The local manager already validated station, ownership and readiness. First call CodeBook claim_work "
             "for this run. If refused, leave it to its holder and finish. Follow the returned frozen brief, agent "
             "instructions and exact fence, heartbeating during work. Start with the server PR and proof records and "

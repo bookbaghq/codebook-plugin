@@ -332,7 +332,7 @@ def development_routing():
                             "config_profile": "development-fixture", "revision": 1, "stories": []}
         # Replace only the HTTPS endpoint with a disposable local Git repository.
         upstream = root/"fixture-upstream"
-        subprocess.run([git, "init", "-q", str(upstream)], check=True)
+        subprocess.run([git, "init", "-q", "-b", "main", str(upstream)], check=True)
         subprocess.run([git, "-C", str(upstream), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test",
                         "-c", "commit.gpgsign=false", "commit", "-qm", "upstream", "--allow-empty"], check=True)
         upstream_head = subprocess.check_output([git, "-C", str(upstream), "rev-parse", "HEAD"], text=True).strip()
@@ -341,7 +341,7 @@ def development_routing():
         (standin/"git").write_text("#!"+sys.executable+"\nimport os,sys\nfrom pathlib import Path\n"
                 "if sys.argv[1:2] == ['fetch']:\n"
                 " if Path.cwd().name == 'app':\n  print('could not read Username: terminal prompts disabled',file=sys.stderr); sys.exit(128)\n"
-                " sys.argv[sys.argv.index('origin')] = "+repr(str(upstream))+"\n"
+                " sys.argv[1:1] = ['-c', "+repr("url."+str(upstream)+".insteadOf=https://github.com/acme/plugin.git")+"]\n"
                 "os.execv("+repr(git)+", ['git', *sys.argv[1:]])\n")
         (standin/"git").chmod(0o700)
         env = {**os.environ, "PATH": str(standin)+os.pathsep+os.environ["PATH"]}
@@ -415,13 +415,12 @@ def development_routing():
             assert not any("proof" in method for _, method, _ in calls)
             project = Path(routes["acme/plugin"]["checkout"])
             subprocess.run([git, "-C", str(project), "cat-file", "-e", upstream_head+"^{commit}"], check=True)
-            assert not (project/".git"/"FETCH_HEAD").exists()
-            assert not subprocess.check_output([git, "-C", str(project), "for-each-ref"])
+            assert upstream_head in (project/".git"/"FETCH_HEAD").read_text()
+            assert subprocess.check_output([git, "-C", str(project), "rev-parse", "refs/remotes/origin/main"], text=True).strip() == upstream_head
 
             # Exercise the same cached clone with each denied Git metadata path and a writable control.
             repository = project/".git"
-            subprocess.run([git, "-C", str(project), "update-ref", "refs/remotes/origin/main", upstream_head], check=True)
-            for index, relative in enumerate(("objects", "refs/heads", "refs/remotes/origin")):
+            for index, relative in enumerate(("objects", "refs/heads", "refs/remotes/origin", "FETCH_HEAD")):
                 held_folder = root/("held-"+str(index))
                 held_folder.mkdir()
                 held_config = {**config, "stories": ["public", "review"]}
@@ -430,7 +429,7 @@ def development_routing():
                 claimed.clear()
                 target = repository/relative
                 mode = target.stat().st_mode
-                target.chmod(0o555)
+                target.chmod(0o555 if target.is_dir() else 0o444)
                 try:
                     manager.tick()
                     assert manager.state["active"]["key"] == "review:12" and probes[-1] == ("acme/plugin", 3), relative
@@ -448,7 +447,7 @@ def development_routing():
                 refs = subprocess.check_output([git, "-C", str(project), "for-each-ref", "--format=%(refname)"], text=True)
                 assert refs.splitlines() == ["refs/remotes/origin/main"] and not list(project.glob(".codebook-preflight-*"))
                 trees = subprocess.check_output([git, "-C", str(project), "worktree", "list", "--porcelain"], text=True)
-                assert trees.count("worktree ") == 1 and not (repository/"FETCH_HEAD").exists()
+                assert trees.count("worktree ") == 1 and upstream_head in (repository/"FETCH_HEAD").read_text()
 
 
 
