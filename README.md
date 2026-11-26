@@ -6,6 +6,8 @@ Run your [CodeBook](https://app.codebook.work) factories from Claude Code. Start
 
 <img src=".claude-plugin/icon.png" alt="CodeBook" width="160">
 
+For a dedicated Codex manager on your signed-in ChatGPT plan, see the [local Codex manager guide](docs/codex-local-manager.md).
+
 ## Install
 
 From a shell with Claude Code installed, add Bookbag’s public marketplace and install the plugin for your user profile:
