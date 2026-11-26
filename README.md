@@ -61,6 +61,7 @@ do what you can do on app.codebook.work.
 | `/factory report Payments WO-7` | Reopen the work order from any signed-in session. Read milestone evidence, recorded cost, remaining budget, deadline, held operations and production decisions. For reviewed production alerts, see whether the owner rolled back or kept the deployment and the note they recorded. The command makes one read-only request. |
 | `/factory overnight Payments "Migrate the invoice exporter"` | Draft a cloud work order with milestones and acceptance checks. Review the plan and its manager’s token ceiling. Once approved, the cloud manager supervises the work and reports back after you close the terminal. Later milestones follow your factory’s approval policy. |
 | `/factory run Payments "Let customers refund a payment"` | Starts a story in the Payments factory and follows it in the pane. Add `--here` or `--cloud` to choose for this story. |
+| `/factory manage Payments --workflow wf12` | Keep this local session watching the selected workflow after its current stories finish. Use `/factory status` to see the last poll, pending notices and retry status. |
 | `/factory status` | Where the story is, station by station, and where each repository's code is on this computer (checked as you ask). |
 | `/factory list` | The factories you can see. |
 | `/factory backlog Payments` | List up to 15 stories waiting to enter a station. Each row includes a follow command and any pending work-order item. Choose **View backlog** in the Factory pane and use **Next page** to browse there. Use the printed next-page command or add `--workflow "Release QA"` to select another workflow. Older servers can show these stories in the web Backlog drawer. |
@@ -68,6 +69,18 @@ do what you can do on app.codebook.work.
 | `/factory here` / `/factory cloud` | Where agent stations run: for the next stories, and for the followed story too (while none of its runs is being worked). The pane's two picture buttons do the same. |
 | `/factory stop` | Stops following; the story keeps moving on app.codebook.work. |
 | `/factory outside` / `/factory inside` | In a factory's checkout: work outside the factory for this session (no story first, no question before a push), or through it again. |
+
+For a local manager that outlives the terminal, start a dedicated session with `claude --bg --name "Payments manager"`
+and attach with `claude attach <id>`. Enter `/factory manage Payments --workflow wf12` there. Start new work in that
+session or explicitly hand it a story with `/factory follow <story-id> Payments`. Keep one owner for each story. Detach
+from the background session when you close the window. If its process exited, check `claude agents --json` and resume
+the offline ID with `claude --bg --resume <id>`. Resuming a running ID can create a copy.
+
+The workflow watch reads factory changes every 30 seconds while the host is running and reconciles readiness at least
+every five minutes. It reads further readiness pages when the server supplies them. Older servers expose only their
+first manager-readiness page. Unchanged and parked work requires no model turn. A rejected submission remains pending
+for a later attempt. The status line reports the host submission, which is separate from a model quota or station outcome.
+`/factory stop` clears the watch for this session.
 
 To cap an overnight work order, add `--max-usd 25` to the command. Add
 `--deadline 2030-05-15T08:00:00-04:00` to set an absolute stop time. Replace

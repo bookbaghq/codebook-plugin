@@ -144,9 +144,24 @@ export type CodebookLink =
 export type CodebookBacklogPage = { factory: string; lines: string[]; next?: { factory: string; workflow: string; offset: number } }
 
 /** Compact continuation observations belong to this session, independently of the pane selection. */
+export type CodebookWorkflowWatch = {
+  factory: string
+  workflow: string
+  name: string
+  cursor: number
+  readError?: string
+  scannedAt: number
+  offset: number
+  ready: string[]
+  seen: string[]
+}
+
 export type CodebookContinuation = {
+  manager?: CodebookWorkflowWatch
+  retryAt?: number
+  deliveryFailures?: number
   generation: number
-  stories: Record<string, { factory: string; reference: string; order: string | null; state: string | null; event: number }>
+  stories: Record<string, { factory: string; reference: string; order: string | null; state: string | null; event: number; waitingRun?: number }>
   orders: Record<string, { factory: string; reference: string; passes: string[] | null }>
   feeds: Record<string, number>
   pending: Record<string, string>
