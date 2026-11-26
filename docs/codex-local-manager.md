@@ -33,3 +33,22 @@ python3 scripts/codex-manager.py status --factory FACTORY_ID --workflow wf22
 ```
 
 After stop records the fence, the supervisor closes its own host. Run start again with the same checkout after a restart or reboot. It restores the cursor, thread, owned stories and previous readiness opt-in. The state file `status.json`, controls and `manager.log` live under `$XDG_STATE_HOME/codebook/codex-manager/FACTORY_ID/wf22/`, defaulting to `~/.local/state/codebook/codex-manager/FACTORY_ID/wf22/`. The local account owns these private files. A disconnected network or unavailable sign-in backs off to a five-minute interval.
+
+For paired private Git on macOS, version 0.32.0 includes the Development routing change and a native Swift device signer. Refresh the installed marketplace and plugin before switching the supervisor to this version.
+
+```sh
+claude plugin marketplace update codebook
+claude plugin update codebook@codebook --scope user
+claude plugin details codebook@codebook
+```
+
+Run the updated script from the installed plugin, with its package and state outside the worker workspace and writable clones. Keep the existing factory, workflow and manager checkout when stopping and starting an upgraded supervisor. After configuring the repository with `route`, run the following commands from the updated package.
+
+```sh
+python3 scripts/codex-manager.py git-enroll --factory FACTORY_ID --workflow wf22 --repo OWNER/NAME
+python3 scripts/codex-manager.py git-status --factory FACTORY_ID --workflow wf22 --repo OWNER/NAME
+```
+
+Enrollment creates one Ed25519 device identity for the factory, workflow, repository and canonical clone in the operator’s local login Keychain. Repeating the command displays the same public information. In **Your computer**, select that repository, enter the printed clone path and public key, compare its SHA-256 fingerprint, and save. The signed-in status command reports whether the local identity matches the saved pairing. Each repository needs its own enrollment. Removing the pairing in **Your computer** withdraws access for that clone. A changed clone requires an explicit enrollment and pairing.
+
+The protected signer requires macOS, an available Swift toolchain and an unlocked login Keychain. Its operations are noninteractive. The supervisor holds paired work when the store, restricted worker profile, paired service or enrollment is unavailable. Resolve the reported cause before using `retry` for the held story. The worker claims its own Development station through `factory_git_claim`, creates and declares its per-run worktree and branch, then uses `factory_git_fetch` and `factory_git_push`. These tools return a frozen claim brief or a Git receipt. The native operator handles Git packs, TLS and device signatures outside the model. The server approves each short-lived operation against the current fence and branch. A lost push confirmation requires checking the branch before explicitly retrying. The `last_git_receipt` in manager status records the most recent verified operation.
