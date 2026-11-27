@@ -5,7 +5,7 @@ import type { CodebookContinuation, CodebookWorkflowWatch } from '../types'
 import type { Status } from './factory'
 import { call } from './connector'
 import { blankJournal, confirmedRetry, decisions, proofOutcome, recoverRetries } from './milestone'
-import type { Needs, OrderView, ProofResult, Recovery } from './milestone'
+import type { Needs, OrderView, ProofResult, Recovery, RecoveryRecord } from './milestone'
 
 export const CONTINUATION_STORE = 'continuation-1:'
 const empty = (generation = 0): CodebookContinuation => ({ generation, stories: {}, orders: {}, feeds: {}, pending: {}, nextFactory: 0, nextOrder: 0, checkedAt: 0 })
@@ -253,23 +253,35 @@ async function readyRepairs($: EngineInterface, view: Order, factory: string, ch
 
 type RunRecovery = (target: Extract<Recovery, {kind: 'proof'}>, authorized: () => Promise<boolean>) => Promise<{isRun: boolean; text: string}>
 
+// A checkpoint without a preparation fence may already have sent a claim in an older session.
+function canPrepareProof(record: RecoveryRecord | undefined, now: number): boolean {
+  return !record || (record.state === 'pending' && record.native?.phase === 'preparing' && record.native.nextReadAt <= now)
+}
+
 async function reconcileRecovery($: EngineInterface, generation: number, factory: string, id: string, view: Order) {
   const prior = (await read($, state)).orders[id]?.milestones?.recovery ?? {}
   for (const [key, record] of Object.entries(prior)) {
     if (record.state !== 'pending') continue
     const target = record.target
     let outcome: 'completed' | 'failed' | undefined
+    let claimed = false
     if (target.kind === 'proof') {
       const got = await call<ProofResult>($, 'proof_result', {factory, story:target.member_story, proof:target.proof})
-      if (got.ok) outcome = proofOutcome(target, got.data)
+      if (got.ok && got.data?.proof === target.proof) {
+        outcome = proofOutcome(target, got.data)
+        claimed = got.data.commands?.some(command => command.run === target.proof && command.name === 'test'
+          && ['claimed', 'running', 'passed', 'failed'].includes(command.status ?? '')) === true
+      }
     } else {
       const fix = view.milestones?.flatMap(m => m.fixes ?? []).find(f => f.check_id === record.check && f.item_id === target.item && f.card?.public_id === target.story)
       if (fix?.state === 'finished') outcome = 'completed'
     }
-    if (outcome) await update($, state, current => {
+    if (outcome || (claimed && record.native?.phase === 'preparing')) await update($, state, current => {
       if (current.generation !== generation || !current.orders[id]?.milestones?.recovery?.[key]) return current
       const next = structuredClone(current)
-      next.orders[id]!.milestones!.recovery![key]!.state = outcome!
+      const saved = next.orders[id]!.milestones!.recovery![key]!
+      if (outcome) saved.state = outcome
+      if (claimed && saved.native) saved.native.phase = 'submitted'
       return next
     })
   }
@@ -303,7 +315,8 @@ async function routeMilestones($: EngineInterface, generation: number, factory: 
     const before = await read($, state), journal = before.orders[id]?.milestones
     if (before.generation !== generation || !journal || journal.seen.includes(key) || journal.retries[key] || route.action === 'hold') continue
     const target = route.recovery
-    if (target?.kind === 'proof' && journal.recovery?.[key]) continue
+    const time = await $.clock.now()
+    if (target?.kind === 'proof' && !canPrepareProof(journal.recovery?.[key], time)) continue
     let repairs: LocalRun[] = []
     if (route.action === 'repair' && target?.kind !== 'proof') {
       repairs = (await readyRepairs($, view, factory, route.check, before.manager?.workflow, target))
@@ -322,7 +335,7 @@ async function routeMilestones($: EngineInterface, generation: number, factory: 
       if (!repairs.length) continue
     }
     const question = milestoneQuestion(factory, owned.reference, id, route.check, route.reason)
-    let reserved = false
+    let reserved = false, preparation = 0
     await update($, state, current => {
       const ledger = current.orders[id]?.milestones
       if (current.generation !== generation || !ledger || ledger.seen.includes(key) || ledger.retries[key]) return current
@@ -331,8 +344,13 @@ async function routeMilestones($: EngineInterface, generation: number, factory: 
       else if (route.action === 'repair') {
         if (target) {
           entry.recovery ??= {}
-          if (target.kind === 'proof' && entry.recovery[key]) return current
+          const previous = entry.recovery[key]
+          if (target.kind === 'proof' && !canPrepareProof(previous, time)) return current
+          preparation = (previous?.native?.attempt ?? 0) + 1
           entry.recovery[key] = {target, check:route.check, state:'pending', run:repairs[0]?.run,
+            ...(target.kind === 'proof' && target.executor === 'here' && {native:{
+              phase:'preparing', attempt:preparation, nextReadAt:time + Math.min(300_000, 60_000 * 2 ** Math.min(preparation - 1, 3)),
+            }}),
             note: target.kind === 'proof' ? owned.reference + ' is waiting for proof ' + target.proof + ' on its ' + target.executor + ' executor.'
               : owned.reference + ' is following repair ' + target.story + '.'}
         }
@@ -357,12 +375,26 @@ async function routeMilestones($: EngineInterface, generation: number, factory: 
           if (!viewNow.ok || viewNow.data.work_order?.reference !== owned.reference) return false
           const needsNow = await call<Needs>($, 'needs_you', {factory})
           const now = needsNow.ok && decisions(viewNow.data, needsNow.data, factory, id).get(key)
-          return !!now && now.policy === policy && now.route.reason === route.reason && await continuationCurrent($, generation)
+          if (!now || now.policy !== policy || now.route.reason !== route.reason) return false
+          // This callback runs immediately before the native claim. Persist its single-use fence before allowing the RPC.
+          let submit = false
+          await update($, state, current => {
+            const record = current.orders[id]?.milestones?.recovery?.[key]
+            if (current.generation !== generation || record?.state !== 'pending' || record.native?.phase !== 'preparing'
+              || record.native.attempt !== preparation) return current
+            const next = structuredClone(current)
+            next.orders[id]!.milestones!.recovery![key]!.native!.phase = 'submitted'
+            submit = true
+            return next
+          })
+          if (submit) await save($, generation)
+          return submit && await continuationCurrent($, generation)
         }
         void runProof(target, authorized).catch(() => ({isRun:false, text:'The native proof result is pending.'})).then(async result => {
           if (result.isRun) return
           await update($, state, current => {
-            if (current.generation !== generation || current.orders[id]?.milestones?.recovery?.[key]?.state !== 'pending') return current
+            const record = current.orders[id]?.milestones?.recovery?.[key]
+            if (current.generation !== generation || record?.state !== 'pending' || record.native?.attempt !== preparation) return current
             const next = structuredClone(current)
             next.orders[id]!.milestones!.recovery![key]!.note = result.text
             return next

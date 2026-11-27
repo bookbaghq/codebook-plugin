@@ -292,6 +292,7 @@ function milestoneTransport(on: Parameters<Parameters<typeof test>[1]>[1], ids: 
   const checks: string[] = []
   const claims: number[] = [], reports: {run:number; commit:string; exit_code:number}[] = []
   const fixture = {clock, views, prompts, writes, checks, claims, reports, lost: false,
+    queue: 'ready' as 'ready' | 'empty' | 'unavailable', peeks:0, loseProofReply:false,
     receipt: {proof:0, finished:false} as ProofResult, attentionRoute: (route: Route) => route, afterAttention: () => {},
     legacy: [] as {kind: string; factory: string; order: string; check_id: number; why: string; on_you: boolean}[],
     ledger: (order: string) => (store.get(key) as {value: CodebookContinuation}).value.orders[order]?.milestones}
@@ -333,10 +334,15 @@ function milestoneTransport(on: Parameters<Parameters<typeof test>[1]>[1], ids: 
       data = {for_person: [...rows('person'), ...fixture.legacy], for_manager: rows('manager')}
       fixture.afterAttention()
     } else if (e.tool === 'claim_proof') {
-      if (e.args.peek) data = {waiting:[{proof:701,repository:'acme/shop',commit:'a'.repeat(40),commands:['test']}]}
-      else {
+      if (e.args.peek) {
+        fixture.peeks++
+        if (fixture.queue === 'unavailable') return {deny:'Temporary native queue transport failure.'} as never
+        data = {waiting:fixture.queue === 'empty' ? [] : [{proof:701,repository:'acme/shop',commit:'a'.repeat(40),commands:['test']}]}
+      } else {
         expect(e.args.proof).toBe(701)
         claims.push(701)
+        expect(Object.values(fixture.ledger('wo46')!.recovery!)[0]!.native?.phase).toBe('submitted')
+        if (fixture.loseProofReply) return {deny:'Native claim accepted; response lost.'} as never
         data = {proof:701, repository:{full_name:'acme/shop'}, expected_commit:'a'.repeat(40),
           token:'synthetic',report_url:'https://app.codebook.work/kanban/api/proof/report',
           recipe:{revision:1, install:'',network:'loopback'}, steps:[{run:701,name:'test',line:'node test.js',timeout_seconds:30,baseline:false}]}
@@ -554,4 +560,60 @@ test('legacy and unknown milestone routes stay safe in both clients', async ($, 
   expect(f.prompts).toEqual([])
   expect(f.writes).toEqual([])
   expect(f.ledger('wo46')?.recovery ?? {}).toEqual({})
+})
+
+test('a missed native proof queue recovers after restart with one exact claim', async ($, on) => {
+  const f = milestoneTransport(on, ['R1'], true)
+  const start = () => $.session.start({cwd:'/',surface:'desktop',isInteractive:true})
+  f.queue = 'empty'
+  await start()
+  await f.clock.advance(35000)
+  expect(f.peeks).toBe(1)
+  expect(f.claims).toEqual([])
+  expect(Object.values(f.ledger('wo46')!.recovery!)[0]!.native?.phase).toBe('preparing')
+  f.queue = 'ready'
+  await start()
+  for (let i=0; i<5; i++) await f.clock.advance(35000)
+  expect(f.peeks).toBe(2)
+  expect(f.claims).toEqual([701])
+  expect(f.reports).toMatchObject([{run:701,commit:'a'.repeat(40),exit_code:0}])
+  expect(f.writes).toEqual([])
+  expect(f.prompts).toEqual([])
+})
+
+test('temporary read failures back off and existing native claims stay with their owner', async ($, on) => {
+  const f = milestoneTransport(on, ['R1'], true)
+  const start = () => $.session.start({cwd:'/',surface:'desktop',isInteractive:true})
+  f.queue = 'unavailable'
+  await start()
+  await f.clock.advance(35000)
+  expect(f.peeks).toBe(1)
+  await f.clock.advance(5000)
+  expect(f.peeks).toBe(1)
+  await start()
+  await f.clock.advance(65000)
+  expect(f.peeks).toBe(2)
+  f.queue = 'ready'
+  f.receipt = {proof:701,finished:false,commands:[{run:701,name:'test',status:'claimed'}]}
+  for (let i=0; i<6; i++) await f.clock.advance(35000)
+  expect(f.peeks).toBe(2)
+  expect(f.claims).toEqual([])
+  expect(f.prompts).toEqual([])
+})
+
+test('a lost native claim reply stays single flight across restart', async ($, on) => {
+  const f = milestoneTransport(on, ['R1'], true)
+  const start = () => $.session.start({cwd:'/',surface:'desktop',isInteractive:true})
+  f.loseProofReply = true
+  await start()
+  await f.clock.advance(35000)
+  expect(f.claims).toEqual([701])
+  await start()
+  for (let i=0; i<6; i++) await f.clock.advance(35000)
+  expect(f.peeks).toBe(1)
+  expect(f.claims).toEqual([701])
+  expect(f.reports).toEqual([])
+  f.receipt = {proof:701,finished:true,commands:[{run:701,name:'test',status:'passed',verified:true,commit:'a'.repeat(40)}]}
+  await f.clock.advance(35000)
+  expect(Object.values(f.ledger('wo46')!.recovery!)[0]!.state).toBe('completed')
 })

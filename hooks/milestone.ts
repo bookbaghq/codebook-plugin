@@ -13,7 +13,8 @@ type Attention = { kind?: string; route?: Route; factory?: string | {factory?: s
 export type Needs = { for_manager?: Attention[]; for_person?: Attention[] }
 export type RetryRecord = { requested: number; state: 'pending' | 'confirmed'; check?: number; actor?: string;
   at?: string | number; reason?: string; decidedBy?: number | null }
-export type RecoveryRecord = { check: number; target: Recovery; state: 'pending' | 'completed' | 'failed'; current?: boolean; note: string; run?: number }
+export type RecoveryRecord = { check: number; target: Recovery; state: 'pending' | 'completed' | 'failed'; current?: boolean; note: string; run?: number
+  native?: { phase: 'preparing' | 'submitted'; attempt: number; nextReadAt: number } }
 export type MilestoneJournal = { recovery?: Record<string, RecoveryRecord>; prerequisites?: Record<string, string>; seen: string[]; questions: Record<string, string>; retries: Record<string, RetryRecord> }
 
 const owners: Record<string, string> = { wait: 'none', repair: 'manager', hold: 'none', settled: 'none', review: 'person', retry: 'manager' }
