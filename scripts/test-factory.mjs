@@ -32,11 +32,25 @@ try {
   // so transcribe only results the real runner printed; never infer a test pass from exit 0.
   process.stdout.write(result.stdout ?? '')
   process.stderr.write(result.stderr ?? '')
+  const browser = files.some(file => basename(file) === 'proof.test.tsx')
+    ? spawnSync(process.execPath, [join(root, 'scripts/test-story-browser.mjs')], { encoding: 'utf8', timeout: 80000 })
+    : null
+  if (browser) {
+    process.stderr.write(browser.stderr ?? '')
+    process.stdout.write(browser.stdout ?? '')
+  }
   const report = nativeResultsToTap(`${result.stdout ?? ''}\n${result.stderr ?? ''}`)
   if (report.error) console.error(report.error)
-  else process.stdout.write(report.tap)
+  else if (browser && browser.status === 0) {
+    const passed = /^\(pass\) ([^\r\n]+)$/m.exec(browser.stdout ?? '')
+    if (!passed) throw Error('The browser witness returned no executed assertion name.')
+    process.stdout.write(report.tap.replace(/1\.\.(\d+)\n$/, (_, size) => {
+      const number = Number(size) + 1
+      return `ok ${number} - ${passed[1]}\n1..${number}\n`
+    }))
+  } else process.stdout.write(report.tap)
   if (result.error) console.error(result.error.message)
-  process.exitCode = result.status !== 0 ? result.status ?? 1 : (result.error || report.error || report.failed ? 1 : 0)
+  process.exitCode = result.status !== 0 ? result.status ?? 1 : (result.error || report.error || report.failed || (browser && browser.status !== 0) ? 1 : 0)
 } finally {
   rmSync(stage, { recursive: true, force: true })
 }
