@@ -75,6 +75,10 @@ def fake_server():
                 (root/"confirmations.log").open("a").write(story + "\n")
                 write(root/"factory.json", cfg)
                 data = {"decided_by": "manager", "proposal": {"proposal": "wo2"}, "created": created}
+            elif tool == "work_orders":
+                data = {"order": args["order"], "work_order": {"status": "open"}, "milestones": []}
+            elif tool == "needs_you":
+                data = {"for_person": [], "for_manager": []}
             elif tool == "factory_operations":
                 data = {"snapshot": {"control": {"paused": cfg["paused"]}, "tiles": cfg.get("tiles", {}), "holds": []}}
             elif tool == "list_my_work":
@@ -612,4 +616,7 @@ if __name__ == "__main__":
         obsolete_operator_holds()
         print("ok 4 - local manager reconciles obsolete operator holds while preserving live decisions")
         print("ok 5 - manage-ready continues eligible local station work after completion and restart")
-        print("1..5")
+        from milestone_manager import exercise as milestone_wakes
+        milestone_wakes()
+        print("ok 6 - Codex wakes follow the exact milestone route")
+        print("1..6")

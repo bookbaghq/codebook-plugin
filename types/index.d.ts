@@ -162,7 +162,7 @@ export type CodebookContinuation = {
   deliveryFailures?: number
   generation: number
   stories: Record<string, { factory: string; reference: string; order: string | null; state: string | null; event: number; waitingRun?: number }>
-  orders: Record<string, { factory: string; reference: string; passes: string[] | null }>
+  orders: Record<string, { factory: string; reference: string; passes: string[] | null; milestones?: import('../hooks/milestone').MilestoneJournal }>
   feeds: Record<string, number>
   pending: Record<string, string>
   nextFactory: number

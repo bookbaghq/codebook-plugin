@@ -1,9 +1,11 @@
-// Read-only lifecycle observation. A wake asks the owning manager to check readiness; it grants no authority.
+// Observe owned work. A manager retry requires independent, current CodeBook authority for that attempt.
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface } from 'claude-code'
 import type { CodebookContinuation, CodebookWorkflowWatch } from '../types'
 import type { Status } from './factory'
 import { call } from './connector'
+import { blankJournal, confirmedRetry, decisions, recoverRetries } from './milestone'
+import type { Needs, OrderView } from './milestone'
 
 export const CONTINUATION_STORE = 'continuation-1:'
 const empty = (generation = 0): CodebookContinuation => ({ generation, stories: {}, orders: {}, feeds: {}, pending: {}, nextFactory: 0, nextOrder: 0, checkedAt: 0 })
@@ -129,7 +131,9 @@ export async function workflowStatus($: EngineInterface): Promise<string> {
   const checked = current.checkedAt ? new Date(current.checkedAt).toISOString() : 'awaiting first poll'
   const readError = watch?.readError ? ` Last readiness read failed (${watch.readError}).` : ''
   const delivery = current.deliveryFailures ? ` Last prompt submission failed. Retry after ${new Date(current.retryAt ?? 0).toISOString()}.` : ''
-  return watch ? `Watching workflow ${watch.name} (${watch.factory}, ${watch.workflow}) for local manager work. Last poll: ${checked}. Pending notices: ${Object.keys(current.pending).length}.${readError}${delivery}` : ''
+  const questions = Object.values(current.orders).flatMap(order => Object.values(order.milestones?.questions ?? {})).join('\n')
+  const watching = watch ? `Watching workflow ${watch.name} (${watch.factory}, ${watch.workflow}) for local manager work. Last poll: ${checked}. Pending notices: ${Object.keys(current.pending).length}.${readError}${delivery}` : ''
+  return [watching, questions].filter(Boolean).join('\n')
 }
 
 export async function stopContinuation($: EngineInterface): Promise<void> {
@@ -209,7 +213,101 @@ export async function observeContinuation($: EngineInterface, story: string, sta
 
 type Feed = { events?: { id: number; kind: string; outcome?: string; run?: number; card?: { key?: string }; work_order?: { reference?: string } }[]; last_event?: number | null }
 type ReadFailure = { ok: false; code: string; message: string; isSignIn: boolean }
-type Order = { order?: string; work_order?: { reference?: string; status?: string }; milestones?: { milestone: number; state?: string; check?: { latest?: { id?: number; status?: string } | null } | null }[] }
+type Order = OrderView
+
+function milestoneQuestion(factory: string, reference: string, id: string, check: number, reason: string) {
+  return `${factory} / ${reference} (${id}), check #${check}: ${reason} What would you like to do with this check?`
+}
+
+type LocalRun = {story: string; run: number; claimed: boolean; where: string; factory?: {factory?: string}; workflow?: {workflow?: string}}
+
+async function readyRepairs($: EngineInterface, view: Order, factory: string, check: number, workflow?: string) {
+  const fixes = view.milestones?.find(m => m.check?.latest?.id === check)?.fixes ?? []
+  const stories = new Set(fixes.filter(f => f.check_id === check).map(f => f.card?.public_id).filter(Boolean))
+  if (!stories.size) return []
+  const work = await call<{work?: LocalRun[]}>($, 'list_my_work', {factory})
+  if (!work.ok || !Array.isArray(work.data?.work)) return []
+  return work.data.work.filter(r => r.where === 'here' && r.claimed === false && r.factory?.factory === factory
+    && (!workflow || r.workflow?.workflow === workflow) && stories.has(r.story) && Number.isSafeInteger(r.run) && r.run > 0)
+}
+
+// Persist intent before either transport accepts a question or operation. An ambiguous reply stays pending.
+async function routeMilestones($: EngineInterface, generation: number, factory: string, id: string, view: Order) {
+  if (view.order !== id || !Array.isArray(view.milestones)) return
+  const owned = (await read($, state)).orders[id]
+  if (!owned || owned.factory !== factory || owned.reference !== view.work_order?.reference) return
+  if (!owned.milestones && !view.milestones.some(m => m.check?.route || m.check?.needs_person)) return
+  const result = await call<Needs>($, 'needs_you', {factory})
+  if (!result.ok || !Array.isArray(result.data?.for_person) || !Array.isArray(result.data.for_manager)) return
+  const actions = decisions(view, result.data, factory, id)
+  await update($, state, current => {
+    if (current.generation !== generation || !current.orders[id]) return current
+    const next = structuredClone(current), journal = next.orders[id]!.milestones ??= blankJournal()
+    recoverRetries(view, journal)
+    for (const key of Object.keys(journal.questions)) if (!actions.has(key)) delete journal.questions[key]
+    for (const [key, {route}] of actions) {
+      if (route.action === 'review' && journal.seen.includes(key))
+        journal.questions[key] = milestoneQuestion(factory, owned.reference, id, route.check, route.reason)
+    }
+    return next
+  })
+  for (const [key, {route, policy}] of actions) {
+    const before = await read($, state), journal = before.orders[id]?.milestones
+    if (before.generation !== generation || !journal || journal.seen.includes(key) || journal.retries[key]) continue
+    let repairs: LocalRun[] = []
+    if (route.action === 'repair') {
+      repairs = (await readyRepairs($, view, factory, route.check, before.manager?.workflow))
+        .filter(r => !journal.seen.includes(key + ':' + r.run))
+      if (!repairs.length) continue
+    }
+    // The initial snapshot may have raced a preference change. Re-read both surfaces immediately before dispatch.
+    const order = await call<Order>($, 'work_orders', {factory, order: id})
+    if (!order.ok || order.data?.work_order?.reference !== owned.reference) continue
+    const attention = await call<Needs>($, 'needs_you', {factory})
+    const fresh = attention.ok && decisions(order.data, attention.data, factory, id).get(key)
+    if (!fresh || fresh.route.reason !== route.reason || fresh.policy !== policy) continue
+    if (route.action === 'repair') {
+      const available = await readyRepairs($, order.data, factory, route.check, before.manager?.workflow)
+      repairs = repairs.filter(r => available.some(a => a.run === r.run && a.story === r.story))
+      if (!repairs.length) continue
+    }
+    const question = milestoneQuestion(factory, owned.reference, id, route.check, route.reason)
+    let reserved = false
+    await update($, state, current => {
+      const ledger = current.orders[id]?.milestones
+      if (current.generation !== generation || !ledger || ledger.seen.includes(key) || ledger.retries[key]) return current
+      const next = structuredClone(current), entry = next.orders[id]!.milestones!
+      if (route.action === 'review') { entry.seen.push(key); entry.questions[key] = question }
+      else if (route.action === 'repair') entry.seen.push(...repairs.map(r => key + ':' + r.run))
+      else entry.retries[key] = {requested: route.check, state: 'pending', reason: route.reason}
+      reserved = true
+      return next
+    })
+    if (!reserved) continue
+    await save($, generation)
+    if (!await continuationCurrent($, generation)) return
+    if (route.action === 'review') {
+      try { await $.prompt.submit({text: 'CodeBook: Ask the operator once, in their own session: ' + question +
+        ' Continue independent work. An answer applies only to this exact attempt; recheck its current route before recording any decision.'}) } catch { /* The exact question remains visible in /factory status. */ }
+    } else if (route.action === 'repair') {
+      const runs = repairs.map(r => r.story + ' (run ' + r.run + ')').join(', ')
+      try { await $.prompt.submit({text: `CodeBook: ${owned.reference}, check #${route.check} has existing repair work: ${runs}. Recheck the local assignment, claim only an eligible run, and continue independent work. This repair needs no milestone decision.`}) } catch { /* Normal readiness remains available. */ }
+    } else {
+      const response = await call<Parameters<typeof confirmedRetry>[0]>($, 'decide_milestone_check', {
+        factory, order: id, check: route.check, authority: 'manager', decision: 'retry', ...(policy && {expected_policy: policy}),
+      })
+      if (response.ok && confirmedRetry(response.data, route)) await update($, state, current => {
+        if (current.generation !== generation || !current.orders[id]?.milestones?.retries[key]) return current
+        const next = structuredClone(current)
+        Object.assign(next.orders[id]!.milestones!.retries[key]!, {state: 'confirmed', actor: 'manager', check: response.data.check!.id})
+        return next
+      })
+      // A refused, stale or lost response never triggers another write for this attempt.
+    }
+  }
+  await save($, generation)
+}
+
 
 // Read the most recent event, not the event history. A changed cursor asks for current readiness.
 // Reconcile periodically as well: operator actions on older servers need not emit an event.
@@ -272,13 +370,13 @@ async function pollBackgroundStory($: EngineInterface, before: CodebookContinuat
 /** One page and one owned-order snapshot per quiet interval, round robin. No catch-up loop or model on empty reads. */
 export async function pollContinuation($: EngineInterface, monitored: Set<string>): Promise<ReadFailure | void> {
   if (polling) return
-  const before = await read($, state), now = await $.clock.now()
-  if (before.checkedAt && now - before.checkedAt < QUIET_MS) return
-  const factories = [...new Set([...Object.values(before.stories), ...Object.values(before.orders)].map(one => one.factory).filter(Boolean))]
-  if (!factories.length && !before.manager) return
   polling = true
-  const generation = before.generation
   try {
+    const before = await read($, state), now = await $.clock.now()
+    if (before.checkedAt && now - before.checkedAt < QUIET_MS) return
+    const factories = [...new Set([...Object.values(before.stories), ...Object.values(before.orders)].map(one => one.factory).filter(Boolean))]
+    if (!factories.length && !before.manager) return
+    const generation = before.generation
     const factory = factories.length ? factories[before.nextFactory % factories.length] : undefined
     await update($, state, current => current.generation === generation ? { ...current, checkedAt: now, nextFactory: current.nextFactory + 1 } : current)
     const workflowFailure = await pollWorkflow($, before, now) || undefined
@@ -318,7 +416,8 @@ export async function pollContinuation($: EngineInterface, monitored: Set<string
       const got = await call<Order>($, 'work_orders', { factory: owned.factory, order: id })
       if (!got.ok) failure = got
       if (!await continuationCurrent($, generation)) return
-      if (got.ok && got.data.work_order?.reference === owned.reference && Array.isArray(got.data.milestones)) await update($, state, value => {
+      if (got.ok && got.data?.work_order?.reference === owned.reference) await routeMilestones($, generation, owned.factory, id, got.data)
+      if (got.ok && got.data?.work_order?.reference === owned.reference && Array.isArray(got.data.milestones)) await update($, state, value => {
         if (value.generation !== generation || !value.orders[id]) return value
         const next = structuredClone(value), order = next.orders[id]!
         const passes = got.data.milestones!.filter(m => ['passed', 'waived', 'ruled'].includes(m.state ?? ''))

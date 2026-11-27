@@ -104,6 +104,8 @@ Run app checks only on owned disposable local fixtures, never production or the 
 
 After a station finishes, inspect its actual outcome and gaps. For a code failure, route the precise fix; for missing capability, wait for a material capability change rather than replay the same tests. After two retries for the same cause, stop retrying and say in one line what blocks it. Preserve branches and evidence. Questions, human review, waits and failed merges follow [review and recovery](references/review-and-recovery.md).
 
+For an owned milestone wake, restore or ambiguous reply, read the current exact `work_orders` and `needs_you` together. Follow `milestones[].check.route` for that factory, canonical order and latest check. Follow existing repairs, wait on running or held proof, and continue other eligible work. Only a matching current person/review request addressed to the operator warrants a question. Use the [milestone decision procedure](references/factory-tools.md) for deduplication, retries and deliberate manual waivers.
+
 After each finished story, inspect queued runs, open proposals and the separate proposed stories drawer under the current autonomy policy. A configured station named Backlog holds active board cards. Read every page of the drawer before declaring the factory idle. Read [next story](references/next-story.md) for exact readiness and older-server behavior. Do not start another session's work or duplicate a run the scheduler already queued. Keep other ready work moving while a reserved decision waits.
 
 ## 5. Narrate meaningful changes
