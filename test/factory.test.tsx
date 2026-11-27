@@ -19,7 +19,7 @@ const BOARD = {
   ],
 }
 
-type At = 'build' | 'claimed' | 'review' | 'done' | 'asks' | 'escalated' | 'blocked'
+type At = 'build' | 'claimed' | 'review' | 'done' | 'asks' | 'escalated' | 'blocked' | 'numericMine' | 'numericManager' | 'numericReadOnly'
 const ASKED = 'Refund to the card, or as store credit?'
 /** A CodeBook from before §12.10: person stations carry no on_approve. */
 const older = { codebook: false }
@@ -38,6 +38,10 @@ function status(at: At): Record<string, unknown> {
   if (at === 'escalated') return {
     ...status('build'),
     question: { text: 'Which payment providers are in scope?', choices: ['Stripe only', 'Stripe and PayPal'], on_you: true },
+  }
+  if (at === 'numericMine' || at === 'numericManager' || at === 'numericReadOnly') return {
+    ...status('build'),
+    question: {question: 41, asked: 'Authorize this cost?', tools: at === 'numericReadOnly' ? [] : ['answer_question']},
   }
   if (at === 'done') return {
     ...status('review'),
@@ -196,6 +200,11 @@ function engine(on: On, at: { now: At; asks58?: boolean; done58?: boolean; sessi
     return { result: { content: [{ type: 'text', text: JSON.stringify(data) }], structuredContent: data }, text: JSON.stringify(data) }
   })
   function answer(tool: string, args: Record<string, unknown>) {
+    if (tool === 'needs_you' && args.view === 'person') {
+      const base = {kind: 'question', for: 'person', on_you: true, story: {story: '6KjN'}}
+      return {items: at.now === 'asks' ? [{...base, question_id: 811, run: 811, question: ASKED}]
+        : at.now === 'numericMine' ? [{...base, question_id: 41, run: null, question: 'Authorize this cost?'}] : []}
+    }
     if (tool === 'factory_events') {
       if (at.lifecycle?.feedError) return { error: { code: 'UNREACHABLE', message: 'Temporarily offline' } }
       const events = (at.lifecycle?.events ?? []).filter(e => Number(e.id) > Number(args.after ?? 0))
@@ -1039,4 +1048,21 @@ test('only a confirmed personal wait may ask from the Factory pane', async () =>
   expect(waitOf({ ...base, waiting: { ...waiting, question: { text: 'Another person', on_you: false } } })).toBeNull()
   expect(waitOf({ ...base, waiting: { ...waiting, question: 'Actual personal wait' } })?.question).toBe('Actual personal wait')
   expect(waitOf({ ...base, question: { text: 'Assigned to me', on_you: true } })?.question).toBe('Assigned to me')
+})
+
+test('a live numeric question id wakes only the viewer assigned its personal decision', async ($, on) => {
+  const at: {now: At} = {now: 'numericReadOnly'}
+  const {prompts, calls, clock} = engine(on, at)
+  await $.session.start({cwd: '/', surface: 'desktop', isInteractive: true})
+  await claudeStarts($)
+  await clock.advance(5000)
+  expect(prompts).toEqual([])
+  expect(calls.some(row => row.tool === 'needs_you' && row.args.view === 'person')).toBe(false)
+  at.now = 'numericManager'
+  await clock.advance(5000)
+  expect(prompts).toEqual([])
+  at.now = 'numericMine'
+  await clock.advance(5000)
+  expect(prompts.length).toBe(1)
+  expect(prompts[0]).toContain('Authorize this cost?')
 })

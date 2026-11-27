@@ -310,7 +310,7 @@ test('mixed confirmation refusals restrict retries to the routed items', () => {
 test('local workers obey the live response to a decision request', () => {
   for (const path of ['agents/factory-worker.md', 'scripts/codex-manager.py']) {
     const guidance = readFileSync(join(root, path), 'utf8')
-    for (const required of ['brief.factory_decisions', 'asked: false', 'decided_by: "manager"', 'continue', 'Only a confirmed personal wait']) {
+    for (const required of ['brief.factory_decisions', 'asked: false', 'decided_by: "manager"', 'continue', 'Only a confirmed personal wait', 'story_status', 'needs_you', 'reserved', 'criterion']) {
       assert.ok(guidance.includes(required), path + ' lacks ' + required)
     }
   }

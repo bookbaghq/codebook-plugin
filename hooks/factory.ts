@@ -123,7 +123,7 @@ type WireEvent = {
 /** A question as CodeBook sends it: its text, or an object carrying the text (and maybe likely answers). */
 type WireQuestion =
   | string
-  | { text?: string; question?: string; choices?: string[] | null; on_you?: boolean; run?: number | null; for?: string; decided_by?: string }
+  | { text?: string; question?: string | number; asked?: string; tools?: string[]; choices?: string[] | null; on_you?: boolean; run?: number | null; for?: string; decided_by?: string }
   | null
 type Lease = { fence: number; expires_at?: string; expired?: boolean }
 type RunLocation = {
@@ -147,6 +147,7 @@ export type Status = {
         on: 'person' | 'outside_agent' | 'runner' | 'review'
         run: number
         on_you?: boolean
+        tools?: string[]
         claimed?: boolean
         claimed_by_you?: boolean
         lease?: Lease | null
@@ -302,7 +303,7 @@ export function waitingPrompt(
 function questionOf(q: WireQuestion | undefined, personalWait: boolean): { text: string; choices: string[]; onYou: boolean } | null {
   if (q == null) return null
   if (typeof q === 'string') return q.trim() ? { text: q.trim(), choices: [], onYou: personalWait } : null
-  const text = (q.text ?? q.question ?? '').trim()
+  const text = [q.text, q.asked, q.question].find((value): value is string => typeof value === 'string' && value.trim() !== '')?.trim()
   if (!text) return null
   const choices = Array.isArray(q.choices) ? q.choices.filter(c => typeof c === 'string' && c.trim() !== '') : []
   const onYou = (q.on_you ?? personalWait) && q.for !== 'manager' && q.decided_by !== 'manager'
@@ -319,16 +320,39 @@ export function waitOf(s: Status): { key: string; prompt: string; question: stri
   const station = s.station?.name ?? null
   const personalWait = w?.on_you === true && (w.on === 'person' || w.on === 'review')
   const nested = questionOf(w?.question, personalWait)
-  const q = nested ?? questionOf(s.question, personalWait)
-  if (q?.onYou && (!nested || personalWait)) {
+  const top = questionOf(s.question, false)
+  const q = nested?.onYou && personalWait ? nested : top
+  if (q?.onYou) {
     return {
       key: `question|${w?.run ?? ''}|${q.text}`,
       prompt: waitingPrompt(s.story.reference, station, w?.on ?? null, q),
       question: q.text,
     }
   }
-  if (!personalWait || nested || (w.on === 'person' && q)) return null
+  if (!personalWait || nested) return null
   return { key: `${w.on}|${w.run}`, prompt: waitingPrompt(s.story.reference, station, w.on), question: null }
+}
+
+// Older story_status replies identify a question but only advertise whether the viewer can
+// answer it. needs_you supplies its actual owner, including for pre-delegation questions.
+async function confirmedStatus($: EngineInterface, s: Status): Promise<Status> {
+  const w = s.waiting
+  const question = typeof s.question === 'object' ? s.question : null
+  const decision = typeof question?.question === 'number' && typeof question.asked === 'string' ? question : null
+  const run = w?.on === 'person' && w.on_you && typeof w.question === 'string' && Array.isArray(w.tools) ? w : null
+  if (!decision && !run) return s
+  const needsOwner = run?.tools?.includes('answer_question') || decision?.tools?.includes('answer_question')
+  type Item = { kind?: string; for?: string; on_you?: boolean; story?: {story?: string}; question_id?: number; run?: number | null; question?: string }
+  const result = needsOwner ? await call<{items?: Item[]}>($, 'needs_you', {factory: s.factory.factory, view: 'person'}) : null
+  const items = result?.ok ? result.data.items ?? [] : []
+  const mine = (id: string | number | undefined, runId: number | null, text: string | undefined) =>
+    items.some(i => i.kind === 'question' && i.for === 'person' && i.on_you === true && i.story?.story === s.story.story &&
+      i.question_id === id && (i.run ?? null) === runId && i.question === text)
+  return {
+    ...s,
+    ...(run && {waiting: {...run, on_you: Boolean(run.tools?.includes('answer_question')) && mine(run.run, run.run, run.question as string)}}),
+    ...(decision && {question: {...decision, on_you: decision.on_you !== false && Boolean(decision.tools?.includes('answer_question')) && mine(decision.question, null, decision.asked)}}),
+  }
 }
 
 // Asks wait here until the next timer tick sends them: a refresh also runs inside the tool.call hook of Claude's own
@@ -405,7 +429,7 @@ export async function refresh($: EngineInterface, generation?: number): Promise<
   if (!await continuationCurrent($, generation)) return
   await setLink($, got)
   if (!got.ok) return
-  const s = got.data
+  const s = await confirmedStatus($, got.data)
   await observeContinuation($, a.story, s, generation)
   if (!await continuationCurrent($, generation)) return
   const byStation = new Map(s.stations.map(one => [one.station, one]))
@@ -523,7 +547,7 @@ export async function refreshWatched($: EngineInterface): Promise<void> {
   nextWatched = (nextWatched + 1) % Math.max(1, list.length)
   const got = await call<Status>($, 'story_status', { story: one.story, limit: 1 })
   if (!got.ok || !await continuationCurrent($, generation)) return
-  const s = got.data
+  const s = await confirmedStatus($, got.data)
   await observeContinuation($, one.story, s, generation)
   if (!await continuationCurrent($, generation)) return
   const wait = waitOf(s)

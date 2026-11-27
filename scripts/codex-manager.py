@@ -508,7 +508,10 @@ def prompt(scope, item):
             "git worktree list --porcelain to find the exact local checkout. Claiming needs no remote git operation, "
             "repo search, work-order history or test. Reuse matching verified receipts, investigate only actual gaps, "
             "and finish using complete_work with your valid fence. Follow brief.factory_decisions and the live server response. "
-            'When asked: false or decided_by: "manager", follow the manager route and continue within your fence. '
+            'When decided_by: "manager", follow the manager route and continue within your fence. '
+            'Use the true reserved reason (e.g. spending), or sign_off with the exact criterion ID. '
+            'An asked: false can be a duplicate. For an ambiguous or lost result read story_status for this story '
+            'and match its run/question to needs_you for this factory before retrying or surfacing it. '
             "Only a confirmed personal wait goes to that person. Respect the approved scope, proof and human gates. "
             "Do not run another station or manager, self-QA, merge or change settings.")
 

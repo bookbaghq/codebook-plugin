@@ -147,11 +147,14 @@ manager, who decides it. Nobody asks a person how to deliver the work.
 **When only a person can give it.** A story waits for a person only when nothing else can finish it. That is one of
 six things (spending money, touching production data, deleting things, secrets and keys, a real outside account that
 no stand-in can replace, a merge where the factory keeps a person's station), or what is wanted, when neither the
-story, its criteria nor the code says. Finish everything else the run can do first. Then `request_person { run,
-fence, summary }`: say in one sentence what only the person can give, then what you found and its likely answers, so
+story, its criteria nor the code says. Finish everything else the run can do first. Submit the actual reason, e.g. `request_person { run, fence, summary, reserved: "spending" }`.
+For a pending personal sign-off include `reserved: "sign_off"` and its exact `criterion` ID. For a proposal
+use the exact `proposal_item` and its current owner. For an ordinary delivery decision omit the reservation. In the summary, say in one sentence what only the person can give, then what you found and its likely answers, so
 that `summary` reads on its own. Follow `brief.factory_decisions` and the current server response. When
-`asked: false` or `decided_by: "manager"` comes back, follow the manager route and continue the work allowed by
-your current fence. Only a confirmed personal wait goes to that person. A waiting story leaves other eligible
+`decided_by: "manager"` comes back, follow the manager route and continue the work allowed by
+your current fence. An `asked: false` response can also mean the same person already has an open question.
+On a lost or ambiguous response, read `story_status` for this story and resolve its exact run/question against
+`needs_you` for this factory before retrying or surfacing it. Only a confirmed personal wait goes to that person. A waiting story leaves other eligible
 stories available to the manager.
 
 **Answers already given**: when the brief carries `answers` (`[{ question, answer, by, at }]`), they are the person's
