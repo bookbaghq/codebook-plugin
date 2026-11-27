@@ -1,7 +1,8 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
-import { splitRun } from '../hooks/factory'
+import { splitRun, waitOf } from '../hooks/factory'
+import type { Status } from '../hooks/factory'
 import { CONTINUATION_STORE } from '../hooks/continuation'
 
 // A story in the "Payments" factory: Plan passed, Build waits for this person's runner, Review is a person (you).
@@ -1025,4 +1026,17 @@ test('continuation preserves approvals ownership and bounded wakeups', async ($,
   const afterStop = calls.length
   await clock.advance(65000)
   expect(calls.length).toBe(afterStop)
+})
+
+test('only a confirmed personal wait may ask from the Factory pane', async () => {
+  const base = status('build') as Status
+  expect(waitOf({ ...base, question: 'Unassigned' })).toBeNull()
+  expect(waitOf({ ...base, question: { text: 'Unassigned' } })).toBeNull()
+  expect(waitOf({ ...base, question: { text: 'Managed', on_you: true, decided_by: 'manager' } })).toBeNull()
+  expect(waitOf({ ...base, waiting: { on: 'runner', run: 811, on_you: true, question: 'Runner work' } })).toBeNull()
+  const waiting = { on: 'person' as const, run: 811, on_you: true }
+  expect(waitOf({ ...base, waiting: { ...waiting, question: { text: 'Managed', for: 'manager' } } })).toBeNull()
+  expect(waitOf({ ...base, waiting: { ...waiting, question: { text: 'Another person', on_you: false } } })).toBeNull()
+  expect(waitOf({ ...base, waiting: { ...waiting, question: 'Actual personal wait' } })?.question).toBe('Actual personal wait')
+  expect(waitOf({ ...base, question: { text: 'Assigned to me', on_you: true } })?.question).toBe('Assigned to me')
 })

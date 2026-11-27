@@ -507,7 +507,9 @@ def prompt(scope, item):
             "instructions and exact fence, heartbeating during work. Start with the server PR and proof records and "
             "git worktree list --porcelain to find the exact local checkout. Claiming needs no remote git operation, "
             "repo search, work-order history or test. Reuse matching verified receipts, investigate only actual gaps, "
-            "and finish using complete_work with your valid fence. Respect the approved scope, proof and human gates. "
+            "and finish using complete_work with your valid fence. Follow brief.factory_decisions and the live server response. "
+            'When asked: false or decided_by: "manager", follow the manager route and continue within your fence. '
+            "Only a confirmed personal wait goes to that person. Respect the approved scope, proof and human gates. "
             "Do not run another station or manager, self-QA, merge or change settings.")
 
 

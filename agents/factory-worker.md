@@ -132,7 +132,7 @@ When the changed behavior requires a running app, read [local testing](../skills
 in `stories[].criteria` as `[{ text, evidence, spec }]`: what must be true, and what will show it — `test` (the test's
 name as the runner will print it), `command` (a step of the repository's recipe: `test`, `build`, `lint`, `typecheck`),
 `browser` (the page's path), `http` (`GET /api/health 200`; CodeBook's hosted sandbox only) or `sign_off` (a person,
-only where nothing can be run). They become stories only when the person confirms; never create stories any other way.
+only where nothing can be run). The manager confirms eligible proposals under the factory's saved new-story policy. Person-owned proposals wait for their designated approver.
 Put the proposal's reference in your summary.
 
 **Planning or review stations** that produce text: write it as the station asks and record it with `run_artifact`.
@@ -149,8 +149,10 @@ six things (spending money, touching production data, deleting things, secrets a
 no stand-in can replace, a merge where the factory keeps a person's station), or what is wanted, when neither the
 story, its criteria nor the code says. Finish everything else the run can do first. Then `request_person { run,
 fence, summary }`: say in one sentence what only the person can give, then what you found and its likely answers, so
-that `summary` reads on its own. It is a question to a person, not a request for approval. The run waits; the manager
-asks the person in the chat and the run comes back to a worker with the answer. Stop there and say so.
+that `summary` reads on its own. Follow `brief.factory_decisions` and the current server response. When
+`asked: false` or `decided_by: "manager"` comes back, follow the manager route and continue the work allowed by
+your current fence. Only a confirmed personal wait goes to that person. A waiting story leaves other eligible
+stories available to the manager.
 
 **Answers already given**: when the brief carries `answers` (`[{ question, answer, by, at }]`), they are the person's
 answers to earlier questions on this run. Use them and do not ask those again.

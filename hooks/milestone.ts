@@ -1,6 +1,6 @@
+import type { Recovery, RecoveryRecord, MilestoneJournal, RetryRecord } from '../types'
+export type { Recovery, RecoveryRecord, MilestoneJournal, RetryRecord } from '../types'
 // Milestone decisions are scoped to one order and one attempt. The settings editor has separate authority.
-type Source = { member_item: number; member_story: string; repository: string; commit: string }
-export type Recovery = Source & ({kind: 'proof'; proof: number; executor: 'here' | 'runner'} | {kind: 'repair'; item: number; story: string})
 export type Route = { factory: string; order: string; check: number; owner: string; action: string; reason: string; recovery?: Recovery }
 type Attempt = { id?: number; attempt?: number; status?: string; decision?: string; decided_at?: string | number;
   decided_by_user_id?: number | null; retry_note?: string; reason?: string }
@@ -11,11 +11,7 @@ export type OrderView = { order?: string; work_order?: { reference?: string; sta
 type Attention = { kind?: string; route?: Route; factory?: string | {factory?: string}; order?: string;
   check?: number; check_id?: number; why?: string; on_you?: boolean }
 export type Needs = { for_manager?: Attention[]; for_person?: Attention[] }
-export type RetryRecord = { requested: number; state: 'pending' | 'confirmed'; check?: number; actor?: string;
-  at?: string | number; reason?: string; decidedBy?: number | null }
-export type RecoveryRecord = { check: number; target: Recovery; state: 'pending' | 'completed' | 'failed'; current?: boolean; note: string; run?: number
-  native?: { phase: 'preparing' | 'submitted'; attempt: number; nextReadAt: number } }
-export type MilestoneJournal = { recovery?: Record<string, RecoveryRecord>; prerequisites?: Record<string, string>; seen: string[]; questions: Record<string, string>; retries: Record<string, RetryRecord> }
+
 
 const owners: Record<string, string> = { wait: 'none', repair: 'manager', hold: 'none', settled: 'none', review: 'person', retry: 'manager' }
 const id = (n: unknown) => typeof n === 'number' && Number.isSafeInteger(n) && n > 0

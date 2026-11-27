@@ -123,7 +123,7 @@ type WireEvent = {
 /** A question as CodeBook sends it: its text, or an object carrying the text (and maybe likely answers). */
 type WireQuestion =
   | string
-  | { text?: string; question?: string; choices?: string[] | null; on_you?: boolean; run?: number | null }
+  | { text?: string; question?: string; choices?: string[] | null; on_you?: boolean; run?: number | null; for?: string; decided_by?: string }
   | null
 type Lease = { fence: number; expires_at?: string; expired?: boolean }
 type RunLocation = {
@@ -299,13 +299,14 @@ export function waitingPrompt(
 }
 
 /** A question's text and likely answers, from a string or an object carrying it; null when there is none. */
-function questionOf(q: WireQuestion | undefined): { text: string; choices: string[]; onYou: boolean } | null {
+function questionOf(q: WireQuestion | undefined, personalWait: boolean): { text: string; choices: string[]; onYou: boolean } | null {
   if (q == null) return null
-  if (typeof q === 'string') return q.trim() ? { text: q.trim(), choices: [], onYou: true } : null
+  if (typeof q === 'string') return q.trim() ? { text: q.trim(), choices: [], onYou: personalWait } : null
   const text = (q.text ?? q.question ?? '').trim()
   if (!text) return null
   const choices = Array.isArray(q.choices) ? q.choices.filter(c => typeof c === 'string' && c.trim() !== '') : []
-  return { text, choices, onYou: q.on_you !== false }
+  const onYou = (q.on_you ?? personalWait) && q.for !== 'manager' && q.decided_by !== 'manager'
+  return { text, choices, onYou }
 }
 
 /**
@@ -316,35 +317,34 @@ function questionOf(q: WireQuestion | undefined): { text: string; choices: strin
 export function waitOf(s: Status): { key: string; prompt: string; question: string | null } | null {
   const w = s.waiting
   const station = s.station?.name ?? null
-  const asked = questionOf(w?.question)
-  const fromWait = asked !== null && w?.on_you === true ? asked : null
-  const found = fromWait ?? questionOf(s.question)
-  const q = found !== null && found.onYou ? found : null
-  if (q !== null) {
+  const personalWait = w?.on_you === true && (w.on === 'person' || w.on === 'review')
+  const nested = questionOf(w?.question, personalWait)
+  const q = nested ?? questionOf(s.question, personalWait)
+  if (q?.onYou && (!nested || personalWait)) {
     return {
       key: `question|${w?.run ?? ''}|${q.text}`,
       prompt: waitingPrompt(s.story.reference, station, w?.on ?? null, q),
       question: q.text,
     }
   }
-  if (!w || w.on_you !== true || (w.on !== 'person' && w.on !== 'review')) return null
+  if (!personalWait || nested || (w.on === 'person' && q)) return null
   return { key: `${w.on}|${w.run}`, prompt: waitingPrompt(s.story.reference, station, w.on), question: null }
 }
 
 // Asks wait here until the next timer tick sends them: a refresh also runs inside the tool.call hook of Claude's own
 // CodeBook calls, where submitting would wait on the turn that hook holds. Never submit from a tool.call hook.
-let pendingAsks: string[] = []
+const pendingAsks = new Map<string, string>()
 
-function askOnce(beforeKey: string | null, wait: { key: string; prompt: string } | null): void {
-  if (wait === null || wait.key === beforeKey) return
-  if (!pendingAsks.includes(wait.prompt)) pendingAsks.push(wait.prompt)
+function askOnce(storyId: string, beforeKey: string | null, wait: { key: string; prompt: string } | null): void {
+  if (wait === null) pendingAsks.delete(storyId)
+  else if (wait.key !== beforeKey) pendingAsks.set(storyId, wait.prompt)
 }
 
 /** Sends the queued asks, if any, as one prompt: from the poll timer (every second), never from inside a tool call. */
 export function flushAsk($: EngineInterface): void {
-  if (stopping || pendingAsks.length === 0) return
-  const text = pendingAsks.join('\n\n')
-  pendingAsks = []
+  if (stopping || pendingAsks.size === 0) return
+  const text = [...pendingAsks.values()].join('\n\n')
+  pendingAsks.clear()
   void $.prompt.submit({ text })
 }
 
@@ -473,7 +473,7 @@ export async function refresh($: EngineInterface, generation?: number): Promise<
         $.ui.log(`CodeBook: ${s.story.reference} asks you: "${next.question}"`)
       }
     }
-    askOnce(before?.waitKey ?? null, wait)
+    askOnce(a.story, before?.waitKey ?? null, wait)
   })
   if (!await continuationCurrent($, generation)) return
   if (before === null || (s.last_event ?? null) !== (before.lastEvent ?? null)) await loadTrail($, s.story.story, generation)
@@ -529,7 +529,7 @@ export async function refreshWatched($: EngineInterface): Promise<void> {
   const wait = waitOf(s)
   // Against the list as it is now: a story the person or Claude added while this poll ran stays.
   await changeOwnership($, generation, async () => {
-    askOnce(one.waitKey, wait)
+    askOnce(one.story, one.waitKey, wait)
     await update($, watched, now =>
       s.finished !== null
         ? now.filter(n => n.story !== one.story)
@@ -592,11 +592,11 @@ export async function follow($: EngineInterface, a: CodebookActive, generation: 
 
 export async function unfollow($: EngineInterface): Promise<void> {
   stopping++
-  pendingAsks = []
+  pendingAsks.clear()
   try {
     await stopContinuation($)
     await changeOwnership($, await continuationGeneration($), async () => {
-      pendingAsks = []
+      pendingAsks.clear()
       board = null
       await update($, watched, () => [])
       await update($, active, () => null)
