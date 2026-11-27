@@ -622,4 +622,7 @@ if __name__ == "__main__":
         from milestone_manager import manager_recovery
         manager_recovery()
         print("ok 7 - Codex follows typed recovery targets, verifies receipts and preserves the old policies")
-        print("1..7")
+        from milestone_manager import held_observation
+        held_observation()
+        print("ok 8 - held and pending supervisors observe existing receipts without starting work")
+        print("1..8")

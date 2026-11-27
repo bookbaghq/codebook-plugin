@@ -230,7 +230,7 @@ def scoped_story_status(host, scope, story, statuses):
     if story not in statuses:
         try:
             status = host.tool("story_status", **scope, story=story, limit=1)
-        except Hold:
+        except (Hold, OSError):
             status = {}
         identities = {**scope, "story": story}
         statuses[story] = status if all(
@@ -579,8 +579,9 @@ class Manager:
         self.holds = run_holds(self.state)
         self.state["interaction_required"] = bool(self.holds or any(o["questions"] for o in self.state["milestone_orders"].values()))
         self.next_hold_read = 0
+        self.next_milestone_read = 0
         self.last_held_story = ""
-        self.state.update(pid=os.getpid(), phase="starting")
+        self.state.update(pid=os.getpid(), phase="starting", observation="connecting")
         self.last_scan = 0
         self.immediate = False
         self.worker = None
@@ -758,14 +759,17 @@ class Manager:
                 self.approvals()
                 del self.state["workers"][key]
 
-    def local_budget_hold(self):
+    def budget_exhausted(self):
         limit = self.config.get("local_token_budget")
-        if limit is None:
+        return limit is not None and self.state.get("local_tokens_used", 0) >= limit
+
+    def local_budget_hold(self):
+        if self.budget_exhausted():
+            return "The local workflow token budget has been reached."
+        if self.config.get("local_token_budget") is None:
             return None
         if self.state.get("usage_pending"):
             return "Waiting for a verified native usage receipt before spending more of the local token budget."
-        if self.state.get("local_tokens_used", 0) >= limit:
-            return "The local workflow token budget has been reached."
         if self.state.get("workers"):
             return "A local station is still spending against this workflow's token budget."
         return None
@@ -775,7 +779,11 @@ class Manager:
         if not active:
             return False
         route = active["item"].get("route")
-        thread = self.worker_thread(active.get("thread") or self.state.get("thread"), route)
+        self.state["phase"] = "awaiting_receipt"
+        previous = active.get("thread") or self.state.get("thread")
+        if not previous:
+            raise Hold("The pending wake has no recorded worker thread. Inspect its receipt.")
+        thread = self.worker_thread(previous, route)
         page = self.host_for(route).call("thread/turns/list", {"threadId": thread, "limit": 3, "itemsView": "full"})
         for turn in page["data"]:
             found = turn["id"] == active.get("turn") or any(
@@ -898,38 +906,66 @@ class Manager:
             raise Hold("Milestone attention is unavailable.")
         return view, milestone_routes.decisions(view, needs, factory, order)
 
-    def reconcile_milestones(self, may_work):
+    def observe_milestone(self):
+        """Reconcile receipts only for orders adopted by an exact confirmation."""
         orders = self.state["milestone_orders"]
-        candidates = []
         if not orders:
-            return candidates
-        factory = self.config["factory"]
+            return None
         order = min(orders, key=lambda o: (o <= self.state.get("last_milestone_order", ""), o))
         self.state["last_milestone_order"] = order
         ledger = orders[order]
         try:
             view, actions = self.milestone_snapshot(order)
-            milestone_routes.recover(view, ledger)
-            targets = ledger.setdefault("recovery", {})
-            for key, record in targets.items():
-                record["current"] = key in actions
-                if record["state"] != "pending":
-                    continue
-                target = record["target"]
-                if target["kind"] == "proof":
-                    try:
-                        receipt = self.host.tool("proof_result", factory=factory, story=target["member_story"], proof=target["proof"])
-                    except (Hold, OSError):
-                        continue
-                    outcome = milestone_routes.proof_outcome(target, receipt)
-                else:
-                    fix = milestone_routes.fix_for(view, record["check"], target)
-                    outcome = "completed" if fix and fix.get("state") == "finished" else None
-                if outcome:
-                    record["state"] = outcome
-            ledger["prerequisites"] = {key: route["reason"] for key, (route, _) in actions.items() if route["action"] == "hold"}
-            ledger.pop("read_pending", None)
-            ledger["questions"] = {k: v for k, v in ledger["questions"].items() if k in actions}
+        except (Hold, OSError):
+            ledger["read_pending"] = True
+            return None
+        ledger.pop("read_pending", None)
+        milestone_routes.recover(view, ledger)
+        targets = ledger.setdefault("recovery", {})
+        proofs = []
+        for key, record in targets.items():
+            record["current"] = key in actions
+            if record["state"] != "pending":
+                continue
+            target = record["target"]
+            if target["kind"] == "proof":
+                proofs.append(key)
+            else:
+                fix = milestone_routes.fix_for(view, record["check"], target)
+                if fix and fix.get("state") == "finished":
+                    record["state"] = "completed"
+        # Rotate through pending receipts so an unavailable proof cannot starve another.
+        proofs.sort(key=lambda k: (k <= ledger.get("last_proof_key", ""), k))
+        for key in proofs[:4]:
+            ledger["last_proof_key"] = key
+            record = targets[key]
+            target = record["target"]
+            try:
+                receipt = self.host.tool("proof_result", factory=self.config["factory"],
+                                         story=target["member_story"], proof=target["proof"])
+            except (Hold, OSError):
+                ledger["read_pending"] = True
+                continue
+            outcome = milestone_routes.proof_outcome(target, receipt)
+            if outcome:
+                record["state"] = outcome
+        ledger["prerequisites"] = {key: route["reason"] for key, (route, _) in actions.items() if route["action"] == "hold"}
+        ledger["questions"] = {key: question for key, question in ledger["questions"].items() if key in actions}
+        self.state["interaction_required"] = bool(self.holds or any(o["questions"] for o in orders.values()))
+        if (view.get("work_order") or {}).get("status") in ("done", "cancelled") and not (ledger["retries"] or targets):
+            del orders[order]
+            return None
+        return order, view, actions
+
+    def act_on_milestone(self, snapshot, may_work):
+        candidates = []
+        if snapshot is None:
+            return candidates
+        order, view, actions = snapshot
+        ledger = self.state["milestone_orders"][order]
+        targets = ledger["recovery"]
+        factory = self.config["factory"]
+        try:
             for key, (route, policy) in actions.items():
                 question = f"{factory} / {order}, check #{route['check']}: {route['reason']} What would you like to do with this check?"
                 if key in ledger["seen"] and route["action"] == "review":
@@ -971,11 +1007,9 @@ class Manager:
                                                authority="manager", decision="retry", **({"expected_policy": policy} if policy else {}))
                         if milestone_routes.confirmed(reply, route):
                             record.update(state="confirmed", actor="manager", check=reply["check"]["id"])
-            if (view.get("work_order") or {}).get("status") in ("done", "cancelled") and not ledger["retries"]:
-                del orders[order]
         except (Hold, OSError):
             ledger["read_pending"] = True
-        self.state["interaction_required"] = bool(self.holds or any(o["questions"] for o in orders.values()))
+        self.state["interaction_required"] = bool(self.holds or any(o["questions"] for o in self.state["milestone_orders"].values()))
         return candidates
 
     def development_ready(self, item, base):
@@ -1117,10 +1151,7 @@ class Manager:
         self.record("Verified the paired station worker's Git receipt.")
         return receipt
 
-    def tick(self):
-        if not self.config["running"]:
-            return
-        scope = {k: self.config[k] for k in ("factory", "workflow")}
+    def observe_events(self, scope):
         previous = self.state["cursor"]
         cursor, events = read_events(self.host, scope, previous)
         # Expiry gives an already delivered local station a new opportunity on its SAME job ID.
@@ -1136,30 +1167,61 @@ class Manager:
             if base in self.state["notices"] or base in self.state["lease_events"]:
                 self.state["lease_events"][base] = event_id
         self.state["last_read"] = int(time.time())
-        changed = self.state["cursor"] != cursor
         self.state["cursor"] = cursor
+        return previous != cursor
+
+    def observe(self):
+        """Read one scoped event page, a batch of held stories and one owned order."""
+        scope = {k: self.config[k] for k in ("factory", "workflow")}
+        error = None
+        try:
+            changed = self.observe_events(scope)
+            self.state["observation"] = "watching"
+        except (Hold, OSError) as failure:
+            error, changed = failure, False
+            self.state["observation"] = "events_unavailable"
+        statuses = {}
+        self.reconcile_operator_holds(scope, statuses)
+        snapshot = None
+        now = time.monotonic()
+        if changed or now >= self.next_milestone_read:
+            self.next_milestone_read = now + RECONCILE
+            snapshot = self.observe_milestone()
+        if error is not None:
+            # Keep independent receipts; the supervisor persists them and reconnects.
+            raise error
+        return changed, statuses, snapshot
+
+    def tick(self):
+        if not self.config["running"]:
+            return
+        changed, statuses, snapshot = self.observe()
+        scope = {k: self.config[k] for k in ("factory", "workflow")}
+        if self.budget_exhausted():
+            self.state["phase"] = "held"
+            self.record(self.local_budget_hold())
+            return
         self.approvals()
         self.service_git()
         self.observe_workers()
         self.report_usage()
-        statuses = {}
-        self.reconcile_operator_holds(scope, statuses)
         if self.reconcile():
             self.record(self.state.get("reason", "Waiting for the manager receipt."))
             return
+        # Acknowledging a worker may create a budget reservation or pending usage.
         budget_hold = self.local_budget_hold()
         if budget_hold:
             self.state["phase"] = "held"
             self.record(budget_hold)
             return
         self.state["phase"] = "observing"
-        if not changed and self.last_scan and time.monotonic() - self.last_scan < RECONCILE:
+        if snapshot is None and not changed and self.last_scan and time.monotonic() - self.last_scan < RECONCILE:
             self.record(self.state.get("reason", "Waiting for a CodeBook event."))
             return
         self.last_scan = time.monotonic()
         access = {}
         ready, reason = eligible(self.host, self.config, self.state["adopted"], statuses=statuses, access=access)
-        recovery = self.reconcile_milestones(access.get("may_work", False))
+        recovery = self.act_on_milestone(snapshot, access.get("may_work", False))
         selected = {item["key"] for item in recovery}
         ready = recovery + [item for item in ready if item["key"] not in selected]
         for item in ready:
@@ -1256,7 +1318,7 @@ def supervise(folder):
             if not config.get("running"):
                 break
             if config != manager.config:
-                manager.config, manager.last_scan = config, 0
+                manager.config, manager.last_scan, manager.next_milestone_read = config, 0, 0
             try:
                 if manager.host is None:
                     manager.host = Host(config["cwd"])
@@ -1292,7 +1354,7 @@ def supervise(folder):
             pass
         finally:
             manager.close_host()
-            manager.state["phase"] = "stopped"
+            manager.state.update(phase="stopped", observation="stopped")
             manager.record("The local manager is stopped.")
 
 
