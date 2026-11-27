@@ -13,6 +13,7 @@ const state = atom({ plugin: 'codebook', key: 'continuation' } as const, empty()
 const MAX_STORIES = 200
 const MAX_ORDERS = 40
 const QUIET_MS = 30000
+const MAX_CHECKPOINT_AGE_MS = 30 * 24 * 3600 * 1000
 let saving = Promise.resolve()
 let polling = false
 let flushing = false
@@ -49,10 +50,20 @@ export async function hasContinuation($: EngineInterface): Promise<boolean> {
   return !!current.manager || Object.keys(current.stories).length > 0 || Object.keys(current.orders).length > 0 || Object.keys(current.pending).length > 0
 }
 
+/** A timer may read milestone attention only for the factory of an order owned by this session. */
+export async function ownsAttentionRead($: EngineInterface, input: unknown): Promise<boolean> {
+  if (!input || typeof input !== 'object' || Object.keys(input).length !== 1 || !('factory' in input)) return false
+  const factory = input.factory
+  if (typeof factory !== 'string' || !factory) return false
+  const saved = await $.store.get(CONTINUATION_STORE + await $.session.id()) as {at?: number; value?: CodebookContinuation} | undefined
+  if (typeof saved?.at !== 'number' || saved.at <= await $.clock.now() - MAX_CHECKPOINT_AGE_MS) return false
+  return Object.values(saved.value?.orders ?? {}).some(order => order.factory === factory)
+}
+
 export async function restoreContinuation($: EngineInterface, generation: number): Promise<void> {
   const key = CONTINUATION_STORE + await $.session.id()
   const kept = await $.store.get(key) as { at?: number; value?: CodebookContinuation } | undefined
-  if (typeof kept?.at === 'number' && kept.at > await $.clock.now() - 30 * 24 * 3600 * 1000 && kept.value?.stories && kept.value.orders && kept.value.pending) {
+  if (typeof kept?.at === 'number' && kept.at > await $.clock.now() - MAX_CHECKPOINT_AGE_MS && kept.value?.stories && kept.value.orders && kept.value.pending) {
     const restored = kept.value
     previousCheckpoint = { key, value: JSON.stringify(checkpoint(restored)) }
     await update($, state, current => {

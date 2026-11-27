@@ -1,5 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 import { CONTINUATION_STORE } from '../hooks/continuation'
+import { register } from '../hooks/register'
+import type { EngineInterface } from 'claude-code'
 import type { Status } from '../hooks/factory'
 import type { CodebookContinuation } from '../types'
 
@@ -255,7 +257,22 @@ test('a moving page, a held followed card and a newly claimed local run do not w
 import milestoneCases from './fixtures/milestone-check-routes.mjs'
 import type { Route } from '../hooks/milestone'
 
-function milestoneTransport(on: Parameters<Parameters<typeof test>[1]>[1], ids: string[]) {
+type ToolPermission = (engine: EngineInterface, event: {tool: string; input: unknown},
+  next: {origin: {plugin?: string}} & (() => {decision: string})) => Promise<{decision: string}> | {decision: string}
+
+// The native test transport supplies MCP replies directly. Apply the installed permission callback at that boundary.
+function registeredPermission(): ToolPermission {
+  let permission: ToolPermission | undefined
+  register(((event: string, ...args: unknown[]) => {
+    if (event === 'tool.check' && args.length === 1 && !permission) permission = args[0] as ToolPermission
+    return {catch() {}}
+  }) as never)
+  if (!permission) throw Error('The plugin has no connector permission callback.')
+  return permission
+}
+
+function milestoneTransport(on: Parameters<Parameters<typeof test>[1]>[1], ids: string[], autoMode = false) {
+  const permission = autoMode ? registeredPermission() : undefined
   const selected = milestoneCases.filter(c => ids.includes(c.id))
   const clock = mock.clock(on, {now: 1_000_000}), store = new Map<string, unknown>()
   const factory = 'fixtureFactory', key = CONTINUATION_STORE + 'milestone-fixture'
@@ -271,7 +288,8 @@ function milestoneTransport(on: Parameters<Parameters<typeof test>[1]>[1], ids: 
   }))
   const owned = Object.fromEntries([...views].map(([id, v]) => [id, {factory, reference: v.work_order.reference, passes: []}]))
   store.set(key, {at: 999900, value: {generation: 0, stories: {}, orders: owned, feeds: {}, pending: {}, nextFactory: 0, nextOrder: 0, checkedAt: 0}})
-  const fixture = {clock, views, prompts, writes, lost: false, afterAttention: () => {},
+  const checks: string[] = []
+  const fixture = {clock, views, prompts, writes, checks, lost: false, afterAttention: () => {},
     legacy: [] as {kind: string; factory: string; order: string; check_id: number; why: string; on_you: boolean}[],
     ledger: (order: string) => (store.get(key) as {value: CodebookContinuation}).value.orders[order]?.milestones}
   on('session.id', () => ({value: 'milestone-fixture'}))
@@ -283,7 +301,26 @@ function milestoneTransport(on: Parameters<Parameters<typeof test>[1]>[1], ids: 
   on('store.set', (_, e) => { store.set(e.key, e.value); return {value: undefined} })
   on('store.delete', (_, e) => { store.delete(e.key); return {value: undefined} })
   on('mcp.connect', () => ({value: {isConnected: true, server: 'codebook'}}))
-  on('mcp.call', (_, e) => {
+  on('mcp.call', async ($, e) => {
+    if (permission) {
+      const below = Object.assign(() => ({decision: 'ask'}), {origin: {plugin: $.plugin.name}})
+      const event = {tool: 'mcp__plugin_codebook_codebook__' + e.tool, input: e.args}
+      // The host separates the test plugin from CodeBook. Bind the registered callback to the session's fixture store.
+      const permissionEngine = {plugin: $.plugin, session: {id: () => 'milestone-fixture'},
+        store: {get: (k: string) => store.get(k)}, clock: {now: () => 1_000_000}} as unknown as EngineInterface
+      const verdict = await permission(permissionEngine, event, below)
+      checks.push(e.tool + ':' + verdict.decision)
+      if (verdict.decision !== 'allow') throw Error('Auto mode classifier gave no verdict for ' + e.tool)
+      if (e.tool === 'needs_you') {
+        const model = Object.assign(() => ({decision:'ask'}), {origin:{}})
+        expect((await permission(permissionEngine, event, model)).decision).toBe('ask')
+        expect((await permission(permissionEngine, {...event, input:{factory:'another-factory'}}, below)).decision).toBe('ask')
+        expect((await permission(permissionEngine, {...event, input:{factory, view:'person'}}, below)).decision).toBe('ask')
+        const foreign = {...permissionEngine, session:{id: () => 'another-session'}} as unknown as EngineInterface
+        expect((await permission(foreign, event, below)).decision).toBe('ask')
+        expect((await permission(permissionEngine, {...event, tool:'mcp__plugin_codebook_codebook__decide_milestone_check'}, below)).decision).toBe('ask')
+      }
+    }
     let data: unknown
     if (e.tool === 'factory_events') data = {events: [], last_event: 1}
     else if (e.tool === 'work_orders') data = views.get(String(e.args.order).toLowerCase().replace('-', ''))
@@ -386,5 +423,18 @@ test('legacy milestone attention must address the current operator and attempt',
   await f.clock.advance(35000)
   expect(f.prompts.length).toBe(1)
   expect(f.prompts[0]).toContain('check #70')
+  expect(f.writes).toEqual([])
+})
+
+test('Claude Auto mode reads only owned milestone attention before asking the exact owner', async ($, on) => {
+  const f = milestoneTransport(on, ['F1', 'F2', 'F5'], true)
+  // The repair has no available local fix run. The outstanding human request is the only wake.
+  f.views.get('wo32')!.milestones[0]!.fixes = []
+  await $.session.start({cwd: '/', surface: 'desktop', isInteractive: true})
+  for (let i = 0; i < 6; i++) await f.clock.advance(35000)
+  expect(f.checks).toContain('work_orders:allow')
+  expect(f.checks).toContain('needs_you:allow')
+  expect(f.prompts.length).toBe(1)
+  expect(f.prompts[0]).toContain('fixtureFactory / WO-36 (wo36), check #43')
   expect(f.writes).toEqual([])
 })
