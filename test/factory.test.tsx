@@ -19,7 +19,7 @@ const BOARD = {
   ],
 }
 
-type At = 'build' | 'claimed' | 'review' | 'done' | 'asks' | 'escalated' | 'blocked' | 'numericMine' | 'numericManager' | 'numericReadOnly'
+type At = 'build' | 'claimed' | 'review' | 'done' | 'asks' | 'escalated' | 'blocked' | 'numericMine' | 'numericManager' | 'numericReadOnly' | 'numericRunner' | 'numericNext' | 'numericUnavailable'
 const ASKED = 'Refund to the card, or as store credit?'
 /** A CodeBook from before §12.10: person stations carry no on_approve. */
 const older = { codebook: false }
@@ -39,9 +39,10 @@ function status(at: At): Record<string, unknown> {
     ...status('build'),
     question: { text: 'Which payment providers are in scope?', choices: ['Stripe only', 'Stripe and PayPal'], on_you: true },
   }
-  if (at === 'numericMine' || at === 'numericManager' || at === 'numericReadOnly') return {
+  if (at.startsWith('numeric')) return {
     ...status('build'),
-    question: {question: 41, asked: 'Authorize this cost?', tools: at === 'numericReadOnly' ? [] : ['answer_question']},
+    waiting: at === 'numericRunner' ? { on: 'runner', run: 899, on_you: true } : null,
+    question: {question: at === 'numericNext' ? 42 : 41, asked: 'Authorize this cost?', tools: at === 'numericReadOnly' ? [] : ['answer_question']},
   }
   if (at === 'done') return {
     ...status('review'),
@@ -201,9 +202,10 @@ function engine(on: On, at: { now: At; asks58?: boolean; done58?: boolean; sessi
   })
   function answer(tool: string, args: Record<string, unknown>) {
     if (tool === 'needs_you' && args.view === 'person') {
+      if (at.now === 'numericUnavailable') return {error: {code: 'UNREACHABLE', message: 'Temporarily offline'}}
       const base = {kind: 'question', for: 'person', on_you: true, story: {story: '6KjN'}}
       return {items: at.now === 'asks' ? [{...base, question_id: 811, run: 811, question: ASKED}]
-        : at.now === 'numericMine' ? [{...base, question_id: 41, run: null, question: 'Authorize this cost?'}] : []}
+        : ['numericMine', 'numericRunner', 'numericNext'].includes(at.now) ? [{...base, question_id: at.now === 'numericNext' ? 42 : 41, run: null, question: 'Authorize this cost?'}] : []}
     }
     if (tool === 'factory_events') {
       if (at.lifecycle?.feedError) return { error: { code: 'UNREACHABLE', message: 'Temporarily offline' } }
@@ -1065,4 +1067,13 @@ test('a live numeric question id wakes only the viewer assigned its personal dec
   await clock.advance(5000)
   expect(prompts.length).toBe(1)
   expect(prompts[0]).toContain('Authorize this cost?')
+  at.now = 'numericUnavailable'
+  await clock.advance(5000)
+  at.now = 'numericRunner'
+  await clock.advance(5000)
+  expect(prompts.length).toBe(1)
+  at.now = 'numericNext'
+  await clock.advance(5000)
+  expect(prompts.length).toBe(2)
+  expect(prompts[1]).toContain('Authorize this cost?')
 })

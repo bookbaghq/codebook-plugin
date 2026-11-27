@@ -154,6 +154,7 @@ export type Status = {
         pull_requests?: { pull_request_id: number; head_sha: string; number?: number; html_url?: string }[]
         on_approve?: { merge?: string; sentence?: string } | null
         /** A request_person wait: the agent's question (phase 1 contract item 6). */
+        asked_at?: string
         question?: WireQuestion
       }
   /** A question for a person on the story (ask_person, an escalation): phase 1 contract items 4 and 6. */
@@ -321,10 +322,14 @@ export function waitOf(s: Status): { key: string; prompt: string; question: stri
   const personalWait = w?.on_you === true && (w.on === 'person' || w.on === 'review')
   const nested = questionOf(w?.question, personalWait)
   const top = questionOf(s.question, false)
-  const q = nested?.onYou && personalWait ? nested : top
+  const fromRun = personalWait && nested?.onYou === true
+  const q = fromRun ? nested : top
   if (q?.onYou) {
+    const topId = s.question && typeof s.question === 'object' ? s.question.question : null
+    const key = fromRun ? `question|${w.run}|${w.asked_at ?? q.text}`
+      : typeof topId === 'number' ? `decision|${topId}` : `question||${q.text}`
     return {
-      key: `question|${w?.run ?? ''}|${q.text}`,
+      key,
       prompt: waitingPrompt(s.story.reference, station, w?.on ?? null, q),
       question: q.text,
     }
@@ -335,7 +340,7 @@ export function waitOf(s: Status): { key: string; prompt: string; question: stri
 
 // Older story_status replies identify a question but only advertise whether the viewer can
 // answer it. needs_you supplies its actual owner, including for pre-delegation questions.
-async function confirmedStatus($: EngineInterface, s: Status): Promise<Status> {
+async function confirmedStatus($: EngineInterface, s: Status): Promise<Status | null> {
   const w = s.waiting
   const question = typeof s.question === 'object' ? s.question : null
   const decision = typeof question?.question === 'number' && typeof question.asked === 'string' ? question : null
@@ -344,6 +349,10 @@ async function confirmedStatus($: EngineInterface, s: Status): Promise<Status> {
   const needsOwner = run?.tools?.includes('answer_question') || decision?.tools?.includes('answer_question')
   type Item = { kind?: string; for?: string; on_you?: boolean; story?: {story?: string}; question_id?: number; run?: number | null; question?: string }
   const result = needsOwner ? await call<{items?: Item[]}>($, 'needs_you', {factory: s.factory.factory, view: 'person'}) : null
+  if (needsOwner && !result?.ok) {
+    pendingAsks.delete(s.story.story)
+    return null
+  }
   const items = result?.ok ? result.data.items ?? [] : []
   const mine = (id: string | number | undefined, runId: number | null, text: string | undefined) =>
     items.some(i => i.kind === 'question' && i.for === 'person' && i.on_you === true && i.story?.story === s.story.story &&
@@ -430,6 +439,7 @@ export async function refresh($: EngineInterface, generation?: number): Promise<
   await setLink($, got)
   if (!got.ok) return
   const s = await confirmedStatus($, got.data)
+  if (!s) return
   await observeContinuation($, a.story, s, generation)
   if (!await continuationCurrent($, generation)) return
   const byStation = new Map(s.stations.map(one => [one.station, one]))
@@ -548,6 +558,7 @@ export async function refreshWatched($: EngineInterface): Promise<void> {
   const got = await call<Status>($, 'story_status', { story: one.story, limit: 1 })
   if (!got.ok || !await continuationCurrent($, generation)) return
   const s = await confirmedStatus($, got.data)
+  if (!s) return
   await observeContinuation($, one.story, s, generation)
   if (!await continuationCurrent($, generation)) return
   const wait = waitOf(s)
