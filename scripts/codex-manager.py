@@ -21,6 +21,7 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import paired_git
 import native_usage
+import milestone_routes
 
 IDENT = re.compile(r"[A-Za-z0-9_-]{1,70}")
 REPOSITORY = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}")
@@ -381,7 +382,7 @@ def preflight(host, route, scope=None):
         raise Hold(reasons.get(code, "The sandboxed Development capability check did not pass."))
 
 
-def eligible(host, config, adopted, only=None, statuses=None):
+def eligible(host, config, adopted, only=None, statuses=None, access=None):
     scope = {k: config[k] for k in ("factory", "workflow")}
     if statuses is None:
         statuses = {}
@@ -407,6 +408,8 @@ def eligible(host, config, adopted, only=None, statuses=None):
     capacity = brief["you"].get("on_my_computer") or {}
     if capacity.get("limit") is not None and capacity.get("working_now", 0) >= capacity["limit"]:
         return [], "The local worker capacity is full."
+    if access is not None:
+        access["may_work"] = True
     candidates = []
     for row in host.tool("list_my_work", factory=scope["factory"])["work"]:
         followed = row.get("story") in allowed or row.get("reference") in allowed
@@ -566,8 +569,15 @@ class Manager:
         self.state.setdefault("adopted", [])
         self.state.setdefault("lease_events", {})
         self.state.setdefault("workers", {})
+        if "milestone_orders" not in self.state:
+            # A pre-upgrade confirmed receipt establishes ownership; an unacknowledged proposal does not.
+            self.state["milestone_orders"] = {}
+            for key, entry in self.state["notices"].items():
+                parts = key.split(":")
+                if entry.get("confirmation") == "confirmed" and len(parts) == 3 and re.fullmatch(r"wo[1-9]\d*", parts[1]):
+                    self.state["milestone_orders"].setdefault(parts[1], milestone_routes.journal())
         self.holds = run_holds(self.state)
-        self.state["interaction_required"] = bool(self.holds)
+        self.state["interaction_required"] = bool(self.holds or any(o["questions"] for o in self.state["milestone_orders"].values()))
         self.next_hold_read = 0
         self.last_held_story = ""
         self.state.update(pid=os.getpid(), phase="starting")
@@ -847,7 +857,7 @@ class Manager:
             for key, held in by_story[story]:
                 if operator_hold_ended(status, held):
                     del self.holds[key]
-        self.state["interaction_required"] = bool(self.holds)
+        self.state["interaction_required"] = bool(self.holds or any(o["questions"] for o in self.state["milestone_orders"].values()))
 
     def confirm(self, item, entry):
         """Caller holds the control fence; record intent before the single allowed MCP mutation."""
@@ -868,6 +878,7 @@ class Manager:
             return
         if exact_confirmation(reply, item):
             entry["confirmation"] = "confirmed"
+            self.state["milestone_orders"].setdefault(item["proposal"], milestone_routes.journal())
             if item["story"] not in self.state["adopted"]:
                 self.state["adopted"].append(item["story"])
         else:
@@ -876,6 +887,58 @@ class Manager:
         self.last_scan = 0
         self.immediate = True
         self.record("Received " + entry["confirmation"] + " for " + item["key"] + ".")
+
+    def reconcile_milestones(self, may_work):
+        orders = self.state["milestone_orders"]
+        if not orders:
+            return
+        factory = self.config["factory"]
+        order = min(orders, key=lambda o: (o <= self.state.get("last_milestone_order", ""), o))
+        self.state["last_milestone_order"] = order
+        ledger = orders[order]
+        def snapshot():
+            view = self.host.tool("work_orders", factory=factory, order=order)
+            if view.get("order") != order or not isinstance(view.get("milestones"), list):
+                raise Hold("The owned work order could not be reconciled.")
+            needs = self.host.tool("needs_you", factory=factory)
+            if not all(isinstance(needs.get(k), list) for k in ("for_person", "for_manager")):
+                raise Hold("Milestone attention is unavailable.")
+            return view, milestone_routes.decisions(view, needs, factory, order)
+        try:
+            view, actions = snapshot()
+            milestone_routes.recover(view, ledger)
+            ledger.pop("read_pending", None)
+            ledger["questions"] = {k: v for k, v in ledger["questions"].items() if k in actions}
+            for key, (route, policy) in actions.items():
+                question = f"{factory} / {order}, check #{route['check']}: {route['reason']} What would you like to do with this check?"
+                if key in ledger["seen"] and route["action"] == "review":
+                    ledger["questions"][key] = question
+                if key in ledger["seen"] or key in ledger["retries"]:
+                    continue
+                if route["action"] == "retry" and not (may_work and self.config["manage_ready"]):
+                    continue
+                with locked(self.folder / "control.lock"):
+                    if read(self.folder / "control.json", {}) != self.config:
+                        return
+                    if snapshot()[1].get(key) != (route, policy):
+                        continue
+                    check = route["check"]
+                    if route["action"] == "review":
+                        ledger["seen"].append(key)
+                        ledger["questions"][key] = question
+                        self.record("An operator question is available for " + key + ".")
+                    else:
+                        record = ledger["retries"][key] = dict(requested=check, state="pending", reason=route["reason"])
+                        self.record("Awaiting the server receipt for " + key + ".")
+                        reply = self.host.tool("decide_milestone_check", factory=factory, order=order, check=check,
+                                               authority="manager", decision="retry", **({"expected_policy": policy} if policy else {}))
+                        if milestone_routes.confirmed(reply, route):
+                            record.update(state="confirmed", actor="manager", check=reply["check"]["id"])
+            if (view.get("work_order") or {}).get("status") in ("done", "cancelled") and not ledger["retries"]:
+                del orders[order]
+        except (Hold, OSError):
+            ledger["read_pending"] = True
+        self.state["interaction_required"] = bool(self.holds or any(o["questions"] for o in orders.values()))
 
     def development_ready(self, item, base):
         route = item.get("route")
@@ -1056,7 +1119,9 @@ class Manager:
             self.record(self.state.get("reason", "Waiting for a CodeBook event."))
             return
         self.last_scan = time.monotonic()
-        ready, reason = eligible(self.host, self.config, self.state["adopted"], statuses=statuses)
+        access = {}
+        ready, reason = eligible(self.host, self.config, self.state["adopted"], statuses=statuses, access=access)
+        self.reconcile_milestones(access.get("may_work", False))
         for item in ready:
             expired_at = self.state["lease_events"].get(item["key"])
             if item["run"] and expired_at:
@@ -1082,7 +1147,7 @@ class Manager:
                     continue
                 del self.holds[held_run]
                 entry.update(attempts=0, next=0)
-                self.state["interaction_required"] = bool(self.holds)
+                self.state["interaction_required"] = bool(self.holds or any(o["questions"] for o in self.state["milestone_orders"].values()))
             if entry["attempts"] >= MAX_ATTEMPTS:
                 reason = "Wake retry limit reached for " + item["key"] + "; inspect the dedicated thread."
                 continue

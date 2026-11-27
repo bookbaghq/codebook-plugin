@@ -10,7 +10,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { CodebookActive, CodebookCheckout, CodebookClaim, CodebookLink, CodebookMode, CodebookStory, CodebookWatch } from '../types'
 import { call, words } from './connector'
 import { proposalGuidance } from '../skills/factory-manager/scripts/proposal-guidance.mjs'
-import { continuationCurrent, continuationGeneration, flushContinuation, hasContinuation, manageUsage, pollContinuation, restoreContinuation, watchContinuation, watchWorkflow, workflowStatus } from './continuation'
+import { continuationCurrent, continuationGeneration, flushContinuation, hasContinuation, manageUsage, ownsAttentionRead, pollContinuation, restoreContinuation, watchContinuation, watchWorkflow, workflowStatus } from './continuation'
 import { carriesKey, claimOf, defaultBranchesOf, expiresOf, leaseOf, liveClaims, mayReach, ownedOf, readCommand } from './guard'
 import type { Target } from './guard'
 import { checkOne, checkShellWords, folderOf, ownPushOf, pushedFrom, reaches, shellState } from './resolve'
@@ -389,15 +389,18 @@ export const register: Register = (on, options) => {
   // The pane's own READS of the connector (listing factories, following the story the person chose): auto mode's
   // classifier judges the model's requests and has no verdict for a timer's read, so these are allowed here. Nothing
   // else is: writes are requests the person sends, and the model's calls keep the person's permission settings.
-  on('tool.check', ($, e, next) =>
-    next.origin.plugin === $.plugin.name && OWN_READS.has(e.tool)
+  on('tool.check', async ($, e, next) => {
+    if (next.origin.plugin === $.plugin.name && e.tool === OWN_TOOLS + 'needs_you' && await ownsAttentionRead($, e.input)) {
+      return { decision: 'allow', reason: 'The CodeBook manager reading milestone attention for an order owned by this session.' }
+    }
+    return next.origin.plugin === $.plugin.name && OWN_READS.has(e.tool)
       ? { decision: 'allow', reason: 'The CodeBook Factory pane following the story you chose (read only).' }
       : next.origin.plugin === $.plugin.name && e.tool === OWN_CLAIM
         ? { decision: 'allow', reason: 'The CodeBook plugin taking a proof run you or your agent asked for, to run the repository\'s checks here.' }
         : e.tool === OWN_CLAIM
           ? { decision: 'deny', reason: CLAIM_REFUSED }
-          : next(e),
-  ).catch(($, e, next) => next(e))
+          : next(e)
+  }).catch(($, e, next) => next(e))
 
   // Claude's calls of the connector (the requests the pane offered, the factory-worker's reports): the pane takes
   // up a started story and refreshes after the rest.
