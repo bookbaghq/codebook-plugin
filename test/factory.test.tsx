@@ -1077,3 +1077,21 @@ test('a live numeric question id wakes only the viewer assigned its personal dec
   expect(prompts.length).toBe(2)
   expect(prompts[1]).toContain('Authorize this cost?')
 })
+
+test('an ownership outage before delivery parks a queued personal question until it is confirmed again', async ($, on) => {
+  const at: {now: At} = {now: 'build'}
+  const {prompts, clock} = engine(on, at)
+  await $.session.start({cwd: '/', surface: 'desktop', isInteractive: true})
+  await claudeStarts($)
+  await clock.advance(5000)
+  at.now = 'numericMine'
+  await $.command.run(typed('status'))
+  expect(prompts.length).toBe(0)
+  at.now = 'numericUnavailable'
+  await $.command.run(typed('status'))
+  await clock.advance(5000)
+  expect(prompts.length).toBe(0)
+  at.now = 'numericRunner'
+  await clock.advance(10000)
+  expect(prompts.length).toBe(1)
+})

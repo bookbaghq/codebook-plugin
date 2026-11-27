@@ -350,7 +350,7 @@ async function confirmedStatus($: EngineInterface, s: Status): Promise<Status | 
   type Item = { kind?: string; for?: string; on_you?: boolean; story?: {story?: string}; question_id?: number; run?: number | null; question?: string }
   const result = needsOwner ? await call<{items?: Item[]}>($, 'needs_you', {factory: s.factory.factory, view: 'person'}) : null
   if (needsOwner && !result?.ok) {
-    pendingAsks.delete(s.story.story)
+    if (pendingAsks.has(s.story.story)) pendingAsks.set(s.story.story, null)
     return null
   }
   const items = result?.ok ? result.data.items ?? [] : []
@@ -366,19 +366,24 @@ async function confirmedStatus($: EngineInterface, s: Status): Promise<Status | 
 
 // Asks wait here until the next timer tick sends them: a refresh also runs inside the tool.call hook of Claude's own
 // CodeBook calls, where submitting would wait on the turn that hook holds. Never submit from a tool.call hook.
-const pendingAsks = new Map<string, string>()
+// null parks an undelivered prompt until its owner can be confirmed again.
+const pendingAsks = new Map<string, string | null>()
 
 function askOnce(storyId: string, beforeKey: string | null, wait: { key: string; prompt: string } | null): void {
   if (wait === null) pendingAsks.delete(storyId)
-  else if (wait.key !== beforeKey) pendingAsks.set(storyId, wait.prompt)
+  else if (wait.key !== beforeKey || pendingAsks.has(storyId)) pendingAsks.set(storyId, wait.prompt)
 }
 
 /** Sends the queued asks, if any, as one prompt: from the poll timer (every second), never from inside a tool call. */
 export function flushAsk($: EngineInterface): void {
   if (stopping || pendingAsks.size === 0) return
-  const text = [...pendingAsks.values()].join('\n\n')
-  pendingAsks.clear()
-  void $.prompt.submit({ text })
+  const ready: string[] = []
+  for (const [story, prompt] of pendingAsks) {
+    if (prompt === null) continue
+    ready.push(prompt)
+    pendingAsks.delete(story)
+  }
+  if (ready.length) void $.prompt.submit({ text: ready.join('\n\n') })
 }
 
 /** The chat line for an event of the followed story (G5b's who/where), or null for one not worth a line. */
