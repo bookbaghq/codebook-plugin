@@ -27,6 +27,8 @@ To manage the whole local workflow, add `--manage-ready` when starting the super
 
 For an order this supervisor confirmed, `status` lists current operator questions under `milestone_orders`. It asks once per check when CodeBook routes the decision to you. Pending proof, held checks and existing repairs let independent work continue. An authorized manager retry is journaled before dispatch. After a disconnect, the supervisor reconciles the original attempt against its recorded history. It never waives a check on your behalf.
 
+With the **manager_recovery** factory setting, a matching work-order route and attention entry name the member story, repository, exact commit and its queued proof or repair. The supervisor dispatches eligible local repair stations through their ordinary claim. Its status records the exact proof ID and executor. A registered runner consumes its own queue. A proof assigned to Claude’s local executor requires the signed-in Claude plugin and its `/factory prove <id>` command. The supervisor reconciles the verified own-test receipt at the original commit and keeps other work moving while a prerequisite is outstanding.
+
 For Development, select an existing isolated HTTPS clone for each approved GitHub repository and a named Codex permissions profile. If you keep that profile in a separate Codex config overlay, also supply its name. This option requires Python 3.11+ and reads only the selected filesystem and domain permission table. A direct story-to-repository assignment is optional when CodeBook already reports an unambiguous repository. Passing `--story` here selects its repository and does not transfer ownership.
 
 ```sh

@@ -4,8 +4,8 @@ import type { EngineInterface } from 'claude-code'
 import type { CodebookContinuation, CodebookWorkflowWatch } from '../types'
 import type { Status } from './factory'
 import { call } from './connector'
-import { blankJournal, confirmedRetry, decisions, recoverRetries } from './milestone'
-import type { Needs, OrderView } from './milestone'
+import { blankJournal, confirmedRetry, decisions, proofOutcome, recoverRetries } from './milestone'
+import type { Needs, OrderView, ProofResult, Recovery } from './milestone'
 
 export const CONTINUATION_STORE = 'continuation-1:'
 const empty = (generation = 0): CodebookContinuation => ({ generation, stories: {}, orders: {}, feeds: {}, pending: {}, nextFactory: 0, nextOrder: 0, checkedAt: 0 })
@@ -51,13 +51,17 @@ export async function hasContinuation($: EngineInterface): Promise<boolean> {
 }
 
 /** A timer may read milestone attention only for the factory of an order owned by this session. */
-export async function ownsAttentionRead($: EngineInterface, input: unknown): Promise<boolean> {
-  if (!input || typeof input !== 'object' || Object.keys(input).length !== 1 || !('factory' in input)) return false
-  const factory = input.factory
-  if (typeof factory !== 'string' || !factory) return false
+export async function ownsMilestoneRead($: EngineInterface, tool: string, input: unknown): Promise<boolean> {
+  if (!input || typeof input !== 'object' || !('factory' in input) || typeof input.factory !== 'string') return false
+  const keys = Object.keys(input).sort().join(',')
+  if (tool === 'needs_you' ? keys !== 'factory' : tool !== 'proof_result' || keys !== 'factory,proof,story') return false
   const saved = await $.store.get(CONTINUATION_STORE + await $.session.id()) as {at?: number; value?: CodebookContinuation} | undefined
   if (typeof saved?.at !== 'number' || saved.at <= await $.clock.now() - MAX_CHECKPOINT_AGE_MS) return false
-  return Object.values(saved.value?.orders ?? {}).some(order => order.factory === factory)
+  const orders = Object.values(saved.value?.orders ?? {}).filter(order => order.factory === input.factory)
+  if (tool === 'needs_you') return orders.length > 0
+  if (!('proof' in input) || !('story' in input)) return false
+  return orders.some(order => Object.values(order.milestones?.recovery ?? {}).some(({target}) =>
+    target.kind === 'proof' && target.proof === input.proof && target.member_story === input.story))
 }
 
 export async function restoreContinuation($: EngineInterface, generation: number): Promise<void> {
@@ -144,7 +148,11 @@ export async function workflowStatus($: EngineInterface): Promise<string> {
   const delivery = current.deliveryFailures ? ` Last prompt submission failed. Retry after ${new Date(current.retryAt ?? 0).toISOString()}.` : ''
   const questions = Object.values(current.orders).flatMap(order => Object.values(order.milestones?.questions ?? {})).join('\n')
   const watching = watch ? `Watching workflow ${watch.name} (${watch.factory}, ${watch.workflow}) for local manager work. Last poll: ${checked}. Pending notices: ${Object.keys(current.pending).length}.${readError}${delivery}` : ''
-  return [watching, questions].filter(Boolean).join('\n')
+  const recovery = Object.values(current.orders).flatMap(order => [
+    ...Object.values(order.milestones?.prerequisites ?? {}),
+    ...Object.values(order.milestones?.recovery ?? {}).filter(r => r.state === 'pending' && r.current !== false).map(r => r.note),
+  ]).join('\n')
+  return [watching, questions, recovery].filter(Boolean).join('\n')
 }
 
 export async function stopContinuation($: EngineInterface): Promise<void> {
@@ -232,9 +240,10 @@ function milestoneQuestion(factory: string, reference: string, id: string, check
 
 type LocalRun = {story: string; run: number; claimed: boolean; where: string; factory?: {factory?: string}; workflow?: {workflow?: string}}
 
-async function readyRepairs($: EngineInterface, view: Order, factory: string, check: number, workflow?: string) {
+async function readyRepairs($: EngineInterface, view: Order, factory: string, check: number, workflow?: string, target?: Recovery) {
   const fixes = view.milestones?.find(m => m.check?.latest?.id === check)?.fixes ?? []
-  const stories = new Set(fixes.filter(f => f.check_id === check).map(f => f.card?.public_id).filter(Boolean))
+  const stories = new Set(fixes.filter(f => f.check_id === check
+    && (!target || (target.kind === 'repair' && f.item_id === target.item && f.card?.public_id === target.story))).map(f => f.card?.public_id).filter(Boolean))
   if (!stories.size) return []
   const work = await call<{work?: LocalRun[]}>($, 'list_my_work', {factory})
   if (!work.ok || !Array.isArray(work.data?.work)) return []
@@ -242,19 +251,47 @@ async function readyRepairs($: EngineInterface, view: Order, factory: string, ch
     && (!workflow || r.workflow?.workflow === workflow) && stories.has(r.story) && Number.isSafeInteger(r.run) && r.run > 0)
 }
 
+type RunRecovery = (target: Extract<Recovery, {kind: 'proof'}>, authorized: () => Promise<boolean>) => Promise<{isRun: boolean; text: string}>
+
+async function reconcileRecovery($: EngineInterface, generation: number, factory: string, id: string, view: Order) {
+  const prior = (await read($, state)).orders[id]?.milestones?.recovery ?? {}
+  for (const [key, record] of Object.entries(prior)) {
+    if (record.state !== 'pending') continue
+    const target = record.target
+    let outcome: 'completed' | 'failed' | undefined
+    if (target.kind === 'proof') {
+      const got = await call<ProofResult>($, 'proof_result', {factory, story:target.member_story, proof:target.proof})
+      if (got.ok) outcome = proofOutcome(target, got.data)
+    } else {
+      const fix = view.milestones?.flatMap(m => m.fixes ?? []).find(f => f.check_id === record.check && f.item_id === target.item && f.card?.public_id === target.story)
+      if (fix?.state === 'finished') outcome = 'completed'
+    }
+    if (outcome) await update($, state, current => {
+      if (current.generation !== generation || !current.orders[id]?.milestones?.recovery?.[key]) return current
+      const next = structuredClone(current)
+      next.orders[id]!.milestones!.recovery![key]!.state = outcome!
+      return next
+    })
+  }
+}
+
 // Persist intent before either transport accepts a question or operation. An ambiguous reply stays pending.
-async function routeMilestones($: EngineInterface, generation: number, factory: string, id: string, view: Order) {
+async function routeMilestones($: EngineInterface, generation: number, factory: string, id: string, view: Order, runProof: RunRecovery) {
   if (view.order !== id || !Array.isArray(view.milestones)) return
   const owned = (await read($, state)).orders[id]
   if (!owned || owned.factory !== factory || owned.reference !== view.work_order?.reference) return
   if (!owned.milestones && !view.milestones.some(m => m.check?.route || m.check?.needs_person)) return
   const result = await call<Needs>($, 'needs_you', {factory})
   if (!result.ok || !Array.isArray(result.data?.for_person) || !Array.isArray(result.data.for_manager)) return
+  await reconcileRecovery($, generation, factory, id, view)
   const actions = decisions(view, result.data, factory, id)
   await update($, state, current => {
     if (current.generation !== generation || !current.orders[id]) return current
     const next = structuredClone(current), journal = next.orders[id]!.milestones ??= blankJournal()
     recoverRetries(view, journal)
+    for (const [key, r] of Object.entries(journal.recovery ?? {})) r.current = actions.has(key)
+    journal.prerequisites = Object.fromEntries([...actions].filter(([, a]) => a.route.action === 'hold')
+      .map(([key, a]) => [key, owned.reference + ', check #' + a.route.check + ': ' + a.route.reason]))
     for (const key of Object.keys(journal.questions)) if (!actions.has(key)) delete journal.questions[key]
     for (const [key, {route}] of actions) {
       if (route.action === 'review' && journal.seen.includes(key))
@@ -264,10 +301,12 @@ async function routeMilestones($: EngineInterface, generation: number, factory: 
   })
   for (const [key, {route, policy}] of actions) {
     const before = await read($, state), journal = before.orders[id]?.milestones
-    if (before.generation !== generation || !journal || journal.seen.includes(key) || journal.retries[key]) continue
+    if (before.generation !== generation || !journal || journal.seen.includes(key) || journal.retries[key] || route.action === 'hold') continue
+    const target = route.recovery
+    if (target?.kind === 'proof' && journal.recovery?.[key]) continue
     let repairs: LocalRun[] = []
-    if (route.action === 'repair') {
-      repairs = (await readyRepairs($, view, factory, route.check, before.manager?.workflow))
+    if (route.action === 'repair' && target?.kind !== 'proof') {
+      repairs = (await readyRepairs($, view, factory, route.check, before.manager?.workflow, target))
         .filter(r => !journal.seen.includes(key + ':' + r.run))
       if (!repairs.length) continue
     }
@@ -277,8 +316,8 @@ async function routeMilestones($: EngineInterface, generation: number, factory: 
     const attention = await call<Needs>($, 'needs_you', {factory})
     const fresh = attention.ok && decisions(order.data, attention.data, factory, id).get(key)
     if (!fresh || fresh.route.reason !== route.reason || fresh.policy !== policy) continue
-    if (route.action === 'repair') {
-      const available = await readyRepairs($, order.data, factory, route.check, before.manager?.workflow)
+    if (route.action === 'repair' && target?.kind !== 'proof') {
+      const available = await readyRepairs($, order.data, factory, route.check, before.manager?.workflow, target)
       repairs = repairs.filter(r => available.some(a => a.run === r.run && a.story === r.story))
       if (!repairs.length) continue
     }
@@ -289,7 +328,16 @@ async function routeMilestones($: EngineInterface, generation: number, factory: 
       if (current.generation !== generation || !ledger || ledger.seen.includes(key) || ledger.retries[key]) return current
       const next = structuredClone(current), entry = next.orders[id]!.milestones!
       if (route.action === 'review') { entry.seen.push(key); entry.questions[key] = question }
-      else if (route.action === 'repair') entry.seen.push(...repairs.map(r => key + ':' + r.run))
+      else if (route.action === 'repair') {
+        if (target) {
+          entry.recovery ??= {}
+          if (target.kind === 'proof' && entry.recovery[key]) return current
+          entry.recovery[key] = {target, check:route.check, state:'pending', run:repairs[0]?.run,
+            note: target.kind === 'proof' ? owned.reference + ' is waiting for proof ' + target.proof + ' on its ' + target.executor + ' executor.'
+              : owned.reference + ' is following repair ' + target.story + '.'}
+        }
+        entry.seen.push(...repairs.map(r => key + ':' + r.run))
+      }
       else entry.retries[key] = {requested: route.check, state: 'pending', reason: route.reason}
       reserved = true
       return next
@@ -300,6 +348,28 @@ async function routeMilestones($: EngineInterface, generation: number, factory: 
     if (route.action === 'review') {
       try { await $.prompt.submit({text: 'CodeBook: Ask the operator once, in their own session: ' + question +
         ' Continue independent work. An answer applies only to this exact attempt; recheck its current route before recording any decision.'}) } catch { /* The exact question remains visible in /factory status. */ }
+    } else if (target?.kind === 'proof') {
+      if (target.executor === 'here') {
+        // The native claim is exclusive across sessions. Keep other orders moving while the test runs.
+        const authorized = async () => {
+          if (!await continuationCurrent($, generation)) return false
+          const viewNow = await call<Order>($, 'work_orders', {factory, order:id})
+          if (!viewNow.ok || viewNow.data.work_order?.reference !== owned.reference) return false
+          const needsNow = await call<Needs>($, 'needs_you', {factory})
+          const now = needsNow.ok && decisions(viewNow.data, needsNow.data, factory, id).get(key)
+          return !!now && now.policy === policy && now.route.reason === route.reason && await continuationCurrent($, generation)
+        }
+        void runProof(target, authorized).catch(() => ({isRun:false, text:'The native proof result is pending.'})).then(async result => {
+          if (result.isRun) return
+          await update($, state, current => {
+            if (current.generation !== generation || current.orders[id]?.milestones?.recovery?.[key]?.state !== 'pending') return current
+            const next = structuredClone(current)
+            next.orders[id]!.milestones!.recovery![key]!.note = result.text
+            return next
+          })
+          await save($, generation)
+        })
+      }
     } else if (route.action === 'repair') {
       const runs = repairs.map(r => r.story + ' (run ' + r.run + ')').join(', ')
       try { await $.prompt.submit({text: `CodeBook: ${owned.reference}, check #${route.check} has existing repair work: ${runs}. Recheck the local assignment, claim only an eligible run, and continue independent work. This repair needs no milestone decision.`}) } catch { /* Normal readiness remains available. */ }
@@ -379,7 +449,7 @@ async function pollBackgroundStory($: EngineInterface, before: CodebookContinuat
 }
 
 /** One page and one owned-order snapshot per quiet interval, round robin. No catch-up loop or model on empty reads. */
-export async function pollContinuation($: EngineInterface, monitored: Set<string>): Promise<ReadFailure | void> {
+export async function pollContinuation($: EngineInterface, monitored: Set<string>, runProof: RunRecovery): Promise<ReadFailure | void> {
   if (polling) return
   polling = true
   try {
@@ -427,7 +497,7 @@ export async function pollContinuation($: EngineInterface, monitored: Set<string
       const got = await call<Order>($, 'work_orders', { factory: owned.factory, order: id })
       if (!got.ok) failure = got
       if (!await continuationCurrent($, generation)) return
-      if (got.ok && got.data?.work_order?.reference === owned.reference) await routeMilestones($, generation, owned.factory, id, got.data)
+      if (got.ok && got.data?.work_order?.reference === owned.reference) await routeMilestones($, generation, owned.factory, id, got.data, runProof)
       if (got.ok && got.data?.work_order?.reference === owned.reference && Array.isArray(got.data.milestones)) await update($, state, value => {
         if (value.generation !== generation || !value.orders[id]) return value
         const next = structuredClone(value), order = next.orders[id]!

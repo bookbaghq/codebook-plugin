@@ -590,12 +590,15 @@ export function summaryOf(repository: string, sandbox: Sandbox, outcomes: StepOu
  * CodeBook last told this session; `hosts` the person's own list of allowed hosts (the `proof_hosts` option). → the
  * summary, or why nothing ran.
  */
-export async function runProof($: EngineInterface, { proof = null, known = [], hosts = null, hint = null }: { proof?: number | null; known?: CodebookCheckout[]; hosts?: unknown; hint?: ProofHint | null }): Promise<{ isRun: boolean; text: string }> {
+export async function runProof($: EngineInterface, { proof = null, known = [], hosts = null, hint = null, expected, authorized }: { proof?: number | null; expected?: { repository: string; commit: string }; authorized?: () => Promise<boolean>; known?: CodebookCheckout[]; hosts?: unknown; hint?: ProofHint | null }): Promise<{ isRun: boolean; text: string }> {
   const peeked = await waitingProofs($)
   if (!peeked.ok) return { isRun: false, text: peeked.message }
   const target = proof === null ? peeked.waiting[0] : peeked.waiting.find(one => one.proof === proof)
   if (!target) return { isRun: false, text: proof === null ? 'No proof run is waiting for this computer.' : `Proof run ${proof} is not waiting for this computer (it may already have been run, or it was asked for someone else's).` }
 
+  if (expected && (target.repository !== expected.repository || target.commit !== expected.commit || target.commands.length !== 1 || target.commands[0] !== 'test')) {
+    return {isRun:false, text:`Proof ${proof} is waiting for a matching own-test, repository and exact commit.`}
+  }
   const delegated = target.delegated_focused_version !== undefined
   const delegatedSandbox = delegated ? await findSandbox($) : null
   if (delegated && (target.delegated_focused_version !== 1 || !delegatedSandbox?.bin || !FULL_COMMIT.test(target.commit ?? ''))) {
@@ -614,6 +617,7 @@ export async function runProof($: EngineInterface, { proof = null, known = [], h
 
   // The commit that is checked out, whether anything is uncommitted, and the default branch as this git knows it.
   if (delegated && delegatedSandbox) {
+    if (authorized && !await authorized()) return {isRun:false, text:"The recovery route changed before the proof claim."}
     const claimed = await call<ProofWork>($, 'claim_proof', {proof:target.proof, delegated_focused_version:1})
     if (!claimed.ok) return {isRun:false, text:claimed.message}
     const work = claimed.data
@@ -628,11 +632,19 @@ export async function runProof($: EngineInterface, { proof = null, known = [], h
   await quiet($, ['git', '-C', dir, 'fetch', '--quiet', 'origin', branch], undefined, 20000)
   const base = (await quiet($, ['git', '-C', dir, 'rev-parse', '--verify', '--quiet', `refs/remotes/origin/${branch}`])).stdout.trim()
 
+  if (expected && (head !== expected.commit || isDirty || (authorized && !await authorized()))) {
+    return {isRun:false, text:"The recovery proof requires a clean checkout at its authorized commit and a current route."}
+  }
   const claimed = await call<ProofWork>($, 'claim_proof', { proof: target.proof, ...(target.case_report_version === 1 ? {case_report_version:1} : {}), ...(/^[0-9a-f]{40,64}$/.test(base) ? { base: { ref: branch, commit: base } } : {}) })
   if (!claimed.ok) return { isRun: false, text: claimed.message }
   const work = claimed.data
   if (work.proof === null || !work.token || !work.report_url || !work.steps) return { isRun: false, text: 'The proof run was taken by another session first.' }
 
+  if (expected && (work.proof !== target.proof || work.expected_commit !== expected.commit
+      || work.repository?.full_name !== expected.repository || !work.steps.some(s => !s.baseline && s.name === 'test')
+      || work.steps.some(s => !s.baseline && s.name !== 'test'))) {
+    return {isRun:false, text:"The proof claim no longer matches the recovery target."}
+  }
   if (work.steps.some(step => step.delegated_focused !== undefined && step.delegated_focused !== false)) {
     return runDelegated($, target, work, dir, {kind:'none', bin:null})
   }

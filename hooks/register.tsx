@@ -10,7 +10,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { CodebookActive, CodebookCheckout, CodebookClaim, CodebookLink, CodebookMode, CodebookStory, CodebookWatch } from '../types'
 import { call, words } from './connector'
 import { proposalGuidance } from '../skills/factory-manager/scripts/proposal-guidance.mjs'
-import { continuationCurrent, continuationGeneration, flushContinuation, hasContinuation, manageUsage, ownsAttentionRead, pollContinuation, restoreContinuation, watchContinuation, watchWorkflow, workflowStatus } from './continuation'
+import { continuationCurrent, continuationGeneration, flushContinuation, hasContinuation, manageUsage, ownsMilestoneRead, pollContinuation, restoreContinuation, watchContinuation, watchWorkflow, workflowStatus } from './continuation'
 import { carriesKey, claimOf, defaultBranchesOf, expiresOf, leaseOf, liveClaims, mayReach, ownedOf, readCommand } from './guard'
 import type { Target } from './guard'
 import { checkOne, checkShellWords, folderOf, ownPushOf, pushedFrom, reaches, shellState } from './resolve'
@@ -66,7 +66,7 @@ const QUIET_POLL_MS = 30000
 let lastPoll = 0
 let isPolling = false
 
-async function tick($: EngineInterface): Promise<void> {
+async function tick($: EngineInterface, proofHosts: unknown): Promise<void> {
   flushAsk($)
   if (isPolling) return
   const a = await read($, active)
@@ -85,7 +85,8 @@ async function tick($: EngineInterface): Promise<void> {
     await refreshWatched($)
     const monitored = new Set(others.map(one => one.story))
     if (a) monitored.add(a.story)
-    const observation = await pollContinuation($, monitored)
+    const observation = await pollContinuation($, monitored, async (target, authorized) =>
+      runProof($, {proof: target.proof, expected:target, authorized, known: await read($, checkouts), hosts: proofHosts}))
     if (observation) await setLink($, observation)
   } finally {
     isPolling = false
@@ -390,7 +391,8 @@ export const register: Register = (on, options) => {
   // classifier judges the model's requests and has no verdict for a timer's read, so these are allowed here. Nothing
   // else is: writes are requests the person sends, and the model's calls keep the person's permission settings.
   on('tool.check', async ($, e, next) => {
-    if (next.origin.plugin === $.plugin.name && e.tool === OWN_TOOLS + 'needs_you' && await ownsAttentionRead($, e.input)) {
+    if (next.origin.plugin === $.plugin.name && [OWN_TOOLS + 'needs_you', OWN_TOOLS + 'proof_result'].includes(e.tool)
+      && await ownsMilestoneRead($, e.tool.slice(OWN_TOOLS.length), e.input)) {
       return { decision: 'allow', reason: 'The CodeBook manager reading milestone attention for an order owned by this session.' }
     }
     return next.origin.plugin === $.plugin.name && OWN_READS.has(e.tool)
@@ -625,7 +627,7 @@ export const register: Register = (on, options) => {
     if (followed) await watchContinuation($, followed.story, followed.reference, followed.factory, false, generation)
     for (const one of await read($, watched)) await watchContinuation($, one.story, one.reference, '', false, generation)
     $.clock.every(1000, () => {
-      void tick($)
+      void tick($, proofHosts)
     })
     return next(e)
   })
