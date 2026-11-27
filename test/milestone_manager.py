@@ -8,71 +8,79 @@ ROOT = Path(__file__).resolve().parents[1]
 CASES = json.loads((ROOT/"test/fixtures/milestone-check-routes.mjs").read_text().split("\n", 1)[1])
 
 
-def exercise():
-    api = runpy.run_path(str(ROOT/"scripts/codex-manager.py"))
-    factory, workflow = "fixtureFactory", "wf1"
-    class Host:
-        approval_threads = set()
-        def __init__(self, order, route):
-            self.order, self.route = order, route
-            self.calls, self.effects, self.turns = [], [], []
-            self.pending_work = self.lost = False
-            self.attention = route
-            self.history, self.legacy = [], []
-            self.policy = "ask"
-            self.change_after_read = False
+API = runpy.run_path(str(ROOT/"scripts/codex-manager.py"))
+FACTORY, WORKFLOW = "fixtureFactory", "wf1"
 
-        def tool(self, name, **args):
-            self.calls.append(name)
-            scope = {"factory": {"factory": factory}, "workflow": {"workflow": workflow, "name": "Ship"}}
-            if name == "factory_events":
-                return {"events": [], "last_event": len(self.calls)}
-            if name == "manager_brief":
-                return {**scope, "you": {"may_run_here": True}, "settings": {"decision_mode": "ask"}}
-            if name == "factory_operations":
-                return {"snapshot": {"control": {"paused": False}}}
-            if name == "list_my_work":
-                return {"work": [{**scope, "story": "ready", "run": 123, "where": "here", "claimed": False}] if self.pending_work else []}
-            if name == "story_status":
-                return {**scope, "story": {"story": "ready"}, "run_location": "here", "run": {"run": 123},
-                        "station": {"name": "QA", "worker": {"type": "agent", "name": "Jade"}},
-                        "waiting": {"on": "runner", "run": 123, "on_you": True, "claimed": False}}
-            if name == "work_orders":
-                assert args == {"factory": factory, "order": self.order}
-                r = self.route
-                check = {"route": r, "needs_person": bool(self.legacy or r and r["owner"] == "person"),
-                         "check_cannot_run": self.policy, "latest": {"id": r["check"] if r else 90, "attempt": 2}, "history": self.history}
-                return {"order": self.order, "work_order": {"status": "open"},
-                        "milestones": [{"milestone": 1, "check": check}]}
-            if name == "needs_you":
-                assert args == {"factory": factory}
-                r = self.attention
-                items = {"for_person": list(self.legacy), "for_manager": []}
-                if r and r["owner"] != "none":
-                    items["for_"+r["owner"]].append({"kind": "milestone_check", "route": r, "on_you": r["owner"] == "person"})
-                if self.change_after_read:
-                    self.change_after_read = False
-                    self.route = {**self.route, "owner": "none", "action": "hold"}
-                    self.policy = "hold"
-                return items
-            assert name == "decide_milestone_check"
+class Host:
+    approval_threads = set()
+    def __init__(self, order, route):
+        self.order, self.route = order, route
+        self.calls, self.effects, self.turns = [], [], []
+        self.pending_work = self.lost = False
+        self.attention = route
+        self.history, self.legacy = [], []
+        self.policy = "ask"
+        self.change_after_read = False
+        self.fixes, self.receipts = [], {}
+        self.ready_story = "ready"
+
+    def tool(self, name, **args):
+        self.calls.append(name)
+        scope = {"factory": {"factory": FACTORY}, "workflow": {"workflow": WORKFLOW, "name": "Ship"}}
+        if name == "factory_events":
+            return {"events": [], "last_event": len(self.calls)}
+        if name == "manager_brief":
+            return {**scope, "you": {"may_run_here": True}, "settings": {"decision_mode": "ask"}}
+        if name == "factory_operations":
+            return {"snapshot": {"control": {"paused": False}}}
+        if name == "list_my_work":
+            return {"work": [{**scope, "story": self.ready_story, "run": 123, "where": "here", "claimed": False}] if self.pending_work else []}
+        if name == "story_status":
+            return {**scope, "story": {"story": self.ready_story}, "run_location": "here", "run": {"run": 123},
+                    "station": {"name": "QA", "worker": {"type": "agent", "name": "Jade"}},
+                    "waiting": {"on": "runner", "run": 123, "on_you": True, "claimed": False}}
+        if name == "work_orders":
+            assert args == {"factory": FACTORY, "order": self.order}
             r = self.route
-            assert args == {"decision": "retry", "authority": "manager", "factory": factory, "order": self.order,
-                            "check": r["check"], "expected_policy": self.policy}
-            assert json.loads((self.folder/"status.json").read_text())["milestone_orders"][self.order]["retries"]
-            self.effects.append(args)
-            if self.lost:
-                raise api["Hold"]("Lost reply")
-            return {**args, "requested_check": r["check"], "check": {"id": 99}, "started": {"check_id": 99}}
+            check = {"route": r, "needs_person": bool(self.legacy or r and r["owner"] == "person"),
+                     "check_cannot_run": self.policy, "latest": {"id": r["check"] if r else 90, "attempt": 2}, "history": self.history}
+            return {"order": self.order, "work_order": {"status": "open"},
+                    "milestones": [{"milestone": 1, "check": check, "fixes": self.fixes}]}
+        if name == "needs_you":
+            assert args == {"factory": FACTORY}
+            r = self.attention
+            items = {"for_person": list(self.legacy), "for_manager": []}
+            if r and r["owner"] != "none":
+                items["for_"+r["owner"]].append({"kind": "milestone_check", "route": r, "on_you": r["owner"] == "person"})
+            if self.change_after_read:
+                self.change_after_read = False
+                self.route = {**self.route, "owner": "none", "action": "hold"}
+                self.policy = "hold"
+            return items
+        if name == "proof_result":
+            assert args["factory"] == FACTORY
+            return self.receipts.get((args["story"], args["proof"]), {"proof":args["proof"], "finished":False})
+        assert name == "decide_milestone_check"
+        r = self.route
+        assert args == {"decision": "retry", "authority": "manager", "factory": FACTORY, "order": self.order,
+                        "check": r["check"], "expected_policy": self.policy}
+        assert json.loads((self.folder/"status.json").read_text())["milestone_orders"][self.order]["retries"]
+        self.effects.append(args)
+        if self.lost:
+            raise API["Hold"]("Lost reply")
+        return {**args, "requested_check": r["check"], "check": {"id": 99}, "started": {"check_id": 99}}
 
-        def call(self, name, params):
-            if name == "thread/start":
-                return {"thread": {"id": "independent"}}
-            assert name == "turn/start"
-            self.turns.append(params["input"])
-            return {"turn": {"id": "one"}}
+    def call(self, name, params):
+        if name == "thread/start":
+            return {"thread": {"id": "independent"}}
+        assert name == "turn/start"
+        self.turns.append(params["input"])
+        return {"turn": {"id": "one"}}
 
-    for case in CASES:
+
+def exercise():
+    factory, workflow, api = FACTORY, WORKFLOW, API
+    for case in (c for c in CASES if c["id"].startswith("F")):
         route, label = case["route"], case["id"]
         order = route["order"] if route else "wo39"
         host = Host(order, route)
@@ -135,3 +143,91 @@ def exercise():
 
 if __name__ == "__main__":
     exercise()
+
+
+def manager_recovery():
+    from contextlib import contextmanager
+    from copy import deepcopy
+
+    routes = {case["id"]: case["route"] for case in CASES}
+
+    @contextmanager
+    def owned(route):
+        order = route["order"]
+        with tempfile.TemporaryDirectory() as scratch:
+            folder = Path(scratch)
+            config = dict(running=True, cwd=scratch, factory=FACTORY, workflow=WORKFLOW, manage_ready=True, stories=[])
+            API["save"](folder/"control.json", config)
+            API["save"](folder/"status.json", {"cursor":0, "notices":{"mine:"+order+":1":{"confirmation":"confirmed"}}})
+            host = Host(order, deepcopy(route))
+            host.folder, host.policy = folder, "manager_recovery"
+            restart = lambda: API["Manager"](folder, config, host)
+            yield host, restart(), restart
+
+    for label in ("R1", "R3"):
+        route = routes[label]
+        with owned(route) as (host, manager, restart):
+            target = route["recovery"]
+            manager.tick()
+            ledger = manager.state["milestone_orders"][host.order]
+            record = next(iter(ledger["recovery"].values()))
+            assert record["target"] == target and record["state"] == "pending" and not ledger["questions"]
+            assert ("/factory prove 701" if label == "R1" else "registered executor proof 702") in record["note"]
+            host.route = host.attention = {**route, "action":"wait", "owner":"none"}
+            host.route.pop("recovery")
+            host.receipts[target["member_story"],target["proof"]] = {"proof":target["proof"], "finished":True,
+                "commands":[{"run":target["proof"],"name":"test","status":"passed","verified":True,"commit":"b"*40}]}
+            second = restart()
+            second.tick()
+            record = next(iter(second.state["milestone_orders"][host.order]["recovery"].values()))
+            assert record["state"] == "pending" and not record["current"]
+            host.receipts[target["member_story"],target["proof"]]["commands"][0]["commit"] = target["commit"]
+            second.tick()
+            assert record["state"] == "completed" and not host.effects and "claim_proof" not in host.calls
+
+    with owned(routes["R2"]) as (host, manager, _):
+        target = host.route["recovery"]
+        host.fixes = [{"check_id":host.route["check"], "item_id":target["item"], "card":{"public_id":target["story"]}}]
+        host.pending_work = True
+        host.ready_story = target["story"]
+        manager.tick()
+        assert len(host.turns) == 1
+        item = manager.state["active"]["item"]
+        assert item["story"] == target["story"] and item["milestone_recovery"]["route"]["recovery"] == target
+        record = next(iter(manager.state["milestone_orders"][host.order]["recovery"].values()))
+        assert record["run"] == 123 and record["target"] == target
+
+    with owned(routes["F6"]) as (host, manager, restart):
+        host.change_after_read = True
+        manager.tick()
+        assert not host.effects
+        host.policy, host.route, host.attention = "manager_recovery", routes["F6"], routes["F6"]
+        host.lost = True
+        manager.tick()
+        assert len(host.effects) == 1 and host.effects[0]["expected_policy"] == "manager_recovery"
+        manager = restart()
+        manager.tick()
+        assert len(host.effects) == 1
+        host.history = [{"id":44,"attempt":1,"status":"fixed","decision":"manager_retry","decided_at":"2026-11-27"}]
+        host.route = host.attention = {**host.route, "check":99, "action":"wait", "owner":"none"}
+        manager.tick()
+        assert next(iter(manager.state["milestone_orders"][host.order]["retries"].values()))["check"] == 99
+
+    with owned(routes["R2"]) as (host, manager, _):
+        host.attention = {**host.route, "recovery":{**host.route["recovery"],"commit":"b"*40}}
+        manager.tick()
+        ledger = manager.state["milestone_orders"][host.order]
+        assert not ledger["recovery"] and not host.effects
+        host.route = host.attention = {**host.route, "action":"hold", "owner":"none", "reason":"Connect a local executor."}
+        host.route.pop("recovery")
+        host.pending_work = True
+        manager.tick()
+        assert list(ledger["prerequisites"].values()) == ["Connect a local executor."] and len(host.turns) == 1
+        assert not ledger["questions"]
+
+    for policy in ("future_policy","ask","hold","pass_on_story_tests"):
+        with owned(routes["R1"]) as (host, manager, _):
+            host.policy = policy
+            manager.tick()
+            ledger = manager.state["milestone_orders"][host.order]
+            assert not ledger["recovery"] and not host.effects and not ledger["questions"]

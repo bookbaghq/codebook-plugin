@@ -33,6 +33,11 @@ export function orderReport(report: WorkOrderReport): string {
       const label = {wait: 'Waiting for proof', repair: 'Repairs in progress', hold: 'Held', review: 'Owner review',
         retry: 'Manager retry available', settled: m.state === 'ruled' ? 'Factory rule applied' : m.state === 'waived' ? 'Passed by the owner' : 'Check settled'}[route.action]
       lines.push(`  ${label} (check #${route.check}). ${route.reason}`)
+      const source = route.recovery
+      if (m.check?.check_cannot_run === 'manager_recovery' && route.action === 'repair' && source) {
+        if (source.kind === 'proof') lines.push(`  Member ${source.member_story}, proof ${source.proof} (${source.executor}), ${source.repository} at ${source.commit}.`)
+        if (source.kind === 'repair') lines.push(`  Member ${source.member_story}, repair ${source.story}, ${source.repository} at ${source.commit}.`)
+      }
     } else if (m.check?.route == null && m.check?.needs_person) lines.push('  A person needs to decide according to the recorded check status. See current requests in CodeBook.')
     const steps = attempt?.steps ?? []
     // Surface failures first and identify omitted evidence explicitly on very large plans.

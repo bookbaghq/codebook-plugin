@@ -888,41 +888,78 @@ class Manager:
         self.immediate = True
         self.record("Received " + entry["confirmation"] + " for " + item["key"] + ".")
 
+    def milestone_snapshot(self, order):
+        factory = self.config["factory"]
+        view = self.host.tool("work_orders", factory=factory, order=order)
+        if view.get("order") != order or not isinstance(view.get("milestones"), list):
+            raise Hold("The owned work order could not be reconciled.")
+        needs = self.host.tool("needs_you", factory=factory)
+        if not all(isinstance(needs.get(k), list) for k in ("for_person", "for_manager")):
+            raise Hold("Milestone attention is unavailable.")
+        return view, milestone_routes.decisions(view, needs, factory, order)
+
     def reconcile_milestones(self, may_work):
         orders = self.state["milestone_orders"]
+        candidates = []
         if not orders:
-            return
+            return candidates
         factory = self.config["factory"]
         order = min(orders, key=lambda o: (o <= self.state.get("last_milestone_order", ""), o))
         self.state["last_milestone_order"] = order
         ledger = orders[order]
-        def snapshot():
-            view = self.host.tool("work_orders", factory=factory, order=order)
-            if view.get("order") != order or not isinstance(view.get("milestones"), list):
-                raise Hold("The owned work order could not be reconciled.")
-            needs = self.host.tool("needs_you", factory=factory)
-            if not all(isinstance(needs.get(k), list) for k in ("for_person", "for_manager")):
-                raise Hold("Milestone attention is unavailable.")
-            return view, milestone_routes.decisions(view, needs, factory, order)
         try:
-            view, actions = snapshot()
+            view, actions = self.milestone_snapshot(order)
             milestone_routes.recover(view, ledger)
+            targets = ledger.setdefault("recovery", {})
+            for key, record in targets.items():
+                record["current"] = key in actions
+                if record["state"] != "pending":
+                    continue
+                target = record["target"]
+                if target["kind"] == "proof":
+                    try:
+                        receipt = self.host.tool("proof_result", factory=factory, story=target["member_story"], proof=target["proof"])
+                    except (Hold, OSError):
+                        continue
+                    outcome = milestone_routes.proof_outcome(target, receipt)
+                else:
+                    fix = milestone_routes.fix_for(view, record["check"], target)
+                    outcome = "completed" if fix and fix.get("state") == "finished" else None
+                if outcome:
+                    record["state"] = outcome
+            ledger["prerequisites"] = {key: route["reason"] for key, (route, _) in actions.items() if route["action"] == "hold"}
             ledger.pop("read_pending", None)
             ledger["questions"] = {k: v for k, v in ledger["questions"].items() if k in actions}
             for key, (route, policy) in actions.items():
                 question = f"{factory} / {order}, check #{route['check']}: {route['reason']} What would you like to do with this check?"
                 if key in ledger["seen"] and route["action"] == "review":
                     ledger["questions"][key] = question
-                if key in ledger["seen"] or key in ledger["retries"]:
+                if route["action"] == "hold" or key in ledger["seen"] or key in ledger["retries"]:
                     continue
-                if route["action"] == "retry" and not (may_work and self.config["manage_ready"]):
+                if route["owner"] == "manager" and not (may_work and self.config["manage_ready"]):
                     continue
                 with locked(self.folder / "control.lock"):
                     if read(self.folder / "control.json", {}) != self.config:
-                        return
-                    if snapshot()[1].get(key) != (route, policy):
+                        return candidates
+                    if self.milestone_snapshot(order)[1].get(key) != (route, policy):
                         continue
                     check = route["check"]
+                    if route["action"] == "repair":
+                        target = route["recovery"]
+                        if target["kind"] == "proof":
+                            if key not in targets:
+                                note = (f"Run /factory prove {target['proof']} with the signed-in local Claude proof plugin."
+                                        if target["executor"] == "here" else f"Waiting for registered executor proof {target['proof']}.")
+                                targets[key] = dict(target=target, check=check, state="pending", current=True, note=note)
+                                self.record(note)
+                        elif milestone_routes.fix_for(view, check, target):
+                            available, _ = eligible(self.host, self.config, self.state["adopted"])
+                            for candidate in available:
+                                if candidate["run"] and candidate["story"] == target["story"]:
+                                    candidate["milestone_recovery"] = {"order": order, "key": key, "route": route, "policy": policy}
+                                    candidates.append(candidate)
+                                    targets[key] = dict(target=target, check=check, state="pending", current=True, run=candidate["run"])
+                        continue
                     if route["action"] == "review":
                         ledger["seen"].append(key)
                         ledger["questions"][key] = question
@@ -939,6 +976,7 @@ class Manager:
         except (Hold, OSError):
             ledger["read_pending"] = True
         self.state["interaction_required"] = bool(self.holds or any(o["questions"] for o in orders.values()))
+        return candidates
 
     def development_ready(self, item, base):
         route = item.get("route")
@@ -1121,7 +1159,9 @@ class Manager:
         self.last_scan = time.monotonic()
         access = {}
         ready, reason = eligible(self.host, self.config, self.state["adopted"], statuses=statuses, access=access)
-        self.reconcile_milestones(access.get("may_work", False))
+        recovery = self.reconcile_milestones(access.get("may_work", False))
+        selected = {item["key"] for item in recovery}
+        ready = recovery + [item for item in ready if item["key"] not in selected]
         for item in ready:
             expired_at = self.state["lease_events"].get(item["key"])
             if item["run"] and expired_at:
@@ -1161,6 +1201,16 @@ class Manager:
                 if not item["run"]:
                     self.confirm(item, entry)
                     return
+                recovery = item.get("milestone_recovery")
+                if recovery:
+                    view, actions = self.milestone_snapshot(recovery["order"])
+                    route = recovery["route"]
+                    active = actions.get(recovery["key"]) == (route, recovery["policy"])
+                    if not active or not milestone_routes.fix_for(view, route["check"], route["recovery"]):
+                        continue
+                    eligible_now, _ = eligible(self.host, self.config, self.state["adopted"], only=item)
+                    if not any(row["run"] == item["run"] for row in eligible_now):
+                        continue
                 if item.get("development") and not self.development_ready(item, held_run):
                     reason = f"Development hold {held_run}: " + self.capability_holds[held_run]["reason"]
                     continue

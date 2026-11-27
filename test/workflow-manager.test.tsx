@@ -255,7 +255,7 @@ test('a moving page, a held followed card and a newly claimed local run do not w
 })
 
 import milestoneCases from './fixtures/milestone-check-routes.mjs'
-import type { Route } from '../hooks/milestone'
+import type { ProofResult, Route } from '../hooks/milestone'
 
 type ToolPermission = (engine: EngineInterface, event: {tool: string; input: unknown},
   next: {origin: {plugin?: string}} & (() => {decision: string})) => Promise<{decision: string}> | {decision: string}
@@ -279,17 +279,21 @@ function milestoneTransport(on: Parameters<Parameters<typeof test>[1]>[1], ids: 
   const prompts: string[] = [], writes: Record<string, unknown>[] = []
   const states = {F1: 'fixing', F2: 'checking', F3: 'held', F4: 'ruled', F5: 'needs_person', F6: 'fixing', F7: 'passed', F8: 'checking'}
   const views = new Map(selected.map(c => {
-    const r = c.route, order = r?.order ?? 'wo39'
+    const r = c.route as Route | null, order = r?.order ?? 'wo39'
     return [order, {order, work_order: {reference: 'WO-' + order.slice(2), status: 'open', title: c.scenario},
       factory_paused: false, questions: [], money: null, milestones: [{milestone: 1, label: c.scenario, state: states[c.id as keyof typeof states],
-        fixes: c.id === 'F1' ? [{check_id: 26, card: {public_id: 'fix-one'}}] : [],
-        check: {route: r, needs_person: r?.owner === 'person', check_cannot_run: 'ask', history: [] as Record<string, unknown>[],
+        fixes: (r?.recovery?.kind === 'repair' ? [{item_id:r.recovery.item, check_id:r.check, card:{public_id:r.recovery.story}}]
+          : c.id === 'F1' ? [{check_id:26, card:{public_id:'fix-one'}}] : []) as {item_id?:number;check_id:number;state?:string;card:{public_id:string}}[],
+        check: {route: r, needs_person: r?.owner === 'person', check_cannot_run: c.id.startsWith('R') ? 'manager_recovery' : 'ask', history: [] as Record<string, unknown>[],
           latest: {id: r?.check ?? 70, attempt: 2}}}]}]
   }))
   const owned = Object.fromEntries([...views].map(([id, v]) => [id, {factory, reference: v.work_order.reference, passes: []}]))
   store.set(key, {at: 999900, value: {generation: 0, stories: {}, orders: owned, feeds: {}, pending: {}, nextFactory: 0, nextOrder: 0, checkedAt: 0}})
   const checks: string[] = []
-  const fixture = {clock, views, prompts, writes, checks, lost: false, afterAttention: () => {},
+  const claims: number[] = [], reports: {run:number; commit:string; exit_code:number}[] = []
+  const fixture = {clock, views, prompts, writes, checks, claims, reports, lost: false,
+    queue: 'ready' as 'ready' | 'empty' | 'unavailable', peeks:0, loseProofReply:false,
+    receipt: {proof:0, finished:false} as ProofResult, attentionRoute: (route: Route) => route, afterAttention: () => {},
     legacy: [] as {kind: string; factory: string; order: string; check_id: number; why: string; on_you: boolean}[],
     ledger: (order: string) => (store.get(key) as {value: CodebookContinuation}).value.orders[order]?.milestones}
   on('session.id', () => ({value: 'milestone-fixture'}))
@@ -326,11 +330,29 @@ function milestoneTransport(on: Parameters<Parameters<typeof test>[1]>[1], ids: 
     else if (e.tool === 'work_orders') data = views.get(String(e.args.order).toLowerCase().replace('-', ''))
     else if (e.tool === 'needs_you') {
       const routes = [...views.values()].flatMap(v => v.milestones.map(m => m.check.route).filter((r): r is Route => !!r))
-      const rows = (owner: string) => routes.filter(r => r.owner === owner).map(route => ({kind: 'milestone_check', route, on_you: owner === 'person'}))
+      const rows = (owner: string) => routes.filter(r => r.owner === owner).map(route => ({kind: 'milestone_check', route:fixture.attentionRoute(route), on_you: owner === 'person'}))
       data = {for_person: [...rows('person'), ...fixture.legacy], for_manager: rows('manager')}
       fixture.afterAttention()
+    } else if (e.tool === 'claim_proof') {
+      if (e.args.peek) {
+        fixture.peeks++
+        if (fixture.queue === 'unavailable') return {deny:'Temporary native queue transport failure.'} as never
+        data = {waiting:fixture.queue === 'empty' ? [] : [{proof:701,repository:'acme/shop',commit:'a'.repeat(40),commands:['test']}]}
+      } else {
+        expect(e.args.proof).toBe(701)
+        claims.push(701)
+        expect(Object.values(fixture.ledger('wo46')!.recovery!)[0]!.native?.phase).toBe('submitted')
+        if (fixture.loseProofReply) return {deny:'Native claim accepted; response lost.'} as never
+        data = {proof:701, repository:{full_name:'acme/shop'}, expected_commit:'a'.repeat(40),
+          token:'synthetic',report_url:'https://app.codebook.work/kanban/api/proof/report',
+          recipe:{revision:1, install:'',network:'loopback'}, steps:[{run:701,name:'test',line:'node test.js',timeout_seconds:30,baseline:false}]}
+      }
+    } else if (e.tool === 'proof_result') {
+      expect(e.args.factory).toBe(factory)
+      expect(e.args.story).toBe('fixtureMember')
+      data = fixture.receipt
     } else if (e.tool === 'list_my_work') {
-      data = {work: [{story:'fix-one', run:71, where:'here', claimed:false, factory:{factory}},
+      data = {work: [{story:'fixtureRepair', run:73, where:'here', claimed:false, factory:{factory}},{story:'fix-one', run:71, where:'here', claimed:false, factory:{factory}},
         {story:'unrelated', run:72, where:'here', claimed:false, factory:{factory}}]}
     } else if (e.tool === 'decide_milestone_check') {
       writes.push({...e.args})
@@ -341,12 +363,30 @@ function milestoneTransport(on: Parameters<Parameters<typeof test>[1]>[1], ids: 
     } else throw Error('Unexpected milestone transport: ' + e.tool)
     return {value: {structuredContent: data, content: []}} as never
   })
+  if (ids.some(id => id.startsWith('R'))) {
+    on('env.get', (_, e) => ({value:e.name === 'HOME' ? '/fixture' : '/usr/bin:/bin'}) as never)
+    on('process.run', (_, e) => {
+      const args = [...e.argv], command = args.join(' ')
+      let stdout = ''
+      if (command.includes('rev-parse --show-toplevel')) stdout = '/fixture/shop'
+      else if (command.includes('remote get-url origin')) stdout = 'https://github.com/acme/shop.git'
+      else if (command.includes('worktree list --porcelain')) stdout = 'worktree /fixture/shop\nHEAD '+ 'a'.repeat(40) +'\nbranch refs/heads/main\n'
+      else if (command.includes('rev-parse HEAD')) stdout = 'a'.repeat(40)
+      else if (args[0] === 'uname') stdout = 'Darwin'
+      else if (command.includes('node test.js')) stdout = 'ok 1 - synthetic member test'
+      return {value:{exitCode:0,stdout,stderr:'',isStdoutTruncated:false,isStderrTruncated:false}} as never
+    })
+    on('http.fetch', (_, e) => {
+      reports.push(JSON.parse(String(e.init?.body ?? '{}')))
+      return {value:{status:200,ok:true,headers:{},text:JSON.stringify({data:true,recorded:true,status:'passed',tests:1})}}
+    })
+  }
   on('prompt.submit', (_, e) => { prompts.push(e.text); return {text: e.text, context: e.context} as never })
   return fixture
 }
 
 test('Claude wakes follow the exact milestone route', async ($, on) => {
-  const f = milestoneTransport(on, milestoneCases.map(c => c.id))
+  const f = milestoneTransport(on, milestoneCases.filter(c => c.id.startsWith('F')).map(c => c.id))
   await $.session.start({cwd: '/', surface: 'desktop', isInteractive: true})
   for (let i = 0; i < 16; i++) await f.clock.advance(35000)
   const questions = f.prompts.filter(text => text.includes('Ask the operator once'))
@@ -437,4 +477,143 @@ test('Claude Auto mode reads only owned milestone attention before asking the ex
   expect(f.prompts.length).toBe(1)
   expect(f.prompts[0]).toContain('fixtureFactory / WO-36 (wo36), check #43')
   expect(f.writes).toEqual([])
+})
+
+test('Claude and Codex follow the same authorized manager recovery target', async ($, on) => {
+  const f = milestoneTransport(on, ['R1'], true)
+  const start = () => $.session.start({cwd:'/',surface:'desktop',isInteractive:true})
+  await start()
+  for (let i=0; i<4; i++) await f.clock.advance(35000)
+  expect(f.claims).toEqual([701])
+  expect(f.reports).toMatchObject([{run:701,commit:'a'.repeat(40),exit_code:0}])
+  const milestone = f.views.get('wo46')!.milestones[0]!
+  const next = milestoneCases.find(c => c.id === 'R2')!.route as Route
+  milestone.check.route = next
+  milestone.fixes = [{item_id:502,check_id:61,card:{public_id:'fixtureRepair'}}]
+  await f.clock.advance(35000)
+  await start()
+  await f.clock.advance(35000)
+  expect(f.prompts.filter(t => t.includes('fixtureRepair (run 73)')).length).toBe(1)
+  expect(f.prompts.some(t => t.includes('unrelated'))).toBe(false)
+  expect(f.writes).toEqual([])
+})
+
+test('both local managers retry only the authorized current attempt', async ($, on) => {
+  const f = milestoneTransport(on, ['F6'])
+  const check = f.views.get('wo37')!.milestones[0]!.check
+  check.check_cannot_run = 'manager_recovery'
+  const retry = check.route!
+  f.afterAttention = () => {
+    check.route = {...retry,owner:'none',action:'hold',reason:'Connect the registered executor.'}
+    f.afterAttention = () => {}
+  }
+  await $.session.start({cwd:'/',surface:'desktop',isInteractive:true})
+  for (let i=0; i<3; i++) await f.clock.advance(35000)
+  expect(f.writes).toEqual([])
+  expect(Object.values(f.ledger('wo37')!.prerequisites!)).toEqual(['WO-37, check #44: Connect the registered executor.'])
+  expect(f.prompts).toEqual([])
+  check.route = retry
+  await f.clock.advance(35000)
+  await f.clock.advance(35000)
+  expect(f.writes).toEqual([{factory:'fixtureFactory',order:'wo37',check:44,authority:'manager',decision:'retry',expected_policy:'manager_recovery'}])
+})
+
+test('manager recovery reconciles duplicate wakes and uncertain responses', async ($, on) => {
+  const f = milestoneTransport(on, ['R3'])
+  const start = () => $.session.start({cwd:'/',surface:'desktop',isInteractive:true})
+  await start()
+  await Promise.all([f.clock.advance(35000), f.clock.advance(35000)])
+  const record = () => Object.values(f.ledger('wo46')!.recovery!)[0]!
+  expect(record().state).toBe('pending')
+  const check = f.views.get('wo46')!.milestones[0]!.check
+  check.route = {...check.route!, owner:'none', action:'wait', recovery:undefined}
+  const command = {run:702,name:'test',verified:true,status:'passed',commit:'b'.repeat(40)}
+  f.receipt = {proof:702,finished:true,commands:[command]}
+  await start()
+  await f.clock.advance(35000)
+  expect(record().state).toBe('pending')
+  command.commit = 'a'.repeat(40)
+  await f.clock.advance(35000)
+  expect(record()).toMatchObject({state:'completed',check:61,target:{kind:'proof',proof:702,member_story:'fixtureMember',executor:'runner'}})
+  expect(f.claims).toEqual([])
+  expect(f.writes).toEqual([])
+})
+
+test('legacy and unknown milestone routes stay safe in both clients', async ($, on) => {
+  const f = milestoneTransport(on, ['R1'])
+  const check = f.views.get('wo46')!.milestones[0]!.check
+  const route = check.route!
+  check.check_cannot_run = 'unrecognized_policy'
+  await $.session.start({cwd:'/',surface:'desktop',isInteractive:true})
+  await f.clock.advance(35000)
+  for (const policy of ['ask','hold','pass_on_story_tests']) {
+    check.check_cannot_run = policy
+    await f.clock.advance(35000)
+  }
+  check.check_cannot_run = 'manager_recovery'
+  check.route = {...route,recovery:undefined}
+  await f.clock.advance(35000)
+  check.route = route
+  f.attentionRoute = r => ({...r,recovery:{...r.recovery!,commit:'b'.repeat(40)}})
+  await f.clock.advance(35000)
+  expect(f.claims).toEqual([])
+  expect(f.prompts).toEqual([])
+  expect(f.writes).toEqual([])
+  expect(f.ledger('wo46')?.recovery ?? {}).toEqual({})
+})
+
+test('a missed native proof queue recovers after restart with one exact claim', async ($, on) => {
+  const f = milestoneTransport(on, ['R1'], true)
+  const start = () => $.session.start({cwd:'/',surface:'desktop',isInteractive:true})
+  f.queue = 'empty'
+  await start()
+  await f.clock.advance(35000)
+  expect(f.peeks).toBe(1)
+  expect(f.claims).toEqual([])
+  expect(Object.values(f.ledger('wo46')!.recovery!)[0]!.native?.phase).toBe('preparing')
+  f.queue = 'ready'
+  await start()
+  for (let i=0; i<5; i++) await f.clock.advance(35000)
+  expect(f.peeks).toBe(2)
+  expect(f.claims).toEqual([701])
+  expect(f.reports).toMatchObject([{run:701,commit:'a'.repeat(40),exit_code:0}])
+  expect(f.writes).toEqual([])
+  expect(f.prompts).toEqual([])
+})
+
+test('temporary read failures back off and existing native claims stay with their owner', async ($, on) => {
+  const f = milestoneTransport(on, ['R1'], true)
+  const start = () => $.session.start({cwd:'/',surface:'desktop',isInteractive:true})
+  f.queue = 'unavailable'
+  await start()
+  await f.clock.advance(35000)
+  expect(f.peeks).toBe(1)
+  await f.clock.advance(5000)
+  expect(f.peeks).toBe(1)
+  await start()
+  await f.clock.advance(65000)
+  expect(f.peeks).toBe(2)
+  f.queue = 'ready'
+  f.receipt = {proof:701,finished:false,commands:[{run:701,name:'test',status:'claimed'}]}
+  for (let i=0; i<6; i++) await f.clock.advance(35000)
+  expect(f.peeks).toBe(2)
+  expect(f.claims).toEqual([])
+  expect(f.prompts).toEqual([])
+})
+
+test('a lost native claim reply stays single flight across restart', async ($, on) => {
+  const f = milestoneTransport(on, ['R1'], true)
+  const start = () => $.session.start({cwd:'/',surface:'desktop',isInteractive:true})
+  f.loseProofReply = true
+  await start()
+  await f.clock.advance(35000)
+  expect(f.claims).toEqual([701])
+  await start()
+  for (let i=0; i<6; i++) await f.clock.advance(35000)
+  expect(f.peeks).toBe(1)
+  expect(f.claims).toEqual([701])
+  expect(f.reports).toEqual([])
+  f.receipt = {proof:701,finished:true,commands:[{run:701,name:'test',status:'passed',verified:true,commit:'a'.repeat(40)}]}
+  await f.clock.advance(35000)
+  expect(Object.values(f.ledger('wo46')!.recovery!)[0]!.state).toBe('completed')
 })

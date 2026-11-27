@@ -619,4 +619,7 @@ if __name__ == "__main__":
         from milestone_manager import exercise as milestone_wakes
         milestone_wakes()
         print("ok 6 - Codex wakes follow the exact milestone route")
-        print("1..6")
+        from milestone_manager import manager_recovery
+        manager_recovery()
+        print("ok 7 - Codex follows typed recovery targets, verifies receipts and preserves the old policies")
+        print("1..7")
