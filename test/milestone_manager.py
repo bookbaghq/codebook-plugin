@@ -231,3 +231,134 @@ def manager_recovery():
             manager.tick()
             ledger = manager.state["milestone_orders"][host.order]
             assert not ledger["recovery"] and not host.effects and not ledger["questions"]
+
+
+def held_observation():
+    from copy import deepcopy
+    from unittest.mock import patch
+    import time
+
+    routes = {row["id"]: row["route"] for row in CASES}
+    route = routes["R1"]
+    order, target = route["order"], route["recovery"]
+
+    class Observer(Host):
+        cursor = 1
+        offline = None
+
+        def tool(self, name, **args):
+            if name == self.offline:
+                self.calls.append(name)
+                raise API["Hold"]("Fixture read unavailable.")
+            if name == "factory_events":
+                self.calls.append(name)
+                assert args["factory"] == FACTORY and args["workflow"] == WORKFLOW and args["limit"] == 50
+                assert args.get("after", 0) <= self.cursor
+                return {"last_event": self.cursor, "events": []}
+            return super().tool(name, **args)
+
+        def call(self, name, params):
+            self.calls.append(name)
+            if name in ("thread/resume", "thread/turns/list"):
+                assert params["threadId"] == "waiting-thread"
+                return {"thread": {"id": "waiting-thread"}} if name == "thread/resume" else {"data": []}
+            return super().call(name, params)
+
+    with tempfile.TemporaryDirectory() as scratch:
+        folder = Path(scratch)
+        host = Observer(order, route)
+        host.folder, host.policy = folder, "manager_recovery"
+        config = dict(running=True, cwd=scratch, factory=FACTORY, workflow=WORKFLOW,
+                      manage_ready=True, stories=[], local_token_budget=100)
+        API["save"](folder/"control.json", config)
+        API["save"](folder/"status.json", {"cursor": 0, "notices": {"mine:"+order+":1": {"confirmation": "confirmed"}}})
+        restart = lambda: API["Manager"](folder, config, host)
+        manager = restart()
+        manager.tick()  # An ordinary eligible tick recorded this exact proof target.
+        ledger = manager.state["milestone_orders"][order]
+        proof_key = next(iter(ledger["recovery"]))
+        assert ledger["recovery"][proof_key]["target"] == target
+        fix = routes["R2"]["recovery"]
+        ledger["recovery"]["prior-fix"] = dict(target=fix, state="pending", check=42)
+        host.fixes = [{"item_id": fix["item"], "check_id": 42, "card": {"public_id": fix["story"]}, "state": "finished"}]
+        ledger["questions"]["old"] = "An earlier review"
+        ledger["retries"]["uncertain"] = {"requested": 39, "state": "pending"}
+        manager.holds["ready:122"] = 1
+        manager.state["notices"]["unacknowledged"] = {"confirmation": "awaiting_receipt"}
+        active = dict(key="ready:123", thread="waiting-thread", at=int(time.time()),
+                      item={"story": "ready", "run": 123}, git={"claim": "awaiting_receipt"})
+        manager.state.update(local_tokens_used=100, active=deepcopy(active))
+        manager.record("Fixture restart with a pending acknowledgement and an exhausted allowance.")
+        host.route = host.attention = {**routes["F5"], "order": order}
+        host.policy = "ask"
+        host.pending_work = True
+        host.receipts[target["member_story"], target["proof"]] = {
+            "proof": target["proof"], "finished": True, "commands": [{"run": target["proof"], "name": "test",
+            "verified": True, "commit": target["commit"], "status": "passed"}]}
+
+        manager = restart()
+        host.calls.clear()
+        host.offline, host.cursor = "proof_result", 2
+        with patch.object(time, "time", return_value=1100):
+            manager.tick()
+        ledger = manager.state["milestone_orders"][order]
+        assert set(host.calls) == {"factory_events", "story_status", "work_orders", "needs_you", "proof_result"}
+        assert ledger["read_pending"] and ledger["recovery"][proof_key]["state"] == "pending"
+        assert ledger["recovery"]["prior-fix"]["state"] == "completed"
+        assert not ledger["questions"] and not manager.holds and not manager.state["interaction_required"]
+        assert manager.state["last_read"] == 1100 and manager.state["cursor"] == 2
+        assert manager.state["phase"] == "held" and manager.state["observation"] == "watching"
+        host.calls.clear()
+        manager.tick()
+        assert host.calls == ["factory_events"]  # Unchanged polling does not rescan the order.
+
+        # An event outage leaves the last good cursor/time intact; existing receipts can still arrive.
+        manager = restart()
+        last_read = manager.state["last_read"]
+        host.calls.clear()
+        host.offline = "factory_events"
+        try:
+            manager.tick()
+            raise AssertionError("Event failure must hold scheduling")
+        except API["Hold"] as error:
+            manager.record(str(error))  # supervise() checkpoints failed ticks before reconnecting.
+        assert manager.state["observation"] == "events_unavailable" and manager.state["last_read"] == last_read
+        assert manager.state["milestone_orders"][order]["recovery"][proof_key]["state"] == "completed"
+        host.offline, host.cursor = None, 3
+        manager = restart()
+        host.calls.clear()
+        manager.tick()
+        assert host.calls == ["factory_events", "work_orders", "needs_you"]
+        assert manager.state["cursor"] == 3 and manager.state["local_tokens_used"] == 100
+        assert manager.state["active"] == active and manager.state["notices"]["unacknowledged"]["confirmation"] == "awaiting_receipt"
+
+        # Removing the cap leaves the independent pending-wake fence. It permits reads but no new action.
+        manager.state["local_tokens_used"] = 25
+        ledger = manager.state["milestone_orders"][order]
+        ledger["recovery"][proof_key]["state"] = "pending"
+        host.route = host.attention = {**routes["F6"], "order": order}
+        host.cursor += 1
+        host.calls.clear()
+        manager.tick()
+        assert ledger["recovery"][proof_key]["state"] == "completed" and not host.effects
+        assert ledger["retries"] == {"uncertain": {"requested": 39, "state": "pending"}}
+        assert manager.state["active"] == active and not host.turns and manager.state["local_tokens_used"] == 25
+        assert set(host.calls) == {"factory_events", "work_orders", "needs_you", "proof_result", "thread/resume", "thread/turns/list"}
+
+        assert manager.state["phase"] == "awaiting_receipt"
+        # A long-lived, unreadable set must not monopolize a tick or starve the next receipt.
+        manager.state["local_tokens_used"] = 100
+        for proof in range(710, 715):
+            pending = {**target, "proof": proof}
+            key = proof_key.split(":repair:")[0] + ":repair:" + API["milestone_routes"].recovery_id(pending)
+            ledger["recovery"][key] = dict(target=pending, check=route["check"], state="pending")
+        pending = ledger["recovery"][key]
+        host.receipts[target["member_story"], 714] = {"proof": 714, "finished": True, "commands": [
+            {"run": 714, "name": "test", "verified": True, "commit": target["commit"], "status": "passed"}]}
+        host.cursor += 1
+        host.calls.clear()
+        manager.tick()
+        assert host.calls.count("proof_result") == 4 and pending["state"] == "pending"
+        host.cursor += 1
+        manager.tick()
+        assert host.calls.count("proof_result") == 8 and pending["state"] == "completed"
