@@ -61,7 +61,7 @@ test('Native signed-in billing comparison observes both rendered fixture product
     for (const value of ['6/10', '5/10']) {
         const input = await fixture(t, value);
         const result = await captureSignedBilling(input);
-        assert.equal(result.unavailable, undefined);
+        assert.equal(result.unavailable, undefined, 'Rendered comparison unavailable at ' + (result.stage || 'fixture setup'));
         const [a, b] = result.observations;
         assert.equal(a.signed_in && b.signed_in, true);
         assert.equal(a.account_digest, b.account_digest);

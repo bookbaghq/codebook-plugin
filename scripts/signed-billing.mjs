@@ -207,6 +207,7 @@ function installedChromium() {
 async function observe(chrome, origin, actor) {
     const temp = mkdtempSync(path.join(tmpdir(), 'codebook-billing-'));
     let proc, timeout;
+    let stage = 'chromium_spawn';
     try {
         proc = spawn(
             chrome,
@@ -229,10 +230,13 @@ async function observe(chrome, origin, actor) {
         );
         await once(proc, 'spawn');
         timeout = setTimeout(() => proc.kill('SIGKILL'), 15000);
+        stage = 'chromium_target';
         const cdp = devtools(proc);
         const { targetId } = await cdp.call('Target.createTarget', { url: 'about:blank' });
+        stage = 'chromium_attach';
         const { sessionId } = await cdp.call('Target.attachToTarget', { targetId, flatten: true });
         const call = (method, params) => cdp.call(method, params, sessionId);
+        stage = 'request_controls';
         await call('Page.enable');
         await call('Fetch.enable', { patterns: [{ urlPattern: '*' }] });
         cdp.on('Fetch.requestPaused', (event) => {
@@ -251,6 +255,7 @@ async function observe(chrome, origin, actor) {
                     if (event.sessionId === sessionId) resolve();
                 })
             );
+        stage = 'login_navigation';
         let page = loaded();
         const nav = await call('Page.navigate', { url: origin + '/login' });
         if (nav.errorText) invalid('fixture_unavailable');
@@ -258,6 +263,7 @@ async function observe(chrome, origin, actor) {
         await wait(page);
         const evaluate = async (expression) =>
             (await call('Runtime.evaluate', { expression, returnByValue: true })).result?.value;
+        stage = 'login_submit';
         page = loaded();
         if (
             !(await evaluate(
@@ -271,6 +277,7 @@ async function observe(chrome, origin, actor) {
             invalid('session_missing');
         await wait(page);
         if ((await evaluate('location.href')) !== origin + '/billing') invalid('session_missing');
+        stage = 'billing_read';
         const view = await evaluate(`(() => {const visible = selector => {
             const node=document.querySelector(selector);
             return node?.getClientRects().length ? node.innerText.trim() : null;
@@ -278,6 +285,9 @@ async function observe(chrome, origin, actor) {
         if (!Array.isArray(view) || view[0] !== actor.name) invalid('session_missing');
         if (!/^\d{1,9}\/\d{1,9}$/.test(view[1])) invalid('view_missing');
         return view;
+    } catch (error) {
+        // Only a fixed local stage can accompany an unavailable observation.
+        throw Object.assign(new Error('Browser observation unavailable.'), { reason: error.reason || 'capture_failed', stage });
     } finally {
         clearTimeout(timeout);
         if (proc?.pid && proc.exitCode === null && proc.signalCode === null) {
@@ -330,7 +340,7 @@ export async function captureSignedBilling({ plan, directories }) {
         }
         return { ...base, observations };
     } catch (error) {
-        return { ...base, unavailable: error.reason || 'capture_failed' };
+        return { ...base, unavailable: error.reason || 'capture_failed', ...(error.stage ? { stage: error.stage } : {}) };
     } finally {
         await Promise.allSettled(cleanup.map((close) => close()));
     }
