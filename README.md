@@ -6,6 +6,8 @@ Run your [CodeBook](https://app.codebook.work) factories from Claude Code. Start
 
 <img src=".claude-plugin/icon.png" alt="CodeBook" width="160">
 
+For a dedicated Codex manager on your signed-in ChatGPT plan, see the [local Codex manager guide](docs/codex-local-manager.md).
+
 ## Install
 
 From a shell with Claude Code installed, add Bookbag’s public marketplace and install the plugin for your user profile:
@@ -61,6 +63,7 @@ do what you can do on app.codebook.work.
 | `/factory report Payments WO-7` | Reopen the work order from any signed-in session. Read milestone evidence, recorded cost, remaining budget, deadline, held operations and production decisions. For reviewed production alerts, see whether the owner rolled back or kept the deployment and the note they recorded. The command makes one read-only request. |
 | `/factory overnight Payments "Migrate the invoice exporter"` | Draft a cloud work order with milestones and acceptance checks. Review the plan and its manager’s token ceiling. Once approved, the cloud manager supervises the work and reports back after you close the terminal. Later milestones follow your factory’s approval policy. |
 | `/factory run Payments "Let customers refund a payment"` | Starts a story in the Payments factory and follows it in the pane. Add `--here` or `--cloud` to choose for this story. |
+| `/factory manage Payments --workflow wf12` | Keep this local session watching the selected workflow after its current stories finish. Use `/factory status` to see the last poll, pending notices and retry status. |
 | `/factory status` | Where the story is, station by station, and where each repository's code is on this computer (checked as you ask). |
 | `/factory list` | The factories you can see. |
 | `/factory backlog Payments` | List up to 15 stories waiting to enter a station. Each row includes a follow command and any pending work-order item. Choose **View backlog** in the Factory pane and use **Next page** to browse there. Use the printed next-page command or add `--workflow "Release QA"` to select another workflow. Older servers can show these stories in the web Backlog drawer. |
@@ -68,6 +71,20 @@ do what you can do on app.codebook.work.
 | `/factory here` / `/factory cloud` | Where agent stations run: for the next stories, and for the followed story too (while none of its runs is being worked). The pane's two picture buttons do the same. |
 | `/factory stop` | Stops following; the story keeps moving on app.codebook.work. |
 | `/factory outside` / `/factory inside` | In a factory's checkout: work outside the factory for this session (no story first, no question before a push), or through it again. |
+
+Claude and Codex follow the same milestone decision for each owned order. A running check waits for proof, repair work stays with its existing fix cards, and a held check waits for its policy to change. A request addressed to you identifies the exact check and reason. A manual waiver requires your approval for that attempt and your reason.
+
+For a local manager that outlives the terminal, start a dedicated session with `claude --bg --name "Payments manager"`
+and attach with `claude attach <id>`. Enter `/factory manage Payments --workflow wf12` there. Start new work in that
+session or explicitly hand it a story with `/factory follow <story-id> Payments`. Keep one owner for each story. Detach
+from the background session when you close the window. If its process exited, check `claude agents --json` and resume
+the offline ID with `claude --bg --resume <id>`. Resuming a running ID can create a copy.
+
+The workflow watch reads factory changes every 30 seconds while the host is running and reconciles readiness at least
+every five minutes. It reads further readiness pages when the server supplies them. Older servers expose only their
+first manager-readiness page. Unchanged and parked work requires no model turn. A rejected submission remains pending
+for a later attempt. The status line reports the host submission, which is separate from a model quota or station outcome.
+`/factory stop` clears the watch for this session.
 
 To cap an overnight work order, add `--max-usd 25` to the command. Add
 `--deadline 2030-05-15T08:00:00-04:00` to set an absolute stop time. Replace
@@ -162,6 +179,9 @@ attribute with confidence (through a wrapper such as `timeout` or `xargs`, a sub
 configuration or a remote changed in the same command, or a `gh api` write to pull requests) is refused too, with the
 plain `git -C <checkout> push <remote> <branch>` or `gh pr create --repo <owner/name>` to run instead.
 
+Station workers leave pull requests as drafts. The guard refuses a worker's `gh pr merge` and `gh pr ready` as well
+as `gh api` writes that merge or enable auto-merge. CodeBook merges at Done according to the factory's workflow.
+
 Where a command does not say where it goes, the guard asks git and gh as they would decide: a plain `git push` goes to
 the branch's push remote (`pushRemote`, `remote.pushDefault`, its tracking remote, then `origin`); an address is
 rewritten by `pushInsteadOf` / `insteadOf` first; `gh pr create` without `--repo` goes to `GH_REPO`, the
@@ -239,7 +259,9 @@ A change to the factory itself (an agent, a station, a limit) is offered in one 
 work carries on meanwhile. These rules are CodeBook's own sentences, copied word for word from its server, and where
 `manager_brief.rules` words one differently, the server wins.
 
-**The factory's settings.** A factory's settings are changed only where the factory lets the manager, by its own switch
+**The factory's settings.** The manager uses the active approved check revision when it already covers the request. If a new proof definition is needed, the server names who decides. An owner who enables delegated routine changes can see the manager's decision on the saved revision. Person-owned previews still ask for the exact change when approval is missing.
+
+On older servers, a factory's settings are changed only where the factory lets the manager, by its own switch
 under Factory settings › Controls ("Let the manager change this factory's settings. It still asks you before each
 change."), and only after your yes each time. The switch is off until you turn it on. With it on, the manager says in
 the chat which setting it would change and what that does, and changes it (`change_factory_setting`) only after your yes.
@@ -440,6 +462,8 @@ The plugin runs a confirmed Python static-site recipe or, on macOS with Seatbelt
 | `hooks/` | The Factory pane, `/factory` and the repository guard (a Claude Code hooks module): `register.tsx`, `pane.tsx`, `factory.ts`, `connector.ts`, `guard.ts`, `resolve.ts` (what git and gh decide for a push), `checkout.ts` (a checkout that knows its factory: the lookup, the note for the session and the question before a push), `local.ts` (the checkouts `/factory status` shows), and `art.ts` (the illustrations, small WebP). |
 | `skills/factory-manager/` | The manager skill Run here follows: the code on your computer, stories, "proceed?", stations, what it decides and the six things it asks a person, taking the next story, narration. |
 | `agents/factory-worker.md` | The sub-agent that works one station run here as that station's agent, testing on a local copy of the app it builds itself. |
+| `test/typecheck.mjs` | Runs TypeScript 5.6.3 over `hooks/`, `types/` and `test/` with `tsconfig.json` against the `claude-code` declarations of the Claude Code installed here, and fails on any error. |
+| `tsconfig.json` | The type-check options the `claude-code` declarations give a hooks module. |
 | `test/rule-texts.mjs` | Checks, with plain Node, that the skill and the agent carry CodeBook's rule sentences word for word, and that nothing tells the manager to ask about a split, an order or a retry. |
 | `hooks/browser-proof.ts`, `scripts/milestone-browser.mjs` | Capture an approved milestone browser interaction from the clean, pinned checkout. |
 | `hooks/proof.ts` | Proof runs: the repository's checks, run here boxed and reported by the plugin itself. |
@@ -452,13 +476,16 @@ The plugin runs a confirmed Python static-site recipe or, on macOS with Seatbelt
 
 ```bash
 claude plugin validate .
-claude plugin test .
+node scripts/test-factory.mjs --typecheck
 node --test test/rule-texts.mjs
 claude --plugin-dir .
 ```
 
-`claude plugin test` loads code files only, so the checks on what the skill and the agent say (`test/rule-texts.mjs`)
-run with Node.
+The local test command type-checks the plugin before running its native tests. Run the type check on its own with
+`node --test test/typecheck.mjs`, or put specific native test files after `--typecheck` to run those with it.
+The check uses Claude Code declarations from its plugin-authoring skill or a `claude-code.d.ts` selected through
+`CLAUDE_CODE_TYPES`. It reports which declarations it used, including when it falls back to the newest cached version,
+or where it looked if none were found.
 
 `scripts/art.sh <folder of PNGs>` rebuilds `hooks/art.ts` from the illustrations.
 

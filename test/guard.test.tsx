@@ -70,7 +70,7 @@ type World = {
 const out = (stdout: string, exitCode = 0) => ({ value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
 
 /** process.run as git, gh, head and the shell answer it in `w`. */
-function answer(w: World, argv: string[]) {
+function answer(w: World, argv: readonly string[]) {
   if (argv[0] === 'git' && argv[1] === '-C') {
     const repo = w.repoOf(argv[2] ?? '')
     const rest = argv.slice(3)
@@ -795,6 +795,34 @@ async function held($: { tool: { call: (e: never) => Promise<{ deny?: string; te
   const bash = async (command: string) => String((await $.tool.call({ tool: 'Bash', command } as never)).deny ?? '')
   return { ran, bash }
 }
+
+test('workers never merge pull requests', async ($, on) => {
+  const { ran, bash } = await held($, on, { remotes: { origin: { fetch: [SANDBOX] } }, branch: 'codebook/SD-201' }, {
+    ghAliases: 'ship: pr merge',
+    files: { '/work/sandbox/release.sh': '#!/bin/sh\ngh pr merge 12\n' },
+  })
+  expect(await bash('gh pr merge 12 --squash')).toContain('The factory merges them at Done')
+  expect(await bash('gh pr merge --auto -R acme/other 12')).toContain('The factory merges them at Done')
+  expect(await bash('gh pr ready -R acme/other 12')).toContain('Station workers keep pull requests as drafts')
+  expect(await bash('gh ship 12')).toContain('is an alias')
+  expect(await bash('sh release.sh')).toContain('release.sh')
+  expect(await bash('git push origin codebook/SD-201')).toBe('')
+  expect(await bash('gh pr create --draft')).toBe('')
+  expect(ran).toEqual(['git push origin codebook/SD-201', 'gh pr create --draft'])
+})
+
+test('workers never merge through gh api', async ($, on) => {
+  const { ran, bash } = await held($, on, { remotes: { origin: { fetch: [SANDBOX] } } })
+  for (const command of [
+    'gh api --method PUT repos/acme/shop/pulls/12/merge',
+    "gh api graphql -f query='mutation { mergePullRequest(input: {}) { clientMutationId } }'",
+    "gh api graphql --raw-field 'query=mutation { enablePullRequestAutoMerge(input: {}) { clientMutationId } }'",
+  ]) {
+    expect(await bash(command)).toContain('the repository guard')
+  }
+  expect(await bash('gh api --method GET repos/acme/shop/pulls/12/merge')).toBe('')
+  expect(ran).toEqual(['gh api --method GET repos/acme/shop/pulls/12/merge'])
+})
 
 test('a plain git push goes where git sends it: pushRemote, then pushDefault, then the branch\'s remote, then origin', async ($, on) => {
   const remotes = { origin: { fetch: [SANDBOX] }, fork: { fetch: [ELSEWHERE] } }

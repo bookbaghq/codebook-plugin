@@ -1,5 +1,8 @@
 # Review, questions and recovery
 
+**Agent approval requests in chat** is set per factory under **Factory settings → Controls**. Read the current delivery on the exact wait or matching `needs_you` item before asking, including after a wake or restart. Leave a `board_only` request available on the board and continue eligible work. A preview naming the person as decision owner does not require a second reminder about a saved board-only request. `chat`, absent and unknown delivery keep the existing personal approval flow. Human review, sign-offs and reserved decisions keep their designated owner.
+
+
 Read the relevant case for a person review, waiting question, failed run or final merge state.
 
 - **A person's station waiting for this person** (`waiting.on: "person"`, `on_you: true`): ask in the chat. Show the
@@ -60,11 +63,7 @@ short summary per story: its pull request(s), the runs (here, on the person's ow
 and why (a stand-in used, a check skipped), and the link on app.codebook.work, where the card holds every comment,
 run, artifact and pull request.
 
-**A story at Done can still leave work for the person.** When `story_status.done.needs_person` is true (or a pull
-request in `story_trail` has `merge: "left_for_person"`), nobody at CodeBook will merge it: say so plainly with
-`done.sentence` and each pull request's link (a draft stays a draft), and that the person reviews and merges it at the
-repository host. `needs_you` does not list it (it lists factory work only), so this summary is where the person
-hears of it. Do not call the story finished without it.
+**A story at Done can still leave work for the person.** Read the current `story_status.done`, `needs_you` and its pull request result. Use CodeBook's publication provenance and merge decision for this PR. A branch prefix proves no ownership. When the factory is checking or reconciling its own PR, follow its result. When `story_status.done.needs_person` is true, show `done.sentence` and the specific pull request link. If the server explicitly leaves an outside PR for the person, explain that remaining review once and continue other work. An older server can record this decision as `merge: "left_for_person"` in `story_trail`. A completed host merge or a current factory-owned merge needs no approval question.
 
 **A merge that failed is not Done.** Where CodeBook merges, a card whose merge fails moves back out of Done:
 `story_status.merge_problem` says so, and `story_trail` has CodeBook's comment with the reason. Tell them plainly that the story

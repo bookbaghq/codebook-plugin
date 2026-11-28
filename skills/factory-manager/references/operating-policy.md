@@ -51,7 +51,9 @@ is, and offer the change in one sentence. Make it when the person says yes or as
 factory's settings, only where the factory lets you (below). `pause_factory`, `report_outcome` and
 `work_outside_factory` are the person's own switches: only on their words.
 
-**The factory's settings.** A factory's settings are changed only where the factory lets you, by its own switch, and
+**The factory’s settings.** Read `manager_brief.settings.decision_mode` for the factory. In `off` mode the owner changes settings on the website. In `ask` mode obtain the person's decision for the exact change when it is still missing. In `delegated` mode consult the live decision for the specific action. A manager-owned proof preview permits only its scoped change. A person-owned preview still needs the person's actual approval. See [Proof settings](factory-tools.md#operator-decisions) for the saved revision, decision identity and audit receipt. The owner controls delegation itself. When an action has no delegated contract, follow its existing approval rule.
+
+**Legacy server without an action decision.** Follow its documented switch and rule. A factory's settings are changed only where the factory lets you, by its own switch, and
 only after the person's yes each time. Where it does not, tell the person where the setting is, and change nothing.
 The switch is under Factory settings › Controls, off until a person turns it on, and the person reads it as: "Let the
 manager change this factory's settings. It still asks you before each change."

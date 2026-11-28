@@ -9,7 +9,8 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { CodebookActive, CodebookCheckout, CodebookClaim, CodebookLink, CodebookMode, CodebookStory, CodebookWatch } from '../types'
 import { call, words } from './connector'
-import { continuationCurrent, continuationGeneration, flushContinuation, hasContinuation, pollContinuation, restoreContinuation, watchContinuation } from './continuation'
+import { proposalGuidance } from '../skills/factory-manager/scripts/proposal-guidance.mjs'
+import { continuationCurrent, continuationGeneration, flushContinuation, hasContinuation, manageUsage, ownsHarnessRegistration, ownsMilestoneRead, pollContinuation, restoreContinuation, watchContinuation, watchWorkflow, workflowStatus } from './continuation'
 import { carriesKey, claimOf, defaultBranchesOf, expiresOf, leaseOf, liveClaims, mayReach, ownedOf, readCommand } from './guard'
 import type { Target } from './guard'
 import { checkOne, checkShellWords, folderOf, ownPushOf, pushedFrom, reaches, shellState } from './resolve'
@@ -65,8 +66,8 @@ const QUIET_POLL_MS = 30000
 let lastPoll = 0
 let isPolling = false
 
-async function tick($: EngineInterface): Promise<void> {
-  flushAsk($)
+async function tick($: EngineInterface, proofHosts: unknown): Promise<void> {
+  await flushAsk($)
   if (isPolling) return
   const a = await read($, active)
   const others = await read($, watched)
@@ -82,12 +83,15 @@ async function tick($: EngineInterface): Promise<void> {
     lastPoll = now
     if (a !== null) await refresh($)
     await refreshWatched($)
-    const observation = await pollContinuation($)
+    const monitored = new Set(others.map(one => one.story))
+    if (a) monitored.add(a.story)
+    const observation = await pollContinuation($, monitored, async (target, authorized) =>
+      runProof($, {proof: target.proof, expected:target, authorized, known: await read($, checkouts), hosts: proofHosts}))
     if (observation) await setLink($, observation)
   } finally {
     isPolling = false
   }
-  flushAsk($)
+  await flushAsk($)
   await flushContinuation($)
 }
 
@@ -102,6 +106,7 @@ const HELP = [
   overnightUsage + ' — propose a cloud work order with milestones',
   '/factory run <factory> "<story title>" [--here | --cloud] — start a story and follow it',
   "/factory status — where the followed story is, and where each repository's code is on this computer",
+  manageUsage + ' — watch for authorized local work after the current order ends',
   backlogUsage + ' — list unplaced stories and pending proposals',
   '/factory list — the factories you can see',
   '/factory follow <story> [<factory>] — follow a story on the board or in the backlog (#57 needs the factory)',
@@ -117,9 +122,10 @@ async function statusText($: EngineInterface): Promise<{ text: string; context?:
   const followed = await storyText($)
   // Whether the folder this session is in is a factory's checkout (checkout.ts).
   const here = await checkoutLine($).catch(() => null)
+  const manager = await workflowStatus($)
   // While the hooks run another version than the skills and agents were loaded from (#147).
   const versions = (await versionMismatch($).catch(() => null))?.line ?? ''
-  return { ...followed, text: [versions, followed.text, here ?? '', code].filter(Boolean).join('\n\n') }
+  return { ...followed, text: [versions, manager, followed.text, here ?? '', code].filter(Boolean).join('\n\n') }
 }
 
 /** The plugin's version as its files say now, from `.claude-plugin/plugin.json` (the engine names no version). */
@@ -384,15 +390,22 @@ export const register: Register = (on, options) => {
   // The pane's own READS of the connector (listing factories, following the story the person chose): auto mode's
   // classifier judges the model's requests and has no verdict for a timer's read, so these are allowed here. Nothing
   // else is: writes are requests the person sends, and the model's calls keep the person's permission settings.
-  on('tool.check', ($, e, next) =>
-    next.origin.plugin === $.plugin.name && OWN_READS.has(e.tool)
+  on('tool.check', async ($, e, next) => {
+    if (next.origin.plugin === $.plugin.name && e.tool === OWN_TOOLS + 'connect_factory_harness' && await ownsHarnessRegistration($, e.input)) {
+      return {decision: 'allow', reason: 'The signed-in subscription is available for the workflow you chose to manage.'}
+    }
+    if (next.origin.plugin === $.plugin.name && [OWN_TOOLS + 'needs_you', OWN_TOOLS + 'proof_result'].includes(e.tool)
+      && await ownsMilestoneRead($, e.tool.slice(OWN_TOOLS.length), e.input)) {
+      return { decision: 'allow', reason: 'The CodeBook manager reading milestone attention for an order owned by this session.' }
+    }
+    return next.origin.plugin === $.plugin.name && OWN_READS.has(e.tool)
       ? { decision: 'allow', reason: 'The CodeBook Factory pane following the story you chose (read only).' }
       : next.origin.plugin === $.plugin.name && e.tool === OWN_CLAIM
         ? { decision: 'allow', reason: 'The CodeBook plugin taking a proof run you or your agent asked for, to run the repository\'s checks here.' }
         : e.tool === OWN_CLAIM
           ? { decision: 'deny', reason: CLAIM_REFUSED }
-          : next(e),
-  ).catch(($, e, next) => next(e))
+          : next(e)
+  }).catch(($, e, next) => next(e))
 
   // Claude's calls of the connector (the requests the pane offered, the factory-worker's reports): the pane takes
   // up a started story and refreshes after the rest.
@@ -402,9 +415,15 @@ export const register: Register = (on, options) => {
     const generation = await continuationGeneration($)
     const ran = await next(e)
     const tool = String(e.tool)
-    if (!tool.startsWith(OWN_TOOLS) || ran.deny !== undefined || ran.isError) return ran
+    if (!tool.startsWith(OWN_TOOLS) || ran.deny !== undefined) return ran
     const name = tool.slice(OWN_TOOLS.length)
     const data = payloadOf(ran) as { run?: number; brief?: unknown; recorded?: boolean; lease?: unknown } | null
+    const guidance = proposalGuidance(name, data)
+    if (ran.isError) {
+      if (name !== 'confirm_stories' || !guidance) return ran
+      await adopt($, name, { next: guidance }, generation)
+      return { ...ran, context: [...(ran.context ?? []), guidance] }
+    }
     // Where each repository's code is on this computer, for /factory status.
     const local = checkoutsOf(name, data)
     if (local !== null) await update($, checkouts, list => mergeCheckouts(list, local))
@@ -459,7 +478,7 @@ export const register: Register = (on, options) => {
         return { ...ran, context: [...(ran.context ?? []), told] }
       }
     }
-    return ran
+    return guidance ? { ...ran, context: [...(ran.context ?? []), guidance] } : ran
   }).catch(($, e, next) => (next.called ? next(e) : String(e.tool) === OWN_CLAIM ? { deny: CLAIM_REFUSED } : next(e)))
 
   // The repository guard (G5 decision 6), per run (P2): a run's lease is the agent loop's that claimed it. That loop
@@ -476,6 +495,9 @@ export const register: Register = (on, options) => {
       return { deny: `CodeBook: the repository guard cannot tell where this command pushes or opens a pull request, so it was not run while CodeBook run ${runs} is worked here (${holdersOf(held)}). Run the push on its own, plainly: git -C <checkout> push <remote> <branch>, and open the pull request with gh pr create --repo <owner/name>. ${ONE_AT_A_TIME}` }
     }
     const say = (why: string) => ({ deny: `CodeBook: the repository guard did not run this while CodeBook run ${runs} is worked here: ${why}` })
+    if (lease.kind === 'worker' && (reading.merges.length > 0 || reading.makesReady)) {
+      return say('Station workers keep pull requests as drafts. The factory merges them at Done.')
+    }
     // The person's own shell aliases and functions (`gp` for `git push fork`), probed once every ten minutes.
     const shell = await shellState($)
     const ownWords = await checkShellWords($, reading.programs, shell)
@@ -589,7 +611,7 @@ export const register: Register = (on, options) => {
     await $.command.register({
       name: 'factory',
       description: 'CodeBook factories: open the Factory pane, start a story (run), or show its status',
-      argumentHint: '[overnight <factory> "<goal>" [--max-usd <amount>] [--deadline <ISO time>] | report <factory> <WO-7> | backlog <factory> | run <factory> "<story>" | status | follow <story> | here | cloud | stop | outside | inside | prove]',
+      argumentHint: '[overnight <factory> "<goal>" [--max-usd <amount>] [--deadline <ISO time>] | report <factory> <WO-7> | manage <factory> [--workflow <id>] | backlog <factory> | run <factory> "<story>" | status | follow <story> | here | cloud | stop | outside | inside | prove]',
     })
     // Which factory works on this folder's repository, asked now so the first prompt need not wait (never awaited, never fatal).
     try { await sweepCheckouts($) } catch { /* next session */ }
@@ -608,7 +630,9 @@ export const register: Register = (on, options) => {
     if (followed) await watchContinuation($, followed.story, followed.reference, followed.factory, false, generation)
     for (const one of await read($, watched)) await watchContinuation($, one.story, one.reference, '', false, generation)
     $.clock.every(1000, () => {
-      void tick($)
+      // A persisted result can be reported while a pane refresh or a runner recheck is still in flight.
+      void flushContinuation($, 'completion')
+      void tick($, proofHosts)
     })
     return next(e)
   })
@@ -699,6 +723,7 @@ export const register: Register = (on, options) => {
       }
     }
 
+    if (lower === 'manage') return { text: await watchWorkflow($, rest) }
     if (lower === 'backlog') return { text: await backlogText($, rest) }
 
     if (lower === 'report') {
@@ -747,7 +772,7 @@ export const register: Register = (on, options) => {
 
     if (lower === 'stop') {
       await unfollow($)
-      return { text: 'Stopped following the story. It keeps moving on app.codebook.work.' }
+      return { text: 'Stopped following the story and watching for workflow readiness. The board keeps moving on app.codebook.work.' }
     }
 
     return { text: `I don't know "/factory ${verb}".\n\n${HELP}` }

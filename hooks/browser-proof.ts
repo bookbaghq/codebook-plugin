@@ -2,7 +2,7 @@ import type { EngineInterface } from 'claude-code'
 import type { ProofWork, ProofStep } from './proof'
 
 interface BrowserSpec { start?: string; adapter: string; path: string; actions: Record<string, string>[]; recipe_revision: number; spec_sha256: string }
-export type NativeBrowserWork = ProofWork & { repository?: { html_url?: string }; steps?: Array<ProofStep & { local_browser?: BrowserSpec }> }
+export type NativeBrowserWork = Omit<ProofWork, 'steps'> & { repository?: { html_url?: string }; steps?: Array<ProofStep & { local_browser?: BrowserSpec }> }
 
 // Only the calling hook holds the private report token. The plugin-owned driver takes an
 // immutable adapter descriptor and independently checks the checkout before and after capture.

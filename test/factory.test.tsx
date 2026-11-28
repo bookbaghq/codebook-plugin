@@ -1,8 +1,12 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
-import { splitRun } from '../hooks/factory'
+import { splitRun, waitOf } from '../hooks/factory'
+import type { Status } from '../hooks/factory'
 import { CONTINUATION_STORE } from '../hooks/continuation'
+
+// The native test runtime provides timers. The plugin host's hook declarations omit them.
+declare function setTimeout(callback: () => void, delay: number): unknown
 
 // A story in the "Payments" factory: Plan passed, Build waits for this person's runner, Review is a person (you).
 const BOARD = {
@@ -18,7 +22,7 @@ const BOARD = {
   ],
 }
 
-type At = 'build' | 'claimed' | 'review' | 'done' | 'asks' | 'escalated' | 'blocked'
+type At = 'build' | 'claimed' | 'review' | 'done' | 'asks' | 'escalated' | 'blocked' | 'numericMine' | 'numericManager' | 'numericReadOnly' | 'numericRunner' | 'numericNext' | 'numericUnavailable' | 'boardAsk' | 'boardBlocked' | 'deliveryBoard' | 'deliveryDecision' | 'deliveryRun'
 const ASKED = 'Refund to the card, or as store credit?'
 /** A CodeBook from before §12.10: person stations carry no on_approve. */
 const older = { codebook: false }
@@ -28,6 +32,13 @@ const LEFT = 'pull request #212 (a draft) is still open, and CodeBook will not m
 
 function status(at: At): Record<string, unknown> {
   // An agent asked for a person mid-run (request_person): the run waits on this person with the question's text.
+  if (at === 'boardBlocked') return { ...status('blocked'), waiting: {on:'person', run:811, on_you:true, delivery:'board_only', question:'Optional capability'} }
+  if (at === 'boardAsk') return { ...status('escalated'), question: {text:'Optional approval', on_you:true, delivery:'board_only'} }
+  if (at.startsWith('delivery')) return {
+    ...status('asks'),
+    waiting:{on:'person',run:811,on_you:true,delivery:'board_only',question:ASKED,tools:['answer_question']},
+    question:{question:41,asked:'Authorize this cost?',delivery:'board_only',tools:['answer_question']},
+  }
   if (at === 'asks') return {
     ...status('build'),
     run: { run: 811, state: 'waiting_for_person', where: 'here' },
@@ -37,6 +48,11 @@ function status(at: At): Record<string, unknown> {
   if (at === 'escalated') return {
     ...status('build'),
     question: { text: 'Which payment providers are in scope?', choices: ['Stripe only', 'Stripe and PayPal'], on_you: true },
+  }
+  if (at.startsWith('numeric')) return {
+    ...status('build'),
+    waiting: at === 'numericRunner' ? { on: 'runner', run: 899, on_you: true } : null,
+    question: {question: at === 'numericNext' ? 42 : 41, asked: 'Authorize this cost?', tools: at === 'numericReadOnly' ? [] : ['answer_question']},
   }
   if (at === 'done') return {
     ...status('review'),
@@ -195,6 +211,16 @@ function engine(on: On, at: { now: At; asks58?: boolean; done58?: boolean; sessi
     return { result: { content: [{ type: 'text', text: JSON.stringify(data) }], structuredContent: data }, text: JSON.stringify(data) }
   })
   function answer(tool: string, args: Record<string, unknown>) {
+    if (tool === 'needs_you' && args.view === 'person') {
+      if (at.now === 'numericUnavailable') return {error: {code: 'UNREACHABLE', message: 'Temporarily offline'}}
+      const base = {kind: 'question', for: 'person', on_you: true, story: {story: '6KjN'}}
+      if (at.now.startsWith('delivery')) return {items:[
+        {...base,question_id:811,run:811,question:ASKED,delivery:at.now === 'deliveryRun' ? 'chat' : 'board_only'},
+        {...base,question_id:41,run:null,question:'Authorize this cost?',delivery:at.now === 'deliveryDecision' ? 'chat' : 'board_only'},
+      ]}
+      return {items: at.now === 'asks' ? [{...base, question_id: 811, run: 811, question: ASKED}]
+        : ['numericMine', 'numericRunner', 'numericNext'].includes(at.now) ? [{...base, question_id: at.now === 'numericNext' ? 42 : 41, run: null, question: 'Authorize this cost?'}] : []}
+    }
     if (tool === 'factory_events') {
       if (at.lifecycle?.feedError) return { error: { code: 'UNREACHABLE', message: 'Temporarily offline' } }
       const events = (at.lifecycle?.events ?? []).filter(e => Number(e.id) > Number(args.after ?? 0))
@@ -345,8 +371,8 @@ test('backlog pages are read-only, followable, scoped to the selected workflow, 
   expect((await $.command.run(typed('backlog Payments --workflow wf12 --offset 35'))).text).toContain('No stories at offset 35. Start again: /factory backlog k3Vb9QmZ --workflow wf12')
   expect((await $.command.run(typed('backlog Payments --workflow "Empty workflow"'))).text).toContain('No stories in this backlog.')
   expect(calls.map(c => c.tool)).toEqual(Array(4).fill('factory_board'))
-  expect(calls[0].args).toEqual({ factory: 'Platform Payments', workflow: 'Release QA', backlog_offset: 0 })
-  expect(calls[1].args).toEqual({ factory: 'k3Vb9QmZ', workflow: 'wf12', backlog_offset: 15 })
+  expect(calls[0]?.args).toEqual({ factory: 'Platform Payments', workflow: 'Release QA', backlog_offset: 0 })
+  expect(calls[1]?.args).toEqual({ factory: 'k3Vb9QmZ', workflow: 'wf12', backlog_offset: 15 })
   expect([...prompts, ...filled]).toEqual([])
 })
 
@@ -732,7 +758,7 @@ test('a new session follows nothing another session follows: no polling, no wake
 })
 
 test('a resumed session carries on with its own story and wakes itself', async ($, on) => {
-  const { calls, prompts, clock } = engine(on, { now: 'review', session: 'session-a', stored: { 'session-1:session-a': { at: 1_000_000, active: FOLLOWED, watched: [] } } })
+  const { calls, prompts, clock } = engine(on, { now: 'review', session: 'session-a', stored: { 'session-1:session-a': { at: 1_000_000, active: {...FOLLOWED, story:"6KjN", factory:"k3Vb9QmZ"}, watched: [] } } })
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await clock.advance(5000)
   expect(calls.filter(one => one.tool === 'story_status').length).toBeGreaterThan(0)
@@ -885,7 +911,7 @@ for (const tool of ['start_story', 'confirm_stories']) {
         const starting = tool === 'start_story' ? claudeStarts($) : $.tool.call({ tool: 'mcp__plugin_codebook_codebook__confirm_stories', proposal: 'wo7' } as never)
         await inStore
         const stopping = $.command.run(typed('stop'))
-        await new Promise(resolve => setTimeout(resolve, 10))
+        await new Promise<void>(resolve => setTimeout(resolve, 10))
         release()
         await Promise.all([starting, stopping])
         at.now = 'done'
@@ -1007,8 +1033,9 @@ test('continuation preserves approvals ownership and bounded wakeups', async ($,
   await clock.advance(5000)
   const text = continuationPrompts(prompts)[0]!
   expect(text).toContain('queued runs first, open proposals and the separate Backlog')
-  expect(text).toContain('current approvals, capacity, budgets and deadlines')
-  expect(text).toContain('suggest policy still asks before new unapproved stories')
+  expect(text).toContain('Honor provider limits, approvals, capacity and deadlines')
+  expect(text).toContain('Never ask for a CodeBook token budget or switch to a paid fallback')
+  expect(text).toContain('Suggest policy still asks before new unapproved stories')
   expect(text).toContain("Leave other sessions' work alone")
   expect(calls.some(c => c.args.factory === 'foreign' || c.args.order === 'wo8')).toBe(false)
   // A read in flight at /factory stop must not restore state or submit a late wake.
@@ -1025,4 +1052,109 @@ test('continuation preserves approvals ownership and bounded wakeups', async ($,
   const afterStop = calls.length
   await clock.advance(65000)
   expect(calls.length).toBe(afterStop)
+})
+
+test('only a confirmed personal wait may ask from the Factory pane', async () => {
+  const base = status('build') as Status
+  expect(waitOf({ ...base, question: 'Unassigned' })).toBeNull()
+  expect(waitOf({ ...base, question: { text: 'Unassigned' } })).toBeNull()
+  expect(waitOf({ ...base, question: { text: 'Managed', on_you: true, decided_by: 'manager' } })).toBeNull()
+  expect(waitOf({ ...base, waiting: { on: 'runner', run: 811, on_you: true, question: 'Runner work' } })).toBeNull()
+  const waiting = { on: 'person' as const, run: 811, on_you: true }
+  expect(waitOf({ ...base, waiting: { ...waiting, question: { text: 'Managed', for: 'manager' } } })).toBeNull()
+  expect(waitOf({ ...base, waiting: { ...waiting, question: { text: 'Another person', on_you: false } } })).toBeNull()
+  expect(waitOf({ ...base, waiting: { ...waiting, question: 'Actual personal wait' } })?.question).toBe('Actual personal wait')
+  expect(waitOf({ ...base, question: { text: 'Assigned to me', on_you: true } })?.question).toBe('Assigned to me')
+})
+
+test('a live numeric question id wakes only the viewer assigned its personal decision', async ($, on) => {
+  const at: {now: At} = {now: 'numericReadOnly'}
+  const {prompts, calls, clock} = engine(on, at)
+  await $.session.start({cwd: '/', surface: 'desktop', isInteractive: true})
+  await claudeStarts($)
+  await clock.advance(5000)
+  expect(prompts).toEqual([])
+  expect(calls.some(row => row.tool === 'needs_you' && row.args.view === 'person')).toBe(false)
+  at.now = 'numericManager'
+  await clock.advance(5000)
+  expect(prompts).toEqual([])
+  at.now = 'numericMine'
+  await clock.advance(5000)
+  expect(prompts.length).toBe(1)
+  expect(prompts[0]).toContain('Authorize this cost?')
+  at.now = 'numericUnavailable'
+  await clock.advance(5000)
+  at.now = 'numericRunner'
+  await clock.advance(5000)
+  expect(prompts.length).toBe(1)
+  at.now = 'numericNext'
+  await clock.advance(5000)
+  expect(prompts.length).toBe(2)
+  expect(prompts[1]).toContain('Authorize this cost?')
+})
+
+test('an ownership outage before delivery parks a queued personal question until it is confirmed again', async ($, on) => {
+  const at: {now: At} = {now: 'build'}
+  const {prompts, clock} = engine(on, at)
+  await $.session.start({cwd: '/', surface: 'desktop', isInteractive: true})
+  await claudeStarts($)
+  await clock.advance(5000)
+  at.now = 'numericMine'
+  await $.command.run(typed('status'))
+  expect(prompts.length).toBe(0)
+  at.now = 'numericUnavailable'
+  await $.command.run(typed('status'))
+  await clock.advance(5000)
+  expect(prompts.length).toBe(0)
+  at.now = 'numericRunner'
+  await clock.advance(10000)
+  expect(prompts.length).toBe(1)
+})
+
+test('a restored board-only capability waits quietly through new events until an explicit review replaces it', async ($, on) => {
+  const session = 'opted-in-factory', story = '6KjN', factory = 'k3Vb9QmZ'
+  const at = { now:'boardBlocked' as At, session, stored: {
+    ['session-1:'+session]: {at:999900, active:{...FOLLOWED, story, factory}, watched:[]},
+    [CONTINUATION_STORE+session]: {at:999900, value:{generation:0, stories:{[story]:{factory, reference:'#57',state:'blocked:811',event:9005}},
+      orders:{}, feeds:{}, pending:{['story:'+story]:'#57 is blocked; inspect independent ready work.'}, nextFactory:0,nextOrder:0,checkedAt:0}},
+  } }
+  const {prompts,clock} = engine(on,at)
+  await $.session.start({cwd:'/',surface:'desktop',isInteractive:true})
+  await clock.advance(65000)
+  at.now = 'boardAsk'
+  await clock.advance(65000)
+  expect(prompts).toEqual([])
+  at.now = 'review'
+  await clock.advance(5000)
+  expect(prompts.length).toBe(1)
+  expect(prompts[0]).toContain('waiting for your approval')
+})
+
+test('an optional board question leaves a separate personal review and unfamiliar delivery alone', () => {
+  const base = status('review') as unknown as Status
+  const optional = {text:'Optional setup', on_you:true, delivery:'board_only'}
+  expect(waitOf({...base, question:optional})?.key).toBe('person|812')
+  expect(waitOf({...base, waiting:null, question:optional})).toBeNull()
+  for (const delivery of ['chat', 'future', undefined]) {
+    expect(waitOf({...base, waiting:null, question:{...optional, delivery}})?.question).toBe('Optional setup')
+  }
+})
+
+test('a newer matched Ask setting restores only the designated question on a story', async ($, on) => {
+  const at = {now:'deliveryBoard' as At}
+  const {prompts,clock} = engine(on,at)
+  await $.session.start({cwd:'/',surface:'desktop',isInteractive:true})
+  await claudeStarts($)
+  await clock.advance(5000)
+  expect(prompts).toEqual([])
+  at.now = 'deliveryDecision'
+  await clock.advance(5000)
+  expect(prompts.length).toBe(1)
+  expect(prompts[0]).toContain('Authorize this cost?')
+  expect(prompts[0]).not.toContain(ASKED)
+  at.now = 'deliveryRun'
+  await clock.advance(5000)
+  expect(prompts.length).toBe(2)
+  expect(prompts[1]).toContain(ASKED)
+  expect(prompts[1]).not.toContain('Authorize this cost?')
 })

@@ -1,0 +1,14 @@
+export default
+[
+  {"id":"F1","scenario":"failed with outstanding repairs","route":{"factory":"fixtureFactory","order":"wo32","check":26,"owner":"manager","action":"repair","reason":"Follow the existing fix cards for this attempt."}},
+  {"id":"F2","scenario":"running with pending proof","route":{"factory":"fixtureFactory","order":"wo33","check":40,"owner":"none","action":"wait","reason":"Waiting for this attempt’s proof results."}},
+  {"id":"F3","scenario":"cannot run under hold","route":{"factory":"fixtureFactory","order":"wo34","check":41,"owner":"none","action":"hold","reason":"The current factory setting holds this milestone until the check can run."}},
+  {"id":"F4","scenario":"persisted factory rule with passing story evidence","route":{"factory":"fixtureFactory","order":"wo35","check":42,"owner":"none","action":"settled","reason":"The factory rule counted this milestone on its stories’ verified tests."}},
+  {"id":"F5","scenario":"actual escalation under ask","route":{"factory":"fixtureFactory","order":"wo36","check":43,"owner":"person","action":"review","reason":"This attempt requires a person’s decision."}},
+  {"id":"F6","scenario":"completed repairs permit a bounded retry","route":{"factory":"fixtureFactory","order":"wo37","check":44,"owner":"manager","action":"retry","reason":"All fix cards for this attempt have finished and merged. Check readiness and retry."}},
+  {"id":"F7","scenario":"verified passing check","route":{"factory":"fixtureFactory","order":"wo38","check":45,"owner":"none","action":"settled","reason":"The milestone check passed."}},
+  {"id":"F8","scenario":"missing action authority","route":null},
+  {"id":"R1","scenario":"missing story test queued for native proof","route":{"factory":"fixtureFactory","order":"wo46","check":61,"owner":"manager","action":"repair","reason":"Run the queued member test with the installed local proof plugin.","recovery":{"kind":"proof","member_item":501,"member_story":"fixtureMember","repository":"acme/shop","commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","proof":701,"executor":"here"}}},
+  {"id":"R2","scenario":"failed story test has a real local repair","route":{"factory":"fixtureFactory","order":"wo46","check":61,"owner":"manager","action":"repair","reason":"Follow the local repair for the member’s verified failing test.","recovery":{"kind":"repair","member_item":501,"member_story":"fixtureMember","repository":"acme/shop","commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","item":502,"story":"fixtureRepair"}}},
+  {"id":"R3","scenario":"registered runner has queued member proof","route":{"factory":"fixtureFactory","order":"wo46","check":61,"owner":"manager","action":"repair","reason":"The registered runner has a queued member test.","recovery":{"kind":"proof","member_item":501,"member_story":"fixtureMember","repository":"acme/shop","commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","proof":702,"executor":"runner"}}}
+]
