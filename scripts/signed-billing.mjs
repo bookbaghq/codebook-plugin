@@ -155,13 +155,13 @@ function devtools(proc) {
                 const waiter = pending.get(event.id);
                 if (waiter) {
                     pending.delete(event.id);
-                    event.error ? waiter.reject(Error('Chrome refused the operation.')) : waiter.resolve(event.result);
+                    event.error ? waiter.reject(Object.assign(Error('Chrome refused the operation.'), { fault: 'protocol_refused' })) : waiter.resolve(event.result);
                 }
             } else listeners.get(event.method)?.(event);
         }
     });
     proc.once('exit', () => {
-        for (const { reject } of pending.values()) reject(Error('Chrome exited.'));
+        for (const { reject } of pending.values()) reject(Object.assign(Error('Chrome exited.'), { fault: 'browser_exited' }));
         pending.clear();
     });
     return {
@@ -236,8 +236,9 @@ async function observe(chrome, origin, actor) {
         stage = 'chromium_attach';
         const { sessionId } = await cdp.call('Target.attachToTarget', { targetId, flatten: true });
         const call = (method, params) => cdp.call(method, params, sessionId);
-        stage = 'request_controls';
+        stage = 'page_enable';
         await call('Page.enable');
+        stage = 'request_interception';
         await call('Fetch.enable', { patterns: [{ urlPattern: '*' }] });
         cdp.on('Fetch.requestPaused', (event) => {
             const { requestId, request } = event.params;
@@ -287,7 +288,7 @@ async function observe(chrome, origin, actor) {
         return view;
     } catch (error) {
         // Only a fixed local stage can accompany an unavailable observation.
-        throw Object.assign(new Error('Browser observation unavailable.'), { reason: error.reason || 'capture_failed', stage });
+        throw Object.assign(new Error('Browser observation unavailable.'), { reason: error.reason || 'capture_failed', stage, fault: error.fault });
     } finally {
         clearTimeout(timeout);
         if (proc?.pid && proc.exitCode === null && proc.signalCode === null) {
@@ -340,7 +341,7 @@ export async function captureSignedBilling({ plan, directories }) {
         }
         return { ...base, observations };
     } catch (error) {
-        return { ...base, unavailable: error.reason || 'capture_failed', ...(error.stage ? { stage: error.stage } : {}) };
+        return { ...base, unavailable: error.reason || 'capture_failed', ...(error.stage ? { stage: error.stage } : {}), ...(error.fault ? { fault: error.fault } : {}) };
     } finally {
         await Promise.allSettled(cleanup.map((close) => close()));
     }
