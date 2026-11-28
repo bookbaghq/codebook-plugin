@@ -40,30 +40,52 @@ try {
   // so transcribe only results the real runner printed; never infer a test pass from exit 0.
   process.stdout.write(result.stdout ?? '')
   process.stderr.write(result.stderr ?? '')
+  const browser = files.some(file => basename(file) === 'proof.test.tsx')
+    ? spawnSync(process.execPath, [join(root, 'scripts/test-story-browser.mjs')], { encoding: 'utf8', timeout: 80000 })
+    : null
+  if (browser) {
+    process.stderr.write(browser.stderr ?? '')
+    process.stdout.write(browser.stdout ?? '')
+  }
   const report = nativeResultsToTap(`${result.stdout ?? ''}\n${result.stderr ?? ''}`)
   if (report.error) console.error(report.error)
   if (result.error) console.error(result.error.message)
   process.exitCode = result.status !== 0 ? result.status ?? 1 : (result.error || report.error || report.failed ? 1 : 0)
-  let tap = report.tap
+  const observed = []
+  if (browser && browser.status === 0) {
+    const passed = /^\(pass\) ([^\r\n]+)$/m.exec(browser.stdout ?? '')
+    if (passed) observed.push(passed[1])
+    else {
+      console.error('The browser witness returned no executed assertion name.')
+      process.exitCode = 1
+    }
+  }
   if (!process.exitCode && files.includes(join(root, 'test', 'proof.test.tsx'))) {
     // The SDK mocks exercise orchestration. This fixture forwards process calls to the real OS sandbox.
     const native = spawnSync(process.execPath, [join(root, 'test/support/locked-proof-native.mjs')], {
       cwd: root, encoding: 'utf8', timeout: 90000, maxBuffer: 2 * 1024 * 1024,
     })
     process.stderr.write(native.stderr || '')
-    const observed = (native.stdout || '').split(/\r?\n/).filter(line => line.startsWith('PASS ')).map(line => line.slice(5))
-    if (native.error || native.status !== 0 || observed.length !== 2) {
+    const locked = (native.stdout || '').split(/\r?\n/).filter(line => line.startsWith('PASS ')).map(line => line.slice(5))
+    if (native.error || native.status !== 0 || locked.length !== 2) {
       process.stderr.write(native.stdout || '')
       if (native.error) console.error(native.error.message)
       process.exitCode = native.status || 1
     }
-    tap = tap.replace(/1\.\.(\d+)\n$/, (_, total) => {
+    observed.push(...locked)
+  }
+  if (browser && (browser.error || browser.status !== 0)) {
+    if (browser.error) console.error(browser.error.message)
+    process.exitCode = browser.status || 1
+  }
+  if (report.tap) {
+    const tap = report.tap.replace(/1\.\.(\d+)\n$/, (_, total) => {
       const count = Number(total)
       const extra = observed.map((name, index) => 'ok ' + (count + index + 1) + ' - ' + name)
       return [...extra, '1..' + (count + extra.length), ''].join('\n')
     })
+    process.stdout.write(tap)
   }
-  if (tap) process.stdout.write(tap)
 } finally {
   rmSync(stage, { recursive: true, force: true })
 }

@@ -39,12 +39,13 @@ export const SECRET_FOLDERS = ['.ssh', '.aws', '.gnupg', '.kube', '.docker', '.c
 export const SECRET_FILES = ['.netrc', '.npmrc', '.pypirc', '.git-credentials']
 
 type CaseReport = { version: 1; directory: string; definition: number; revision: number; hash: string }
-export type ProofStep = { native_witness?: unknown; delegated_focused?: boolean; case_report?: CaseReport; run: number; name: string; line: string; timeout_seconds: number; baseline: boolean; for_run?: number; ref?: string; commit?: string }
+type StoryBrowserPlan = { criterion: number; path: string; definition: string; visible_text: string[]; build?: {revision:number;build:string;install:string} | null }
+export type ProofStep = { story_browser?: StoryBrowserPlan; native_witness?: unknown; delegated_focused?: boolean; case_report?: CaseReport; run: number; name: string; line: string; timeout_seconds: number; baseline: boolean; for_run?: number; ref?: string; commit?: string }
 export type ProofWork = {
   proof: number | null
   token?: string
   report_url?: string
-  repository?: { id: number; full_name: string; default_branch: string }
+  repository?: { id: number; full_name: string; default_branch: string; url?: string }
   proof_scope?: string
   expected_commit?: string | null
   recipe?: { revision: number; install: string; network: string; hosts?: unknown } | null
@@ -55,7 +56,7 @@ export type ProofWork = {
  * (today's CodeBook queues a model's request_proof with none). `run`, `branch` and `worktree` are what a newer CodeBook
  * may send of the run that asked (its declare_work); the plugin reads them when they are there.
  */
-export type ProofWaiting = { witness_executor?: string; dependency_wait_version?: number; dependency_wait?: {code:string;detail:string;condition_hash:string}; delegated_focused_version?: number; case_report_version?: number; proof: number; repository: string; commands: string[]; commit: string | null; default_branch?: string; run?: number | null; branch?: string | null; worktree?: string | null }
+export type ProofWaiting = { story_browser_version?: number; witness_executor?: string; dependency_wait_version?: number; dependency_wait?: {code:string;detail:string;condition_hash:string}; delegated_focused_version?: number; case_report_version?: number; proof: number; repository: string; commands: string[]; commit: string | null; default_branch?: string; run?: number | null; branch?: string | null; worktree?: string | null }
 /** What this session knows of the run that asked for a proof: its worktree and branch (declare_work), the story's key and branch (its brief). */
 export type ProofHint = { run: number | null; worktree?: string; branch?: string; key?: string }
 export type Sandbox = { kind: 'seatbelt' | 'bubblewrap' | 'none'; bin: string | null }
@@ -681,13 +682,17 @@ async function runDelegated($: EngineInterface, target: ProofWaiting, work: Proo
 export async function waitingProofs($: EngineInterface): Promise<{ ok: true; waiting: ProofWaiting[] } | { ok: false; message: string }> {
   const capability = capabilityOf((await findSandbox($)).kind)
   const browser = { peek: true, local_browser_version: 1 }
+  const storyBrowser = { peek: true, story_browser_version: 1 }
+  const browsers = { ...browser, ...storyBrowser }
   const witness = capability ? { peek: true, native_witness: capability } : null
-  const requests = witness ? [{ ...browser, ...witness }, witness, browser, { peek: true }] : [browser, { peek: true }]
+  const requests = witness
+    ? [{ ...browsers, ...witness }, { ...browser, ...witness }, { ...storyBrowser, ...witness }, browsers, witness, browser, storyBrowser, { peek: true }]
+    : [browsers, browser, storyBrowser, { peek: true }]
   // Read-only negotiation for older servers that accept only some of these capability fields.
   let peeked = await call<{ waiting?: ProofWaiting[] }>($, 'claim_proof', requests[0]!)
   for (const request of requests.slice(1)) {
     if (peeked.ok || !(['INVALID', 'INVALID_INPUT', 'INVALID_PARAMS'].includes(peeked.code)
-        || /unknown|unexpected|additional|invalid.*argument/i.test(peeked.message))) break
+        || /unknown|unexpected|additional|unsupported|unrecognized|invalid.*argument/i.test(peeked.message))) break
     peeked = await call<{ waiting?: ProofWaiting[] }>($, 'claim_proof', request)
   }
   if (!peeked.ok) return { ok: false, message: peeked.message }
@@ -742,6 +747,31 @@ export async function runProof($: EngineInterface, { proof = null, known = [], h
   const placed = await proofFolder($, { repository: target.repository, known, hint: asked, commit: target.commit, proof: target.proof })
   if ('refused' in placed) return { isRun: false, text: placed.refused }
   const dir = placed.dir
+
+  if (target.story_browser_version !== undefined || target.commands.includes('story_browser')) {
+    if (target.story_browser_version !== 1 || target.commands.length !== 1 || target.commands[0] !== 'story_browser' ||
+        target.witness_executor !== undefined || delegated || !FULL_COMMIT.test(target.commit ?? ''))
+      return {isRun:false,text:'This story browser proof requires its exact commit and supported browser operation.'}
+    const claimed = await call<ProofWork>($,'claim_proof',{proof:target.proof,story_browser_version:1})
+    if (!claimed.ok) return {isRun:false,text:claimed.message}
+    const work=claimed.data, step=work.steps?.[0]
+    if (work.proof!==target.proof || work.proof_scope!=='story_browser_v1' || !work.token || !work.report_url || work.steps?.length!==1 ||
+        step?.name!=='story_browser' || !step.story_browser || !work.repository?.url || work.repository.full_name!==target.repository ||
+        !target.commit || work.expected_commit!==target.commit) return {isRun:false,text:'The native static browser request is no longer available.'}
+    const job={dir,repository:work.repository.url,commit:target.commit,plan:step.story_browser}
+    let capture:Record<string,unknown>={unavailable:'capture_failed'}
+    try {
+      const stream=$.process.spawn({argv:['/usr/bin/env','-i','PATH=/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin','node',`${$.plugin.root}/scripts/story-browser.mjs`,JSON.stringify(job)]})
+      let output=''
+      for await (const chunk of stream) {
+        if (chunk.stream==='stdout') output+=chunk.text
+        if (output.length>400000) throw Error('Oversized browser evidence')
+      }
+      capture=JSON.parse(output)
+    } catch { /* Only the bounded prerequisite is sent; no app-provided diagnostic or private credential leaves the hook. */ }
+    const result=await report($,work,{...capture,run:step.run})
+    return {isRun:true,text:result.ok ? `Static browser proof ${target.proof}: ${result.status}.` : `CodeBook could not record the browser check: ${result.message}`}
+  }
 
   if (target.witness_executor !== undefined) {
     const capability = capabilityOf((await findSandbox($)).kind)
@@ -836,6 +866,7 @@ export async function runProof($: EngineInterface, { proof = null, known = [], h
       || work.steps.some(s => !s.baseline && s.name !== 'test'))) {
     return {isRun:false, text:"The proof claim no longer matches the recovery target."}
   }
+  if (work.steps.some(step => step.story_browser !== undefined)) return {isRun:false,text:'The story browser check requires the matching native selection.'}
   if (work.steps.some(step => step.native_witness !== undefined)) return {isRun:false,text:'The typed witness requires the matching native selection.'}
   if (work.steps.some(step => step.delegated_focused !== undefined && step.delegated_focused !== false)) {
     return runDelegated($, target, work, dir, {kind:'none', bin:null})
