@@ -490,11 +490,10 @@ def marker(key):
 def prompt(scope, item):
     route = item.get("route") or {}
     paired = bool(route.get("git_pairing"))
-    claim = "factory_git_claim" if paired else CLAIM_TOOL
     routing = ""
     if paired:
         routing = ("The supervisor has verified the paired clone for " + route["repository"] +
-                   ". After claiming, create your per-run worktree on a local base inside this clone, declare its exact branch and path "
+                   ". Create your per-run worktree on a local base inside this clone, declare its exact branch and path "
                    "to CodeBook, then call factory_git_fetch. Use the fetched origin refs for your base. "
                    "Publish only the declared feature branch with factory_git_push. These tools take no arguments. ")
     elif route:
@@ -505,11 +504,9 @@ def prompt(scope, item):
             f"{item['station']}. Your only assignment is CodeBook run {item['run']} on story {item['story']}, "
             f"factory {scope['factory']}, workflow {scope['workflow']}. "
             + (f"Card: {item['url']}. " if item.get("url") else "") +
-            routing + f"The local manager already validated station, ownership and readiness. First call {claim} "
-            "for this run. If refused, leave it to its holder and finish. Follow the returned frozen brief, agent "
-            "instructions and exact fence, heartbeating during work. Start with the server PR and proof records and "
-            "git worktree list --porcelain to find the exact local checkout. Claiming needs no remote git operation, "
-            "repo search, work-order history or test. Reuse matching verified receipts, investigate only actual gaps, "
+            routing + "This worker already holds the station lease. Use the attached CodeBook claim receipt, frozen brief "
+            "and exact fence, heartbeating during work. Start with the server PR and proof records. Reuse matching "
+            "verified receipts and investigate only actual gaps, "
             "and finish using complete_work with your valid fence. Follow brief.factory_decisions and the live server response. "
             'When decided_by: "manager", follow the manager route and continue within your fence. '
             'Use the true reserved reason (e.g. spending), or sign_off with the exact criterion ID. '
@@ -652,14 +649,10 @@ class Manager:
         if previous:
             info = host.call("thread/resume", {**params, "threadId": previous})
         else:
-            if not (route and route.get("git_pairing")):
-                params["dynamicTools"] = [{"type": "function", "name": CLAIM_TOOL,
-                    "description": "Claim the station assigned to this thread. Returns its frozen brief and lease.",
-                    "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}}]
-            else:
+            if route and route.get("git_pairing"):
                 params["dynamicTools"] = [{"type": "function", "name": name, "description": desc,
                                            "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}}
-                                          for name, desc in paired_git.TOOLS.items()]
+                                          for name, desc in paired_git.TOOLS.items() if name != "factory_git_claim"]
             # Compact only this station thread; global account and model selection remain the operator's.
             params["config"] = {"model_auto_compact_token_limit": 64000}
             info = host.call("thread/start", {**params, "allowProviderModelFallback": False})
@@ -791,6 +784,12 @@ class Manager:
         active = self.state.get("active")
         if not active:
             return False
+        if active.get("dispatch") == "claiming":
+            # turn/start was never submitted. Eligibility and lease expiry govern this run.
+            self.state.pop("active")
+            self.last_scan = 0
+            self.record("Recovered an interrupted station claim before model startup.")
+            return False
         route = active["item"].get("route")
         self.state["phase"] = "awaiting_receipt"
         previous = active.get("thread") or self.state.get("thread")
@@ -816,7 +815,8 @@ class Manager:
             if turn["status"] == "inProgress":
                 lease = waiting.get("lease") or {}
                 if (target["run"] and current.get("run") == target["run"] and waiting.get("claimed") is True
-                        and type(lease.get("fence")) is int and lease["fence"] > 0 and lease.get("expired") is False):
+                        and type(lease.get("fence")) is int and lease["fence"] > 0 and lease.get("expired") is False
+                        and lease["fence"] == active.get("native_fence", lease["fence"])):
                     self.state["workers"][active["key"]] = {"thread": thread, "turn": turn["id"], "run": target["run"],
                             "story": target["story"], "route": target.get("route"), "git": active.get("git", {}), "native_fence": active.get("native_fence")}
                     self.state["notices"][active["key"]]["done"] = True
@@ -1064,6 +1064,47 @@ class Manager:
                 host.send({"id": request["id"], "result": {"success": success,
                            "contentItems": [{"type": "inputText", "text": json.dumps(receipt)}]}})
 
+    def paired_status(self, host, route, scope, story, run):
+        verify = paired_git.require
+        binding = route["git_pairing"]
+        if not getattr(host, "paired_isolated", False):
+            paired_git.isolated_key(host, {**scope, "state_directory": str(self.folder)}, route)
+            host.paired_isolated = True
+        # Re-read local revocations even during a multi-request smart HTTP exchange.
+        control = read(self.folder/"control.json", {})
+        verify(control.get("running") and control.get("git_pairings", {}).get(route["repository"]) == binding
+               and control.get("development_routes", {}).get(route["repository"]) == {k:v for k,v in route.items() if k != "git_pairing"},
+               "The operator stopped or changed this Development route.")
+        brief = self.host.tool("manager_brief", **scope)
+        verify((brief.get("you") or {}).get("may_run_here") is True
+               and (brief.get("factory") or {}).get("factory") == scope["factory"]
+               and (brief.get("workflow") or {}).get("workflow") == scope["workflow"], "The workflow is no longer available locally.")
+        paired_git.match_binding(route, binding, brief)
+        status = self.host.tool("story_status", **scope, story=story, limit=1)
+        verify((status.get("story") or {}).get("story") == story and (status.get("run") or {}).get("run") == run
+               and (status.get("factory") or {}).get("factory") == scope["factory"]
+               and (status.get("workflow") or {}).get("workflow") == scope["workflow"]
+               and (status.get("station") or {}).get("name") == "Development" and hosted_here(status),
+               "The assigned local Development station changed.")
+        return status
+
+    def claim_for_turn(self, host, thread, item, scope):
+        route = item.get("route") or {}
+        if route.get("git_pairing"):
+            status = self.paired_status(host, route, scope, item["story"], item["run"])
+            waiting = status.get("waiting") or {}
+            paired_git.require(waiting.get("on") == "runner" and waiting.get("on_you") is True
+                               and waiting.get("run") == item["run"] and waiting.get("claimed") is False,
+                               "The paired station is no longer available.")
+        receipt = host.tool_in(thread, "claim_work", run=item["run"])
+        lease, brief = receipt.get("lease"), receipt.get("brief")
+        if (receipt.get("run") != item["run"] or receipt.get("story") != item["story"] or receipt.get("where") != "here"
+                or not isinstance(lease, dict) or type(lease.get("fence")) is not int or lease["fence"] < 1
+                or lease.get("expired") is True or not isinstance(brief, dict) or not brief.get("station")
+                or (item["station"] != "station" and brief["station"] != item["station"])):
+            raise Hold("Missing exact station claim receipt.")
+        return receipt
+
     def worker_git(self, host_key, host, params):
         verify = paired_git.require
         thread, turn = params.get("threadId"), params.get("turnId")
@@ -1088,6 +1129,7 @@ class Manager:
                    "This claim does not belong to this worker host.")
             verify(read(self.folder/"control.json", {}) == self.config and self.config.get("running"),
                    "The operator changed or stopped this worker.")
+            verify(not worker.get("native_fence"), "This worker already holds a native station claim.")
             receipt = host.tool_in(thread, "claim_work", run=run)
             fence = (receipt.get("lease") or {}).get("fence")
             verify(receipt.get("run") == run and receipt.get("where") == "here" and type(fence) is int and fence > 0,
@@ -1100,26 +1142,8 @@ class Manager:
         scope = {field: self.config[field] for field in ("factory", "workflow")}
         assignment = {**scope, "run": run, "story": story}
         def live():
-            # Re-read local revocations even during a multi-request smart HTTP exchange.
-            control = read(self.folder/"control.json", {})
-            verify(control.get("running") and control.get("git_pairings", {}).get(route["repository"]) == binding
-                   and control.get("development_routes", {}).get(route["repository"]) == {k:v for k,v in route.items() if k != "git_pairing"},
-                   "The operator stopped or changed this Development route.")
-            brief = self.host.tool("manager_brief", **scope)
-            verify((brief.get("you") or {}).get("may_run_here") is True
-                   and (brief.get("factory") or {}).get("factory") == scope["factory"]
-                   and (brief.get("workflow") or {}).get("workflow") == scope["workflow"], "The workflow is no longer available locally.")
-            paired_git.match_binding(route, binding, brief)
-            status = self.host.tool("story_status", **scope, story=story, limit=1)
-            verify((status.get("story") or {}).get("story") == story and (status.get("run") or {}).get("run") == run
-                   and (status.get("factory") or {}).get("factory") == scope["factory"]
-                   and (status.get("workflow") or {}).get("workflow") == scope["workflow"]
-                   and (status.get("station") or {}).get("name") == "Development" and hosted_here(status),
-                   "The assigned local Development station changed.")
-            return status
-        if not getattr(host, "paired_isolated", False):
-            paired_git.isolated_key(host, {**scope, "state_directory": str(self.folder)}, route)
-            host.paired_isolated = True
+            return self.paired_status(host, route, scope, story, run)
+
         status = live()
         journal = worker.setdefault("git", {})
         if name == "factory_git_claim":
@@ -1318,10 +1342,25 @@ class Manager:
                     self.last_scan = 0
                     self.record("Codex refused worker startup for " + item["key"] + "; bounded retry pending.")
                     return
-                self.state["active"] = {"key": item["key"], "item": item, "thread": thread, "at": int(time.time())}
-                self.record("Submitting one scoped Codex manager wake.")
+                active = self.state["active"] = {"key": item["key"], "item": item, "thread": thread,
+                                                 "at": int(time.time()), "dispatch": "claiming"}
+                self.record("Claiming the assigned station before starting its model.")
+                host = self.host_for(item.get("route"))
                 try:
-                    turn = self.host_for(item.get("route")).call("turn/start", {"threadId": thread, "input": [{"type": "text", "text": prompt(scope, item)}]})
+                    receipt = self.claim_for_turn(host, thread, item, scope)
+                except (Hold, OSError, paired_git.Unavailable):
+                    self.state.pop("active")
+                    reason = "No confirmed claim for " + item["key"] + ". Skipped model startup."
+                    self.record(reason)
+                    continue
+                active.update(native_fence=receipt["lease"]["fence"], dispatch="submitting")
+                if (item.get("route") or {}).get("git_pairing"):
+                    active["git"] = {"claim": "held", "fence": active["native_fence"]}
+                self.record("Submitting a model turn for the confirmed station lease.")
+                try:
+                    turn = host.call("turn/start", {"threadId": thread, "input": [
+                        {"type": "text", "text": prompt(scope, item)},
+                        {"type": "text", "text": json.dumps(receipt, ensure_ascii=False, separators=(",", ":"))}]})
                 except Refused:
                     self.approvals()
                     self.state.pop("active")
