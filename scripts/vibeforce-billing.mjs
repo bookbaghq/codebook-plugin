@@ -132,7 +132,7 @@ async function reserveCheck(ports) {
         await Promise.all(sockets.filter((s) => s.listening).map((s) => new Promise((done) => s.close(done))));
     }
 }
-function sandboxArgs(root, offline = false) {
+export function sandboxArgs(productRoot, offline = false) {
     const args = [
         '--die-with-parent',
         '--new-session',
@@ -157,11 +157,12 @@ function sandboxArgs(root, offline = false) {
         const p = '/etc/' + file;
         if (existsSync(p)) args.push('--ro-bind', p, p);
     }
-    // Bind no account homes or network sockets. All writable data belongs to this job.
-    args.push('--bind', root, root);
+    // Each product sees its own source export and scratch directory only.
+    const scratch = productRoot + '-scratch';
+    args.push('--bind', productRoot, productRoot, '--bind', scratch, scratch);
     return args;
 }
-function native(root, ports, argv, { cwd, env, timeout = 120000, background = false } = {}) {
+function native(productRoot, ports, argv, { cwd, env, timeout = 120000, background = false } = {}) {
     // The confined supervisor stays alive after a server exits. Closing its stdin
     // ends bubblewrap’s private PID namespace, including server subprocesses.
     const supervise = `
@@ -173,7 +174,7 @@ function native(root, ports, argv, { cwd, env, timeout = 120000, background = fa
     `;
     const child = spawn(
         '/usr/bin/bwrap',
-        [...sandboxArgs(root, ports.length === 0), '--chdir', cwd, process.execPath, '-e', supervise, ...argv],
+        [...sandboxArgs(productRoot, ports.length === 0), '--chdir', cwd, process.execPath, '-e', supervise, ...argv],
         {
             cwd,
             env,
@@ -221,7 +222,7 @@ function native(root, ports, argv, { cwd, env, timeout = 120000, background = fa
             if (code !== 0)
                 throw Error(
                     'fixture_unavailable: ' +
-                        pathTag(cwd, root) +
+                        pathTag(cwd, productRoot) +
                         ' ' +
                         (argv.includes('ci')
                             ? 'install'
@@ -345,18 +346,11 @@ export async function withFirstPartyServices(root, sources, dependencyCache, use
         npmRoot = join(nodeHome, 'lib/node_modules/npm');
     const npm = join(npmRoot, 'bin/npm-cli.js');
     if (!existsSync(npm)) throw Error('fixture_unavailable');
-    const home = join(root, 'home'),
-        temp = join(root, 'tmp');
-    mkdirSync(home);
-    mkdirSync(temp);
     const cleanEnv = {
         PATH: dirname(node) + ':/usr/bin:/bin',
-        HOME: home,
-        TMPDIR: temp,
         LANG: 'en_US.UTF-8',
         master: 'testing',
         NEXT_TELEMETRY_DISABLED: '1',
-        npm_config_cache: join(root, 'cache'),
         npm_config_offline: 'true',
         npm_config_audit: 'false',
         npm_config_fund: 'false',
@@ -370,16 +364,18 @@ export async function withFirstPartyServices(root, sources, dependencyCache, use
     const ports = [...frontPorts, ...apiPorts];
     if (new Set(ports).size !== ports.length) throw Error('fixture_unavailable');
     await reserveCheck(ports);
-    stageCache(root, dependencyCache);
     const member = { email: 'member-' + clean().slice(0, 12) + '@example.invalid', password: clean() };
-    const secret = clean(),
-        serviceEnvs = {};
+    const serviceEnvs = {};
     const stops = [];
     const owners = [];
     try {
         for (const [i, s] of sources.entries()) {
             const cwd = join(root, s.role),
                 dbs = {};
+            const scratch = cwd + '-scratch';
+            mkdirSync(scratch, { mode: 0o700 });
+            stageCache(scratch, dependencyCache);
+            const secret = clean();
             for (const c of readdirSync(join(cwd, 'components'))) {
                 const d = join(cwd, 'components', c, 'app/models');
                 if (!existsSync(d)) continue;
@@ -403,6 +399,9 @@ export async function withFirstPartyServices(root, sources, dependencyCache, use
             writeFileSync(join(cwd, 'config/environments/env.testing.json'), JSON.stringify(config), { mode: 0o600 });
             const env = (serviceEnvs[s.role] = {
                 ...cleanEnv,
+                HOME: scratch,
+                TMPDIR: '/tmp',
+                npm_config_cache: join(scratch, 'cache'),
                 MASTERRECORD_CONNECTION_OVERRIDE: JSON.stringify(dbs),
                 API_ORIGIN: 'http://127.0.0.1:' + apiPorts[i],
                 OPENBOOK_API_ORIGIN: 'http://127.0.0.1:' + apiPorts[i],
@@ -415,13 +414,14 @@ export async function withFirstPartyServices(root, sources, dependencyCache, use
                 NEXT_PUBLIC_SSO_ORIGIN: issuer
             });
             for (const workdir of [cwd, join(cwd, 'nextjs-app')])
-                await native(root, [], [node, npm, 'ci', '--offline', '--no-audit', '--no-fund'], {
+                await native(cwd, [], [node, npm, 'ci', '--offline', '--no-audit', '--no-fund'], {
                     cwd: workdir,
                     env,
                     timeout: 180000
                 });
+            rmSync(join(scratch, 'cache'), { recursive: true });
             await native(
-                root,
+                cwd,
                 [],
                 s.role === 'portal'
                     ? [node, 'scripts/bootstrap-all.mjs', 'testing']
@@ -429,8 +429,8 @@ export async function withFirstPartyServices(root, sources, dependencyCache, use
                 { cwd, env }
             );
         }
-        const output = join(root, 'local-clients.json');
-        await native(root, [], [node, '--input-type=module', '-e', seed], {
+        const output = join(root, 'portal-scratch', 'local-clients.json');
+        await native(join(root, 'portal'), [], [node, '--input-type=module', '-e', seed], {
             cwd: join(root, 'portal'),
             env: {
                 ...serviceEnvs.portal,
@@ -445,13 +445,14 @@ export async function withFirstPartyServices(root, sources, dependencyCache, use
             }
         });
         const clients = JSON.parse(readFileSync(output, 'utf8'));
+        rmSync(output);
         for (const [i, s] of sources.entries()) {
             const cwd = join(root, s.role),
                 env = { ...serviceEnvs[s.role], ...(s.role !== 'portal' ? { SSO_APP_TOKEN: clients[s.role] } : {}) };
-            const api = native(root, ports, [node, 'server.js'], { cwd, env, background: true });
+            const api = native(cwd, ports, [node, 'server.js'], { cwd, env, background: true });
             stops.push(api.stop);
             const web = native(
-                root,
+                cwd,
                 ports,
                 [
                     node,

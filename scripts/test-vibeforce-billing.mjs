@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { captureFirstPartyBilling, scopedSources, withSourceExports, privateLinuxReady } from './vibeforce-billing.mjs';
+import { captureFirstPartyBilling, scopedSources, withSourceExports, sandboxArgs, privateLinuxReady } from './vibeforce-billing.mjs';
 
 const cases = [
     ['Builder', 'Vibeforce/vibeforce-app', 3001, '/dashboard'],
@@ -142,4 +142,18 @@ test('First-party billing proof cleans disposable services and private test stat
     assert.equal(failed.unavailable, 'source_changed');
     assert.equal(failed.observations, undefined);
     assert.deepEqual(leftovers(), before);
+});
+
+test('product sandbox mounts only its own export and scratch during install and execution', () => {
+    for (const role of ['vibeforce', 'openbook', 'portal']) {
+        const product = '/job/' + role;
+        for (const offline of [true, false]) {
+            const args = sandboxArgs(product, offline);
+            const mounts = args.flatMap((arg, i) =>
+                arg === '--bind' ? [[args[i + 1], args[i + 2]]] : []
+            );
+            assert.deepEqual(mounts, [[product, product], [product + '-scratch', product + '-scratch']]);
+            assert.equal(args.includes('--unshare-net'), offline);
+        }
+    }
 });
