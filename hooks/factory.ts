@@ -123,11 +123,12 @@ type WireEvent = {
 /** A question as CodeBook sends it: its text, or an object carrying the text (and maybe likely answers). */
 type WireQuestion =
   | string
-  | { text?: string; question?: string; choices?: string[] | null; on_you?: boolean; run?: number | null }
+  | { delivery?: string; text?: string; question?: string | number; asked?: string; tools?: string[]; choices?: string[] | null; on_you?: boolean; run?: number | null; for?: string; decided_by?: string }
   | null
 type Lease = { fence: number; expires_at?: string; expired?: boolean }
 type RunLocation = {
   where: 'here' | 'cloud'
+  execution_source?: {kind: string; connection_id: number} | null
   person?: { name?: string; is_you?: boolean } | null
   changeable?: boolean
   stations?: { station: string; name: string; runs: string }[]
@@ -147,12 +148,15 @@ export type Status = {
         on: 'person' | 'outside_agent' | 'runner' | 'review'
         run: number
         on_you?: boolean
+        delivery?: string
+        tools?: string[]
         claimed?: boolean
         claimed_by_you?: boolean
         lease?: Lease | null
         pull_requests?: { pull_request_id: number; head_sha: string; number?: number; html_url?: string }[]
         on_approve?: { merge?: string; sentence?: string } | null
         /** A request_person wait: the agent's question (phase 1 contract item 6). */
+        asked_at?: string
         question?: WireQuestion
       }
   /** A question for a person on the story (ask_person, an escalation): phase 1 contract items 4 and 6. */
@@ -299,13 +303,14 @@ export function waitingPrompt(
 }
 
 /** A question's text and likely answers, from a string or an object carrying it; null when there is none. */
-function questionOf(q: WireQuestion | undefined): { text: string; choices: string[]; onYou: boolean } | null {
+function questionOf(q: WireQuestion | undefined, personalWait: boolean): { text: string; choices: string[]; onYou: boolean } | null {
   if (q == null) return null
-  if (typeof q === 'string') return q.trim() ? { text: q.trim(), choices: [], onYou: true } : null
-  const text = (q.text ?? q.question ?? '').trim()
+  if (typeof q === 'string') return q.trim() ? { text: q.trim(), choices: [], onYou: personalWait } : null
+  const text = [q.text, q.asked, q.question].find((value): value is string => typeof value === 'string' && value.trim() !== '')?.trim()
   if (!text) return null
   const choices = Array.isArray(q.choices) ? q.choices.filter(c => typeof c === 'string' && c.trim() !== '') : []
-  return { text, choices, onYou: q.on_you !== false }
+  const onYou = (q.on_you ?? personalWait) && q.for !== 'manager' && q.decided_by !== 'manager'
+  return { text, choices, onYou }
 }
 
 /**
@@ -313,39 +318,98 @@ function questionOf(q: WireQuestion | undefined): { text: string; choices: strin
  * text when it is one. A question (a request_person wait's `waiting.question`, or `question` from ask_person or an
  * escalation) comes before an approval or a review. Null when nothing waits on this person.
  */
-export function waitOf(s: Status): { key: string; prompt: string; question: string | null } | null {
+export function waitOf(s: Status, includeBoardOnly = false): { key: string; prompt: string; question: string | null } | null {
   const w = s.waiting
   const station = s.station?.name ?? null
-  const asked = questionOf(w?.question)
-  const fromWait = asked !== null && w?.on_you === true ? asked : null
-  const found = fromWait ?? questionOf(s.question)
-  const q = found !== null && found.onYou ? found : null
-  if (q !== null) {
+  const personalWait = w?.on_you === true && (w.on === 'person' || w.on === 'review')
+  const nestedBoard = w?.delivery === 'board_only' || (typeof w?.question === 'object' && w.question?.delivery === 'board_only')
+  const topBoard = typeof s.question === 'object' && s.question?.delivery === 'board_only'
+  const nested = (includeBoardOnly || !nestedBoard) ? questionOf(w?.question, personalWait) : null
+  const top = (includeBoardOnly || !topBoard) ? questionOf(s.question, false) : null
+  const fromRun = personalWait && nested?.onYou === true
+  const q = fromRun ? nested : top
+  if (q?.onYou) {
+    const topId = s.question && typeof s.question === 'object' ? s.question.question : null
+    const key = fromRun ? `question|${w.run}|${w.asked_at ?? q.text}`
+      : typeof topId === 'number' ? `decision|${topId}` : `question||${q.text}`
     return {
-      key: `question|${w?.run ?? ''}|${q.text}`,
+      key,
       prompt: waitingPrompt(s.story.reference, station, w?.on ?? null, q),
       question: q.text,
     }
   }
-  if (!w || w.on_you !== true || (w.on !== 'person' && w.on !== 'review')) return null
+  if (!personalWait || nested || (!includeBoardOnly && nestedBoard)) return null
   return { key: `${w.on}|${w.run}`, prompt: waitingPrompt(s.story.reference, station, w.on), question: null }
+}
+
+// Older story_status replies identify a question but only advertise whether the viewer can
+// answer it. needs_you supplies its actual owner, including for pre-delegation questions.
+async function confirmedStatus($: EngineInterface, s: Status): Promise<Status | null> {
+  const w = s.waiting
+  const question = typeof s.question === 'object' ? s.question : null
+  const decision = typeof question?.question === 'number' && typeof question.asked === 'string' ? question : null
+  const run = w?.on === 'person' && w.on_you && typeof w.question === 'string' && Array.isArray(w.tools) ? w : null
+  if (!decision && !run) return s
+  const needsOwner = run?.tools?.includes('answer_question') || decision?.tools?.includes('answer_question')
+  type Item = { delivery?: string; kind?: string; for?: string; on_you?: boolean; story?: {story?: string}; question_id?: number; run?: number | null; question?: string }
+  const result = needsOwner ? await call<{items?: Item[]}>($, 'needs_you', {factory: s.factory.factory, view: 'person'}) : null
+  if (needsOwner && !result?.ok) {
+    if (pendingAsks.has(s.story.story)) pendingAsks.set(s.story.story, null)
+    return null
+  }
+  const items = result?.ok ? result.data.items ?? [] : []
+  const mine = (id: string | number | undefined, runId: number | null, text: string | undefined) =>
+    items.find(i => i.kind === 'question' && i.for === 'person' && i.on_you === true && i.story?.story === s.story.story &&
+      i.question_id === id && (i.run ?? null) === runId && i.question === text)
+  const latestDelivery = (item?: Item | null) => item?.delivery === 'chat' || item?.delivery === 'board_only' ? {delivery:item.delivery} : {}
+  const runItem = run && mine(run.run, run.run, run.question as string)
+  const decisionItem = decision && mine(decision.question, null, decision.asked)
+  return {
+    ...s,
+    ...(run && {waiting: {...run, ...latestDelivery(runItem), on_you: !!runItem && Boolean(run.tools?.includes('answer_question'))}}),
+    ...(decision && {question: {...decision, ...latestDelivery(decisionItem), on_you: !!decisionItem && decision.on_you !== false && Boolean(decision.tools?.includes('answer_question'))}}),
+  }
 }
 
 // Asks wait here until the next timer tick sends them: a refresh also runs inside the tool.call hook of Claude's own
 // CodeBook calls, where submitting would wait on the turn that hook holds. Never submit from a tool.call hook.
-let pendingAsks: string[] = []
+// null parks an undelivered prompt until its owner can be confirmed again.
+const pendingAsks = new Map<string, string | null>()
+let sendingAsks = false
+let retryAsksAfter = 0
 
-function askOnce(beforeKey: string | null, wait: { key: string; prompt: string } | null): void {
-  if (wait === null || wait.key === beforeKey) return
-  if (!pendingAsks.includes(wait.prompt)) pendingAsks.push(wait.prompt)
+function askOnce(storyId: string, beforeKey: string | null, wait: { key: string; prompt: string } | null): void {
+  if (wait === null) pendingAsks.delete(storyId)
+  else if (wait.key !== beforeKey || pendingAsks.has(storyId)) pendingAsks.set(storyId, wait.key)
 }
 
-/** Sends the queued asks, if any, as one prompt: from the poll timer (every second), never from inside a tool call. */
-export function flushAsk($: EngineInterface): void {
-  if (stopping || pendingAsks.length === 0) return
-  const text = pendingAsks.join('\n\n')
-  pendingAsks = []
-  void $.prompt.submit({ text })
+/** A queued question may have been answered or moved to board-only delivery before the next timer tick. */
+export async function flushAsk($: EngineInterface): Promise<void> {
+  if (stopping || sendingAsks || !pendingAsks.size) return
+  sendingAsks = true
+  try {
+    const now = await $.clock.now()
+    if (retryAsksAfter > now) return
+    const ready: string[] = []
+    const generation = await continuationGeneration($)
+    const candidates = [...pendingAsks].filter(([, key]) => key !== null).slice(0, 2)
+    for (const [story, key] of candidates) {
+      const got = await call<Status>($, 'story_status', {story, limit: 1})
+      if (!got.ok) {
+        if (pendingAsks.get(story) === key) { pendingAsks.delete(story); pendingAsks.set(story, key) }
+        retryAsksAfter = now + 4000
+        continue
+      }
+      if (got.data.story.story !== story) { pendingAsks.delete(story); continue }
+      const current = await confirmedStatus($, got.data)
+      if (!await continuationCurrent($, generation)) return
+      if (!current || pendingAsks.get(story) !== key) continue
+      const wait = waitOf(current)
+      pendingAsks.delete(story)
+      if (wait?.key === key) ready.push(wait.prompt)
+    }
+    if (ready.length && !stopping) await $.prompt.submit({ text: ready.join('\n\n') })
+  } finally { sendingAsks = false }
 }
 
 /** The chat line for an event of the followed story (G5b's who/where), or null for one not worth a line. */
@@ -405,7 +469,8 @@ export async function refresh($: EngineInterface, generation?: number): Promise<
   if (!await continuationCurrent($, generation)) return
   await setLink($, got)
   if (!got.ok) return
-  const s = got.data
+  const s = await confirmedStatus($, got.data)
+  if (!s) return
   await observeContinuation($, a.story, s, generation)
   if (!await continuationCurrent($, generation)) return
   const byStation = new Map(s.stations.map(one => [one.station, one]))
@@ -453,7 +518,7 @@ export async function refresh($: EngineInterface, generation?: number): Promise<
     })),
     onApprove: typeof w?.on_approve?.sentence === 'string' ? w.on_approve.sentence : null,
     leftForPerson: s.done?.needs_person === true && typeof s.done.sentence === 'string' ? s.done.sentence : null,
-    question: wait?.question ?? null,
+    question: waitOf(s, true)?.question ?? null,
     waitKey: wait?.key ?? null,
     lastEvent: s.last_event ?? before?.lastEvent ?? null,
     checkedAt: await $.clock.now(),
@@ -469,11 +534,11 @@ export async function refresh($: EngineInterface, generation?: number): Promise<
         if (line) $.ui.log(`CodeBook: ${line}`)
       }
       if (next.leftForPerson && !before.leftForPerson) $.ui.log(`CodeBook: ${s.story.reference} is done, but ${next.leftForPerson}`)
-      if (next.question !== null && next.waitKey !== before.waitKey) {
+      if (next.question !== null && next.waitKey !== null && next.waitKey !== before.waitKey) {
         $.ui.log(`CodeBook: ${s.story.reference} asks you: "${next.question}"`)
       }
     }
-    askOnce(before?.waitKey ?? null, wait)
+    askOnce(a.story, before?.waitKey ?? null, wait)
   })
   if (!await continuationCurrent($, generation)) return
   if (before === null || (s.last_event ?? null) !== (before.lastEvent ?? null)) await loadTrail($, s.story.story, generation)
@@ -523,13 +588,14 @@ export async function refreshWatched($: EngineInterface): Promise<void> {
   nextWatched = (nextWatched + 1) % Math.max(1, list.length)
   const got = await call<Status>($, 'story_status', { story: one.story, limit: 1 })
   if (!got.ok || !await continuationCurrent($, generation)) return
-  const s = got.data
+  const s = await confirmedStatus($, got.data)
+  if (!s) return
   await observeContinuation($, one.story, s, generation)
   if (!await continuationCurrent($, generation)) return
   const wait = waitOf(s)
   // Against the list as it is now: a story the person or Claude added while this poll ran stays.
   await changeOwnership($, generation, async () => {
-    askOnce(one.waitKey, wait)
+    askOnce(one.story, one.waitKey, wait)
     await update($, watched, now =>
       s.finished !== null
         ? now.filter(n => n.story !== one.story)
@@ -592,11 +658,12 @@ export async function follow($: EngineInterface, a: CodebookActive, generation: 
 
 export async function unfollow($: EngineInterface): Promise<void> {
   stopping++
-  pendingAsks = []
+  pendingAsks.clear()
+  retryAsksAfter = 0
   try {
     await stopContinuation($)
     await changeOwnership($, await continuationGeneration($), async () => {
-      pendingAsks = []
+      pendingAsks.clear()
       board = null
       await update($, watched, () => [])
       await update($, active, () => null)

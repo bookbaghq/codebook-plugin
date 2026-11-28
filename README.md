@@ -34,6 +34,12 @@ claude plugin list
 
 Reload plugins in an open Claude Code session or start a new one. For Windows and WSL setup, sign-in troubleshooting, and removal, see the [CodeBook support guide](https://codebook.work/docs/claude-and-chatgpt/connect-claude).
 
+### Offline dependencies for delegated local checks
+
+On a server that advertises dependency waits, the native executor reconstructs the requested Git commit in a disposable directory. For each npm v3 lockfile it reads registry tarballs from the local content-addressed cache, verifies their SHA512 digests and selects packages for the installed Node platform. Preparation disables networking and npm lifecycle scripts. The check receives read-only source and dependencies and a separate writable temporary directory with loopback access.
+
+A missing archive, unsupported native build or runtime mismatch leaves the proof waiting in CodeBook with the affected package or runtime. After the matching offline assets are available, run `/factory prove <id>` to resume the original selection. Other waiting checks remain available.
+
 ## Sign in
 
 The plugin adds the CodeBook connector, `https://app.codebook.work/mcp`. The first time you use it, Claude Code asks
@@ -448,6 +454,12 @@ On your computer that program is this plugin.
 - **Nothing else.** The plugin has no servers of its own, no analytics, and no keys in this repository. Your code
   stays in your checkout except what you push. Privacy: <https://codebook.work/privacy>.
 
+### Local milestone browser receipts
+
+Read the outstanding browser step in `work_orders`. If a native receipt already exists, submit its ID with `link_milestone_browser_receipt`. To collect one, explicitly request that single step with `request_milestone_browser_proof`, then run `/factory prove <proof>`. The plugin returns the receipt ID and the browser's actual pass or failure. Link it to the same attempt, criterion, repository and commit.
+
+The plugin runs a confirmed Python static-site recipe or, on macOS with Seatbelt, a standalone Node HTTP app. Node apps can use a direct `node server.mjs` entry or an equivalent `npm start` script, bind to 127.0.0.1 on the supplied PORT, and run from the pinned tracked files without outside services or dependency installation. The plugin starts an isolated loopback server and Chromium profile, verifies ownership of the dynamic server's listening socket, and keeps application writes in a disposable data folder. An existing path-only criterion can use a separately approved, Git-pinned named assertion plan that matches its original text and path. A structured specification can click a CSS selector and assert visible text or a visible selector. The browser records a JPEG and a bounded trace of action outcomes. CodeBook checks both digests before accepting a receipt.
+
 ## What is in this repository
 
 | Path | What it is |
@@ -456,7 +468,10 @@ On your computer that program is this plugin.
 | `hooks/` | The Factory pane, `/factory` and the repository guard (a Claude Code hooks module): `register.tsx`, `pane.tsx`, `factory.ts`, `connector.ts`, `guard.ts`, `resolve.ts` (what git and gh decide for a push), `checkout.ts` (a checkout that knows its factory: the lookup, the note for the session and the question before a push), `local.ts` (the checkouts `/factory status` shows), and `art.ts` (the illustrations, small WebP). |
 | `skills/factory-manager/` | The manager skill Run here follows: the code on your computer, stories, "proceed?", stations, what it decides and the six things it asks a person, taking the next story, narration. |
 | `agents/factory-worker.md` | The sub-agent that works one station run here as that station's agent, testing on a local copy of the app it builds itself. |
+| `test/typecheck.mjs` | Runs TypeScript 5.6.3 over `hooks/`, `types/` and `test/` with `tsconfig.json` against the `claude-code` declarations of the Claude Code installed here, and fails on any error. |
+| `tsconfig.json` | The type-check options the `claude-code` declarations give a hooks module. |
 | `test/rule-texts.mjs` | Checks, with plain Node, that the skill and the agent carry CodeBook's rule sentences word for word, and that nothing tells the manager to ask about a split, an order or a retry. |
+| `hooks/browser-proof.ts`, `scripts/milestone-browser.mjs` | Capture an approved milestone browser interaction from the clean, pinned checkout. |
 | `hooks/proof.ts` | Proof runs: the repository's checks, run here boxed and reported by the plugin itself. |
 | `hooks/egress.ts` | A proof run's list of allowed hosts: reading the list, and the filtering proxy and forwarder that enforce it. |
 | `types/index.d.ts` | The pane's state contract. |
@@ -467,13 +482,16 @@ On your computer that program is this plugin.
 
 ```bash
 claude plugin validate .
-claude plugin test .
+node scripts/test-factory.mjs --typecheck
 node --test test/rule-texts.mjs
 claude --plugin-dir .
 ```
 
-`claude plugin test` loads code files only, so the checks on what the skill and the agent say (`test/rule-texts.mjs`)
-run with Node.
+The local test command type-checks the plugin before running its native tests. Run the type check on its own with
+`node --test test/typecheck.mjs`, or put specific native test files after `--typecheck` to run those with it.
+The check uses Claude Code declarations from its plugin-authoring skill or a `claude-code.d.ts` selected through
+`CLAUDE_CODE_TYPES`. It reports which declarations it used, including when it falls back to the newest cached version,
+or where it looked if none were found.
 
 `scripts/art.sh <folder of PNGs>` rebuilds `hooks/art.ts` from the illustrations.
 

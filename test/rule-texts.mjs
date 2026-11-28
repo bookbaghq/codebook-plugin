@@ -306,3 +306,20 @@ test('mixed confirmation refusals restrict retries to the routed items', () => {
     assert.doesNotMatch(text, /confirm_stories|Proceed\?/)
   }
 })
+
+test('local workers obey the live response to a decision request', () => {
+  for (const path of ['agents/factory-worker.md', 'scripts/codex-manager.py']) {
+    const guidance = readFileSync(join(root, path), 'utf8')
+    for (const required of ['brief.factory_decisions', 'asked: false', 'decided_by: "manager"', 'continue', 'Only a confirmed personal wait', 'story_status', 'needs_you', 'reserved', 'criterion']) {
+      assert.ok(guidance.includes(required), path + ' lacks ' + required)
+    }
+  }
+})
+
+test('local manager and worker guidance use the recorded delivery for capability reminders', () => {
+  for (const relative of ['agents/factory-worker.md','skills/factory-manager/references/factory-tools.md','skills/factory-manager/references/review-and-recovery.md','scripts/codex-manager.py']) {
+    const text = readFileSync(join(root,relative),'utf8')
+    assert.ok(text.includes('board_only'),relative)
+    assert.ok(text.includes('chat'),relative)
+  }
+})

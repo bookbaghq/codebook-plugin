@@ -145,6 +145,8 @@ export type CodebookBacklogPage = { factory: string; lines: string[]; next?: { f
 
 /** Compact continuation observations belong to this session, independently of the pane selection. */
 export type CodebookWorkflowWatch = {
+  registerHarness?: boolean
+  harnessReadyAt?: number
   factory: string
   workflow: string
   name: string
@@ -168,6 +170,8 @@ export type CodebookContinuation = {
   manager?: CodebookWorkflowWatch
   retryAt?: number
   deliveryFailures?: number
+  completionRetryAt?: number
+  completionFailures?: number
   generation: number
   stories: Record<string, { factory: string; reference: string; order: string | null; state: string | null; event: number; waitingRun?: number }>
   orders: Record<string, { factory: string; reference: string; passes: string[] | null; milestones?: MilestoneJournal }>
