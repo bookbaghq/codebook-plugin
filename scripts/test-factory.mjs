@@ -42,9 +42,28 @@ try {
   process.stderr.write(result.stderr ?? '')
   const report = nativeResultsToTap(`${result.stdout ?? ''}\n${result.stderr ?? ''}`)
   if (report.error) console.error(report.error)
-  else process.stdout.write(report.tap)
   if (result.error) console.error(result.error.message)
   process.exitCode = result.status !== 0 ? result.status ?? 1 : (result.error || report.error || report.failed ? 1 : 0)
+  let tap = report.tap
+  if (!process.exitCode && files.includes(join(root, 'test', 'proof.test.tsx'))) {
+    // The SDK mocks exercise orchestration. This fixture forwards process calls to the real OS sandbox.
+    const native = spawnSync(process.execPath, [join(root, 'test/support/locked-proof-native.mjs')], {
+      cwd: root, encoding: 'utf8', timeout: 90000, maxBuffer: 2 * 1024 * 1024,
+    })
+    process.stderr.write(native.stderr || '')
+    const observed = (native.stdout || '').split(/\r?\n/).filter(line => line.startsWith('PASS ')).map(line => line.slice(5))
+    if (native.error || native.status !== 0 || observed.length !== 2) {
+      process.stderr.write(native.stdout || '')
+      if (native.error) console.error(native.error.message)
+      process.exitCode = native.status || 1
+    }
+    tap = tap.replace(/1\.\.(\d+)\n$/, (_, total) => {
+      const count = Number(total)
+      const extra = observed.map((name, index) => 'ok ' + (count + index + 1) + ' - ' + name)
+      return [...extra, '1..' + (count + extra.length), ''].join('\n')
+    })
+  }
+  if (tap) process.stdout.write(tap)
 } finally {
   rmSync(stage, { recursive: true, force: true })
 }

@@ -34,6 +34,12 @@ claude plugin list
 
 Reload plugins in an open Claude Code session or start a new one. For Windows and WSL setup, sign-in troubleshooting, and removal, see the [CodeBook support guide](https://codebook.work/docs/claude-and-chatgpt/connect-claude).
 
+### Offline dependencies for delegated local checks
+
+On a server that advertises dependency waits, the native executor reconstructs the requested Git commit in a disposable directory. For each npm v3 lockfile it reads registry tarballs from the local content-addressed cache, verifies their SHA512 digests and selects packages for the installed Node platform. Preparation disables networking and npm lifecycle scripts. The check receives read-only source and dependencies and a separate writable temporary directory with loopback access.
+
+A missing archive, unsupported native build or runtime mismatch leaves the proof waiting in CodeBook with the affected package or runtime. After the matching offline assets are available, run `/factory prove <id>` to resume the original selection. Other waiting checks remain available.
+
 ## Sign in
 
 The plugin adds the CodeBook connector, `https://app.codebook.work/mcp`. The first time you use it, Claude Code asks
