@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -101,18 +101,45 @@ test('The real billing profile refuses unrelated origins, paths, source commits 
     }
 });
 const jobPath = process.env.CODEBOOK_FIRST_PARTY_BILLING_TEST_JOB;
-test(
-    'First-party signed-in billing compares both real product sidebar meters',
-    { skip: !jobPath ? 'requires three approved first-party checkouts and the private Linux proof job' : false },
-    async () => {
-        const job = JSON.parse(readFileSync(jobPath, 'utf8'));
-        const result = await captureFirstPartyBilling(job);
-        assert.equal(result.unavailable, undefined);
-        assert.equal(result.observations.length, 3);
-        for (const key of ['account_digest', 'organization_digest', 'entitlement_digest', 'value_digest']) {
-            const observed = result.observations.map((row) => row[key]);
-            assert.match(observed[0], /^[a-f0-9]{64}$/);
-            assert.equal(new Set(observed).size, 1);
-        }
+const needsJob = {
+    skip: !jobPath ? 'requires three approved first-party checkouts and the private Linux proof job' : false
+};
+let exercised;
+function runApprovedFixture() {
+    if (!exercised)
+        exercised = (async () => {
+            assert.ok(privateLinuxReady(), 'run this only on the isolated Linux proof host');
+            const job = JSON.parse(readFileSync(jobPath, 'utf8'));
+            const leftovers = () =>
+                readdirSync(tmpdir())
+                    .filter((n) => n.startsWith('codebook-first-party-billing-'))
+                    .sort();
+            const before = leftovers();
+            const result = await captureFirstPartyBilling(job);
+            assert.deepEqual(leftovers(), before);
+            return { job, result, before, leftovers };
+        })();
+    return exercised;
+}
+test('First-party signed-in billing compares both real product sidebar meters', needsJob, async () => {
+    const { result } = await runApprovedFixture();
+    assert.equal(result.unavailable, undefined);
+    assert.equal(result.observations.length, 3);
+    for (const key of ['account_digest', 'organization_digest', 'entitlement_digest', 'value_digest']) {
+        const observed = result.observations.map((row) => row[key]);
+        assert.match(observed[0], /^[a-f0-9]{64}$/);
+        assert.equal(new Set(observed).size, 1);
     }
-);
+});
+test('First-party billing proof cleans disposable services and private test state', needsJob, async () => {
+    const { result, job, before, leftovers } = await runApprovedFixture();
+    assert.equal(result.unavailable, undefined);
+    const stale = structuredClone(job);
+    stale.plan.state_source.commit = '0'.repeat(40);
+    // A second, deliberately stale request first checks that every original
+    // socket can be bound, then refuses the changed source, without reinstalling.
+    const failed = await captureFirstPartyBilling(stale);
+    assert.equal(failed.unavailable, 'source_changed');
+    assert.equal(failed.observations, undefined);
+    assert.deepEqual(leftovers(), before);
+});
