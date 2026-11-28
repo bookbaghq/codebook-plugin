@@ -315,3 +315,11 @@ test('local workers obey the live response to a decision request', () => {
     }
   }
 })
+
+test('local manager and worker guidance use the recorded delivery for capability reminders', () => {
+  for (const relative of ['agents/factory-worker.md','skills/factory-manager/references/factory-tools.md','skills/factory-manager/references/review-and-recovery.md','scripts/codex-manager.py']) {
+    const text = readFileSync(join(root,relative),'utf8')
+    assert.ok(text.includes('board_only'),relative)
+    assert.ok(text.includes('chat'),relative)
+  }
+})

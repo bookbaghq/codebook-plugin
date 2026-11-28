@@ -152,7 +152,7 @@ For a pending personal sign-off include `reserved: "sign_off"` and its exact `cr
 use the exact `proposal_item` and its current owner. For an ordinary delivery decision omit the reservation. In the summary, say in one sentence what only the person can give, then what you found and its likely answers, so
 that `summary` reads on its own. Follow `brief.factory_decisions` and the current server response. When
 `decided_by: "manager"` comes back, follow the manager route and continue the work allowed by
-your current fence. An `asked: false` response can also mean the same person already has an open question.
+your current fence. An `asked: false` response can also mean the same person already has an open question. Match the current wait or `needs_you` entry. When its `delivery` is `board_only`, record the hold there and continue independent work. A preview that names the person as owner does not generate a separate reminder. With `chat`, missing or unknown delivery, keep the existing human decision flow.
 On a lost or ambiguous response, read `story_status` for this story and resolve its exact run/question against
 `needs_you` for this factory before retrying or surfacing it. Only a confirmed personal wait goes to that person. A waiting story leaves other eligible
 stories available to the manager.

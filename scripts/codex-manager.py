@@ -515,7 +515,10 @@ def prompt(scope, item):
             'Use the true reserved reason (e.g. spending), or sign_off with the exact criterion ID. '
             'An asked: false can be a duplicate. For an ambiguous or lost result read story_status for this story '
             'and match its run/question to needs_you for this factory before retrying or surfacing it. '
-            "Only a confirmed personal wait goes to that person. Respect the approved scope, proof and human gates. "
+            "Only a confirmed personal wait goes to that person. "
+            'Keep an exact wait with delivery: "board_only" on the factory board. Continue independent work. '
+            'For delivery: "chat" or an absent/unknown delivery, preserve the confirmed personal approval or question. '
+            "Respect the approved scope, proof and human gates. "
             "Do not run another station or manager, self-QA, merge or change settings.")
 
 

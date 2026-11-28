@@ -8,7 +8,7 @@ export type Check = { needs_person?: boolean; latest?: Attempt | null; route?: R
 export type OrderView = { order?: string; work_order?: { reference?: string; status?: string; paused?: boolean;
   execution_limits?: { deadline_reached?: boolean; last_refusal?: string } | null }; factory_paused?: boolean;
   milestones?: { milestone: number; state?: string; check?: Check | null; fixes?: { item_id?: number; state?: string; check_id?: number; card?: {public_id?: string} | null }[] }[] }
-type Attention = { kind?: string; route?: Route; factory?: string | {factory?: string}; order?: string;
+type Attention = { delivery?: string; kind?: string; route?: Route; factory?: string | {factory?: string}; order?: string;
   check?: number; check_id?: number; why?: string; on_you?: boolean }
 export type Needs = { for_manager?: Attention[]; for_person?: Attention[] }
 
@@ -63,6 +63,7 @@ export function decisions(view: OrderView, needs: Needs, factory: string, order:
     if (!route && check.route == null && !row.route && check.needs_person === true && owner === 'person' && row.on_you === true && typeof row.why === 'string' && row.why.trim()) {
       route = {factory, order, check: id, owner, action: 'review', reason: row.why}
     } else if (!route || row.route?.owner !== route.owner || row.route.action !== route.action || row.route.reason !== route.reason) continue
+    if (route.action === 'review' && row.delivery === 'board_only') continue
     if (route.owner !== owner || (route.action === 'review' && row.on_you !== true)) continue
     if (route.owner === 'manager' && (view.factory_paused || view.work_order.paused || view.work_order.execution_limits?.deadline_reached)) continue
     if (['retry', 'repair', 'review'].includes(route.action)) out.set(keyOf(route), { route, policy: check.check_cannot_run })

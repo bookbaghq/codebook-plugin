@@ -191,6 +191,10 @@ export async function adoptContinuation($: EngineInterface, data: unknown, gener
   await save($, generation)
 }
 
+function boardOnlyWait(status: Status): boolean {
+  return status.waiting?.delivery === 'board_only' || (typeof status.question === 'object' && status.question?.delivery === 'board_only')
+}
+
 function notice(current: CodebookContinuation, story: string, outcome: string): void {
   const one = current.stories[story]
   if (!one || outcome === one.state) return
@@ -216,14 +220,16 @@ export async function observeContinuation($: EngineInterface, story: string, sta
       if (!readyRun) delete next.pending[`runner:${story}`]
       one.waitingRun = readyRun
     }
+    const quiet = boardOnlyWait(status)
+    if (quiet && !status.finished) delete next.pending[`story:${story}`]
     const initialized = one.state !== null
     for (const event of status.events ?? []) {
       if (event.id <= one.event) continue
-      if (initialized && event.kind === 'run.blocked') notice(next, story, `blocked:${event.run ?? status.run?.run ?? event.id}`)
+      if (initialized && !quiet && event.kind === 'run.blocked') notice(next, story, `blocked:${event.run ?? status.run?.run ?? event.id}`)
       one.event = Math.max(one.event, event.id)
     }
     if (outcome) {
-      if (initialized) notice(next, story, outcome)
+      if (initialized && (!quiet || status.finished)) notice(next, story, outcome)
       else one.state = outcome
     } else if (!one.state?.startsWith('blocked') || status.run?.run !== Number(one.state.split(':')[1])) one.state = 'moving'
     one.event = Math.max(one.event, status.last_event ?? 0)
@@ -635,6 +641,19 @@ export async function flushContinuation($: EngineInterface): Promise<boolean> {
     const deliver: [string, string][] = [], stale: [string, string][] = [], deferred: [string, string][] = []
     let checked = 0
     for (const [key, line] of candidates) {
+      if (key.startsWith('story:')) {
+        const story = key.slice('story:'.length), owned = before.stories[story]
+        if (owned?.state?.startsWith('blocked:')) {
+          if (checked >= 8) continue
+          checked++
+          const got = await call<Status>($, 'story_status', {factory:owned.factory, story, limit:1})
+          if (!await continuationCurrent($, generation)) return false
+          if (!got.ok) { deferred.push([key, line]); continue }
+          if (got.data.story?.story !== story || got.data.factory?.factory !== owned.factory || boardOnlyWait(got.data)) {
+            stale.push([key, line]); continue
+          }
+        }
+      }
       if (!key.startsWith('runner:')) { deliver.push([key, line]); continue }
       if (checked >= 8) continue
       checked++
@@ -662,7 +681,7 @@ export async function flushContinuation($: EngineInterface): Promise<boolean> {
       for (const [key, line] of stale) {
         if (next.pending[key] !== line) continue
         delete next.pending[key]
-        const owned = next.stories[key.slice('runner:'.length)]
+        const owned = key.startsWith('runner:') && next.stories[key.slice('runner:'.length)]
         if (owned) delete owned.waitingRun
       }
       if (readFailed) next.deliveryFailures = failures + 1
@@ -679,7 +698,7 @@ export async function flushContinuation($: EngineInterface): Promise<boolean> {
       'Use the codebook:factory-manager skill: inspect this session\'s queued runs first, open proposals and the separate Backlog, then continue eligible authorized work. ' +
       'Use the signed-in Claude plan for local stations and record actual usage. Honor provider limits, approvals, capacity and deadlines. Never ask for a CodeBook token budget or switch to a paid fallback. Suggest policy still asks before new unapproved stories. Leave other sessions\' work alone. ' +
       (before.manager ? 'Use Run here only. Check current readiness and ownership before acting. ' : '') +
-      'Keep true blockers visible, inspect independent ready work, and do not repeat unchanged blocked tests or proof requests. This notice grants no approval to claim, confirm, merge or change settings.'
+      'Keep server-designated board_only waits on the board, including after resume. Preserve chat and legacy approvals. Inspect independent ready work and do not repeat unchanged blocked tests or proof requests. This notice grants no approval to claim, confirm, merge or change settings.'
     try {
       await $.prompt.submit({ text })
     } catch {
