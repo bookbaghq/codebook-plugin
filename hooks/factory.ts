@@ -361,12 +361,13 @@ async function confirmedStatus($: EngineInterface, s: Status): Promise<Status | 
   const mine = (id: string | number | undefined, runId: number | null, text: string | undefined) =>
     items.find(i => i.kind === 'question' && i.for === 'person' && i.on_you === true && i.story?.story === s.story.story &&
       i.question_id === id && (i.run ?? null) === runId && i.question === text)
+  const latestDelivery = (item?: Item | null) => item?.delivery === 'chat' || item?.delivery === 'board_only' ? {delivery:item.delivery} : {}
   const runItem = run && mine(run.run, run.run, run.question as string)
   const decisionItem = decision && mine(decision.question, null, decision.asked)
   return {
     ...s,
-    ...(run && {waiting: {...run, ...(runItem?.delivery === 'board_only' && {delivery: 'board_only'}), on_you: !!runItem && Boolean(run.tools?.includes('answer_question'))}}),
-    ...(decision && {question: {...decision, ...(decisionItem?.delivery === 'board_only' && {delivery: 'board_only'}), on_you: !!decisionItem && decision.on_you !== false && Boolean(decision.tools?.includes('answer_question'))}}),
+    ...(run && {waiting: {...run, ...latestDelivery(runItem), on_you: !!runItem && Boolean(run.tools?.includes('answer_question'))}}),
+    ...(decision && {question: {...decision, ...latestDelivery(decisionItem), on_you: !!decisionItem && decision.on_you !== false && Boolean(decision.tools?.includes('answer_question'))}}),
   }
 }
 

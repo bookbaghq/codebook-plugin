@@ -19,7 +19,7 @@ const BOARD = {
   ],
 }
 
-type At = 'build' | 'claimed' | 'review' | 'done' | 'asks' | 'escalated' | 'blocked' | 'numericMine' | 'numericManager' | 'numericReadOnly' | 'numericRunner' | 'numericNext' | 'numericUnavailable' | 'boardAsk' | 'boardBlocked'
+type At = 'build' | 'claimed' | 'review' | 'done' | 'asks' | 'escalated' | 'blocked' | 'numericMine' | 'numericManager' | 'numericReadOnly' | 'numericRunner' | 'numericNext' | 'numericUnavailable' | 'boardAsk' | 'boardBlocked' | 'deliveryBoard' | 'deliveryDecision' | 'deliveryRun'
 const ASKED = 'Refund to the card, or as store credit?'
 /** A CodeBook from before §12.10: person stations carry no on_approve. */
 const older = { codebook: false }
@@ -31,6 +31,11 @@ function status(at: At): Record<string, unknown> {
   // An agent asked for a person mid-run (request_person): the run waits on this person with the question's text.
   if (at === 'boardBlocked') return { ...status('blocked'), waiting: {on:'person', run:811, on_you:true, delivery:'board_only', question:'Optional capability'} }
   if (at === 'boardAsk') return { ...status('escalated'), question: {text:'Optional approval', on_you:true, delivery:'board_only'} }
+  if (at.startsWith('delivery')) return {
+    ...status('asks'),
+    waiting:{on:'person',run:811,on_you:true,delivery:'board_only',question:ASKED,tools:['answer_question']},
+    question:{question:41,asked:'Authorize this cost?',delivery:'board_only',tools:['answer_question']},
+  }
   if (at === 'asks') return {
     ...status('build'),
     run: { run: 811, state: 'waiting_for_person', where: 'here' },
@@ -206,6 +211,10 @@ function engine(on: On, at: { now: At; asks58?: boolean; done58?: boolean; sessi
     if (tool === 'needs_you' && args.view === 'person') {
       if (at.now === 'numericUnavailable') return {error: {code: 'UNREACHABLE', message: 'Temporarily offline'}}
       const base = {kind: 'question', for: 'person', on_you: true, story: {story: '6KjN'}}
+      if (at.now.startsWith('delivery')) return {items:[
+        {...base,question_id:811,run:811,question:ASKED,delivery:at.now === 'deliveryRun' ? 'chat' : 'board_only'},
+        {...base,question_id:41,run:null,question:'Authorize this cost?',delivery:at.now === 'deliveryDecision' ? 'chat' : 'board_only'},
+      ]}
       return {items: at.now === 'asks' ? [{...base, question_id: 811, run: 811, question: ASKED}]
         : ['numericMine', 'numericRunner', 'numericNext'].includes(at.now) ? [{...base, question_id: at.now === 'numericNext' ? 42 : 41, run: null, question: 'Authorize this cost?'}] : []}
     }
@@ -1126,4 +1135,23 @@ test('an optional board question leaves a separate personal review and unfamilia
   for (const delivery of ['chat', 'future', undefined]) {
     expect(waitOf({...base, waiting:null, question:{...optional, delivery}})?.question).toBe('Optional setup')
   }
+})
+
+test('a newer matched Ask setting restores only the designated question on a story', async ($, on) => {
+  const at = {now:'deliveryBoard' as At}
+  const {prompts,clock} = engine(on,at)
+  await $.session.start({cwd:'/',surface:'desktop',isInteractive:true})
+  await claudeStarts($)
+  await clock.advance(5000)
+  expect(prompts).toEqual([])
+  at.now = 'deliveryDecision'
+  await clock.advance(5000)
+  expect(prompts.length).toBe(1)
+  expect(prompts[0]).toContain('Authorize this cost?')
+  expect(prompts[0]).not.toContain(ASKED)
+  at.now = 'deliveryRun'
+  await clock.advance(5000)
+  expect(prompts.length).toBe(2)
+  expect(prompts[1]).toContain(ASKED)
+  expect(prompts[1]).not.toContain('Authorize this cost?')
 })
