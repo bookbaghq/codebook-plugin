@@ -22,6 +22,10 @@ def write(path, obj):
     temporary.replace(path)
 
 
+def claim_receipt(run, story, station):
+    return {"run": run, "story": story, "where": "here", "lease": {"fence": 1}, "brief": {"station": station}}
+
+
 def fake_server():
     root = Path(os.environ["CODEBOOK_TEST_FIXTURE"])
     for raw in sys.stdin:
@@ -42,8 +46,11 @@ def fake_server():
         elif method == "thread/resume":
             value = {"thread": {"id": params["threadId"]}}
         elif method == "mcpServer/tool/call":
-            assert params["threadId"] == "observe"
             tool, args = params["tool"], params["arguments"]
+            if tool == "claim_work":
+                assert params["threadId"].startswith("worker-")
+            else:
+                assert params["threadId"] == "observe"
             if tool == "factory_events":
                 data = {"last_event": cfg["cursor"], "events": cfg.get("events", [])}
             elif tool == "manager_brief":
@@ -85,6 +92,10 @@ def fake_server():
                 data = {"work": [{"story": story, "run": run, "claimed": claimed, "where": "here",
                                   "factory": {"factory": "factoryA"}, "workflow": {"workflow": "other" if story == "foreign" else "wf9"}}
                                  for story, run, claimed in cfg["work"]]}
+            elif tool == "claim_work":
+                story, run, claimed = next(row for row in cfg["work"] if row[1] == args["run"])
+                assert not claimed
+                data = claim_receipt(run, story, "QA")
             elif tool == "story_status":
                 story = args["story"]
                 current = next(((r, c) for s,r,c in cfg["work"] if s == story), None)
@@ -192,7 +203,7 @@ def rehearsal():
             until(lambda: len(turns()) == 1)
             first = turns()[0]
             assert "[CodeBook local wake newStory:22]" in first["items"][0]["content"][0]["text"]
-            assert "factory_station_claim" in first["items"][0]["content"][0]["text"]
+            assert json.loads(first["items"][0]["content"][1]["text"]) == claim_receipt(22, "newStory", "QA")
             assert status()["adopted"] == ["newStory"]
             assert (root/"confirmations.log").read_text().splitlines() == ["uncertain", "newStory"]
             assert not any("uncertain:44" in t["items"][0]["content"][0]["text"] for t in turns())
@@ -336,6 +347,10 @@ def obsolete_operator_holds():
             return {"factory": {"factory": "factoryA"}, "workflow": {"workflow": "wf9"},
                     "story": {"story": story}, **records[story]}
 
+        def tool_in(self, thread, name, *, run):
+            assert thread == "ready-thread" and name == "claim_work" and run == self.work["ready"]
+            return claim_receipt(run, "ready", "QA")
+
         def call(self, method, params):
             if method == "thread/start":
                 return {"thread": {"id": "ready-thread"}}
@@ -391,6 +406,47 @@ def obsolete_operator_holds():
         assert persisted["active"]["key"] == "ready:8"
         assert calls == ["held", "ready"]
         assert len(observer.turns) == 1 and observer.turns[0].startswith("[CodeBook local wake ready:8]")
+
+
+def claim_before_model():
+    api = runpy.run_path(str(SCRIPT))
+    manager_type = api["Manager"]
+    items = [dict(key=f"{story}:{run}", story=story, run=run, station="QA", agent="Jade")
+             for run, story in enumerate(("contested", "lost", "mismatch", "winner"), 1)]
+    claims, turns = [], []
+
+    class Host:
+        approval_threads = set()
+
+        def tool_in(self, thread, name, *, run):
+            assert name == "claim_work" and thread == f"worker-{run}"
+            claims.append(run)
+            if run == 1:
+                raise api["Refused"]("Already claimed")
+            if run == 2:
+                raise api["Hold"]("Lost claim response")
+            story = "another" if run == 3 else "winner"
+            return claim_receipt(run, story, "QA")
+
+        def call(self, method, params):
+            if method == "thread/start":
+                return {"thread": {"id": f"worker-{len(claims)+1}"}}
+            assert method == "turn/start" and params["threadId"] == "worker-4" and claims == [1, 2, 3, 4]
+            turns.append(json.loads(params["input"][1]["text"]))
+            return {"turn": {"id": "one"}}
+
+    with tempfile.TemporaryDirectory() as scratch:
+        root = Path(scratch)
+        cfg = {**SCOPE, "running": True, "cwd": scratch, "stories": [], "manage_ready": True}
+        write(root/"control.json", cfg)
+        manager = manager_type(root, cfg, Host())
+        with patch.dict(manager.tick.__globals__, {
+                "read_events": lambda *args: (1, []), "eligible": lambda *args, **kwargs: (items, "Ready.")}):
+            manager.tick()
+        assert turns == [claim_receipt(4, "winner", "QA")]
+        assert manager.state["active"]["native_fence"] == 1 and not manager.state["interaction_required"]
+        manager.state["active"]["dispatch"] = "claiming"
+        assert not manager.reconcile() and "active" not in manager.state and len(turns) == 1
 
 
 def refused_worker_creation():
@@ -464,6 +520,10 @@ def development_routing():
                     "waiting": {"run": run, "on": "runner", "on_you": True, "claimed": story in claimed,
                                 "lease": {"fence": 1, "expired": False} if story in claimed else None}}
 
+        def tool_in(self, thread, name, *, run):
+            assert thread == "qa-thread" and name == "claim_work" and run == 12
+            return claim_receipt(run, "review", "QA")
+
         def call(self, method, params):
             calls.append(("ordinary", method, params))
             if method == "thread/start":
@@ -508,6 +568,10 @@ def development_routing():
 
             def open(self, cwd, observe):
                 assert cwd == self.route["checkout"] and not observe
+
+            def tool_in(self, thread, name, *, run):
+                assert thread == "development-thread" and name == "claim_work" and run == 11
+                return claim_receipt(run, "public", "Development")
 
             def call(self, method, params):
                 route = self.route
@@ -633,4 +697,6 @@ if __name__ == "__main__":
         from milestone_manager import held_observation
         held_observation()
         print("ok 8 - held and pending supervisors observe existing receipts without starting work")
-        print("1..8")
+        claim_before_model()
+        print("ok 9 - Codex claims a station before spending a model turn")
+        print("1..9")

@@ -70,6 +70,10 @@ class Host:
             raise API["Hold"]("Lost reply")
         return {**args, "requested_check": r["check"], "check": {"id": 99}, "started": {"check_id": 99}}
 
+    def tool_in(self, thread, name, *, run):
+        assert thread == "independent" and name == "claim_work" and run == 123
+        return {"run": run, "story": self.ready_story, "where": "here", "lease": {"fence": 1}, "brief": {"station": "QA"}}
+
     def call(self, name, params):
         if name == "thread/start":
             return {"thread": {"id": "independent"}}
