@@ -23,7 +23,7 @@ export async function backlogText($: EngineInterface, words: string[]): Promise<
   const factoryWords: string[] = []
   let workflow: string | undefined, offset: number | undefined
   for (let i = 0; i < words.length; i++) {
-    const word = words[i]
+    const word = words[i]!
     if (!word.startsWith('--') && workflow === undefined && offset === undefined) {
       factoryWords.push(word)
       continue
