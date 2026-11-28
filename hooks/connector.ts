@@ -37,15 +37,49 @@ async function server($: EngineInterface): Promise<Called<string>> {
   }
 }
 
-function payload(result: McpToolResult): unknown {
+/** An answer the plugin could not read as JSON: said as such, never taken for an answer with nothing in it (#293). */
+class Unreadable {
+  /** `saved`: the file the engine put the whole answer in, when its note named one that could not be read either. */
+  constructor(readonly text: string, readonly saved: string | null) {}
+}
+
+/**
+ * Where the engine saved an answer too large to hand over (#293, found with Claude Code 2.1.332). An answer with
+ * structuredContent reaches a plugin as one text block of JSON; over 50,000 characters the engine saves that JSON in
+ * the session's `tool-results` folder and hands over this note with a short preview instead:
+ *
+ *   <persisted-output>
+ *   Output too large (63.7KB). Full output saved to: /…/tool-results/toolu_plugin_….txt
+ *
+ * Only a file in a `tool-results` folder is read, whatever the note says: the note is text, and a connector could send
+ * text that looks like it.
+ */
+export function savedAnswer(text: string): string | null {
+  if (!text.startsWith('<persisted-output>')) return null
+  const path = /saved to: *([^\r\n]+)/.exec(text)?.[1]?.trim()
+  if (!path) return null
+  const parts = path.replace(/\\/g, '/').split('/')
+  return parts.length > 2 && parts.at(-2) === 'tool-results' && parts.at(-1) && !parts.includes('..') ? path : null
+}
+
+async function payload($: EngineInterface, result: McpToolResult): Promise<unknown> {
   if (result.structuredContent !== undefined) return result.structuredContent
   const text = result.content.find(block => block.type === 'text')?.text
   if (text === undefined) return null
   try {
     return JSON.parse(text)
   } catch {
-    return { message: text }
+    // Not JSON: a saved answer, a cut one, or plain words.
   }
+  const saved = savedAnswer(text)
+  if (saved !== null) {
+    try {
+      return JSON.parse(await $.fs.read(saved))
+    } catch {
+      // The file is gone, too large to read or not JSON: say so below.
+    }
+  }
+  return new Unreadable(text, saved)
 }
 
 /** Calls one connector tool. A refusal (NOT_FOUND, CONFLICT, ...) is a result, never a throw. */
@@ -66,13 +100,24 @@ export async function call<T>($: EngineInterface, tool: string, args: Record<str
     if (!isSignIn && /auto mode classifier/i.test(raw)) return { ok: false, code: 'AUTO_MODE', message: AUTO_MODE, isSignIn }
     return { ok: false, code: isSignIn ? 'SIGN_IN' : 'UNREACHABLE', message: isSignIn ? SIGN_IN : message, isSignIn }
   }
-  const data = payload(result) as { error?: { code?: string; message?: string }; message?: string } | null
+  const read = await payload($, result)
+  const data = read as { error?: { code?: string; message?: string }; message?: string } | null
   if (result.isError) {
     const text = result.content.find(block => block.type === 'text')?.text
     return {
       ok: false,
       code: data?.error?.code ?? 'FAILED',
       message: data?.error?.message ?? text ?? 'CodeBook refused the call.',
+      isSignIn: false,
+    }
+  }
+  if (read instanceof Unreadable) {
+    return {
+      ok: false,
+      code: 'UNREADABLE',
+      message: read.saved !== null
+        ? `CodeBook's answer to ${tool} could not be read: it was too large for Claude Code to hand to the plugin, and the file Claude Code saved it in (${read.saved}) could not be read as JSON.`
+        : `CodeBook's answer to ${tool} could not be read: ${read.text.length.toLocaleString('en-US')} characters that are not JSON, starting "${read.text.slice(0, 80).replace(/\s+/g, ' ')}".`,
       isSignIn: false,
     }
   }
