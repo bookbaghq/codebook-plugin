@@ -630,6 +630,8 @@ export const register: Register = (on, options) => {
     if (followed) await watchContinuation($, followed.story, followed.reference, followed.factory, false, generation)
     for (const one of await read($, watched)) await watchContinuation($, one.story, one.reference, '', false, generation)
     $.clock.every(1000, () => {
+      // A persisted result can be reported while a pane refresh or a runner recheck is still in flight.
+      void flushContinuation($, 'completion')
       void tick($, proofHosts)
     })
     return next(e)

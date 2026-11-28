@@ -675,3 +675,93 @@ test('a Claude subscription manages web-started stations only for its selected c
   expect(submitted[0]).toContain('#7 has local run 77')
   expect(submitted[0]).not.toContain('#8')
 })
+
+function completionSession(on: Parameters<Parameters<typeof test>[1]>[1], session: string, state: Partial<CodebookContinuation>) {
+  const key = CONTINUATION_STORE + session
+  const store = new Map<string, unknown>([[key, { at: 999000, value: {
+    generation: 0, stories: {}, orders: {}, feeds: {}, nextFactory: 0, nextOrder: 0, checkedAt: 0, ...state,
+  } }]])
+  const clock = mock.clock(on, { now: 1_000_000 })
+  on('session.id', () => ({ value: session }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('command.register', () => ({ value: { command: 'factory' } }))
+  on('store.keys', () => ({ value: [...store.keys()] }))
+  on('store.get', (_, e) => ({ value: store.get(e.key) }))
+  on('store.set', (_, e) => { store.set(e.key, e.value); return { value: undefined } })
+  on('store.delete', (_, e) => { store.delete(e.key); return { value: undefined } })
+  on('mcp.connect', () => ({ value: { isConnected: true, server: 'codebook' } }))
+  const pending = () => (store.get(key) as { value: CodebookContinuation } | undefined)?.value.pending ?? {}
+  return { clock, store, pending }
+}
+
+test('a finished story is reported while an unrelated refresh is pending', async ($, on) => {
+  const session = 'slow-independent-refresh'
+  // Resume a failed host submission. Its retry becomes eligible while the watched card is still loading.
+  const { clock, store, pending } = completionSession(on, session, {
+    pending: { 'runner:dependent': '#90 has local run 30 waiting for its owner.', 'story:done': '#89 finished.' },
+    retryAt: 1_002_000,
+    stories: { dependent: { factory: 'pay', reference: '#90', state: 'moving', event: 1, order: null, waitingRun: 30 } },
+    manager: { factory: 'pay', workflow: 'wf1', name: 'Ship', cursor: 0, scannedAt: 0, offset: 0, ready: [], seen: [] },
+  })
+  store.set('session-1:' + session, { at: 999000, watched: [{ story: 'dependent', reference: '#90', title: 'Dependent', url: null, waitKey: null, question: null }] })
+  let entered!: () => void, release!: () => void
+  const started = new Promise<void>(resolve => { entered = resolve })
+  const held = new Promise<void>(resolve => { release = resolve })
+  const prompts: string[] = [], calls: string[] = []
+  on('mcp.call', async (_, e) => {
+    calls.push(e.tool)
+    let data: unknown
+    if (e.tool === 'story_status') {
+      entered()
+      await held
+      data = { story: { story: 'dependent', reference: '#90', title: 'Dependent' }, factory: { factory: 'pay' },
+        workflow: { workflow: 'wf1', name: 'Ship' }, finished: null, in_backlog: false, run: null, waiting: null, stations: [], events: [] }
+    } else if (e.tool === 'manager_brief') data = { factory: { factory: 'pay' }, workflow: { workflow: 'wf1', name: 'Ship' }, backlog: { stories: [] } }
+    else if (e.tool === 'factory_events') data = { events: [] }
+    else throw Error('Unexpected call: ' + e.tool)
+    return { value: { structuredContent: data, content: [] } } as never
+  })
+  on('prompt.submit', (_, e) => { prompts.push(e.text); return { text: e.text } as never })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const firstTick = clock.advance(1000)
+  await started
+  try {
+    await clock.advance(3000)
+    expect(prompts.length).toBe(1)
+    expect(prompts[0]).toContain('#89 finished.')
+    expect(prompts[0]).not.toContain('#90')
+    expect(pending()['runner:dependent']).toContain('#90')
+  } finally {
+    release()
+    await firstTick
+  }
+  await clock.advance(65000)
+  expect(prompts.length).toBe(1)
+  expect(calls.every(tool => ['story_status', 'manager_brief', 'factory_events'].includes(tool))).toBe(true)
+})
+
+test('completion overflow is retained until delivered', async ($, on) => {
+  const notices = Object.fromEntries(Array.from({ length: 19 }, (_, i) => [`completion:done-${i}`, `#${100 + i} finished.`]))
+  const { clock, pending } = completionSession(on, 'completion-overflow', { pending: notices })
+  const attempts: string[][] = [], accepted: string[][] = []
+  on('prompt.submit', (_, e) => {
+    const identities = e.text.match(/#\d+ finished\./g) ?? []
+    attempts.push(identities)
+    if (attempts.length === 1) throw Error('Host unavailable')
+    accepted.push(identities)
+    return { text: e.text } as never
+  })
+  const start = () => $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await start()
+  await clock.advance(1000)
+  expect(attempts.length).toBe(1)
+  expect(pending()).toEqual(notices)
+  await start()
+  await clock.advance(29000)
+  expect(accepted.length).toBe(0)
+  await clock.advance(65000)
+  expect(accepted.map(batch => batch.length)).toEqual([8, 8, 3])
+  expect(accepted.flat()).toEqual(Object.values(notices))
+  expect(attempts[0]).toEqual(accepted[0])
+  expect(pending()).toEqual({})
+})

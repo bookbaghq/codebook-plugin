@@ -16,7 +16,9 @@ const QUIET_MS = 30000
 const MAX_CHECKPOINT_AGE_MS = 30 * 24 * 3600 * 1000
 let saving = Promise.resolve()
 let polling = false
-let flushing = false
+const NOTICE_BATCH = 8
+type Delivery = 'completion' | 'current'
+const flushing = new Set<Delivery>()
 let lastBackgroundStory: string | undefined
 let previousCheckpoint: { key: string; value: string | null } | undefined
 
@@ -72,7 +74,18 @@ export async function restoreContinuation($: EngineInterface, generation: number
     previousCheckpoint = { key, value: JSON.stringify(checkpoint(restored)) }
     await update($, state, current => {
       if (current.generation !== generation) return current
-      return { ...restored, generation, checkedAt: 0, ...(restored.manager && { manager: { ...restored.manager, scannedAt: 0, offset: 0, seen: [] } }) }
+      // Earlier checkpoints keyed both terminal and blocked notices by story and shared a retry deadline.
+      let migrated = false
+      const pending = Object.fromEntries(Object.entries(restored.pending).map(([key, line]) => {
+        if (key.startsWith('story:') && (line.endsWith(' finished.') || line.endsWith(' was dropped.'))) {
+          migrated = true
+          return ['completion:' + key.slice('story:'.length), line]
+        }
+        return [key, line]
+      }))
+      return { ...restored, pending, generation, checkedAt: 0,
+        ...(migrated && { completionRetryAt: restored.retryAt, completionFailures: restored.deliveryFailures }),
+        ...(restored.manager && { manager: { ...restored.manager, scannedAt: 0, offset: 0, seen: [] } }) }
     })
   }
 }
@@ -149,7 +162,9 @@ export async function workflowStatus($: EngineInterface): Promise<string> {
   const checked = current.checkedAt ? new Date(current.checkedAt).toISOString() : 'awaiting first poll'
   const readError = watch?.readError ? ` Last readiness read failed (${watch.readError}).`
     : watch?.registerHarness !== undefined && !watch.harnessReadyAt ? ' Waiting for a selected, signed-in local subscription.' : ''
-  const delivery = current.deliveryFailures ? ` Last prompt submission failed. Retry after ${new Date(current.retryAt ?? 0).toISOString()}.` : ''
+  const retry = Math.min(current.deliveryFailures ? current.retryAt ?? 0 : Infinity,
+    current.completionFailures ? current.completionRetryAt ?? 0 : Infinity)
+  const delivery = Number.isFinite(retry) ? ` Last prompt submission failed. Retry after ${new Date(retry).toISOString()}.` : ''
   const questions = Object.values(current.orders).flatMap(order => Object.values(order.milestones?.questions ?? {})).join('\n')
   const watching = watch ? `Watching workflow ${watch.name} (${watch.factory}, ${watch.workflow}) for local manager work. Last poll: ${checked}. Pending notices: ${Object.keys(current.pending).length}.${readError}${delivery}` : ''
   const recovery = Object.values(current.orders).flatMap(order => [
@@ -198,9 +213,12 @@ function boardOnlyWait(status: Status): boolean {
 function notice(current: CodebookContinuation, story: string, outcome: string): void {
   const one = current.stories[story]
   if (!one || outcome === one.state) return
-  current.pending[`story:${story}`] = outcome.startsWith('blocked')
-    ? `${one.reference} is blocked; inspect independent ready work.`
-    : `${one.reference} ${outcome === 'dropped' ? 'was dropped' : 'finished'}.`
+  if (outcome.startsWith('blocked')) {
+    current.pending[`story:${story}`] = `${one.reference} is blocked; inspect independent ready work.`
+  } else {
+    delete current.pending[`story:${story}`]
+    current.pending[`completion:${story}`] = `${one.reference} ${outcome === 'dropped' ? 'was dropped' : 'finished'}.`
+  }
   one.state = outcome
 }
 
@@ -618,34 +636,36 @@ export async function pollContinuation($: EngineInterface, monitored: Set<string
 }
 
 /** Keep notices until the host accepts the prompt. A persisted delay bounds retries across a restart. */
-export async function flushContinuation($: EngineInterface): Promise<boolean> {
-  if (flushing) return false
-  flushing = true
+export async function flushContinuation($: EngineInterface, delivery: Delivery = 'current'): Promise<boolean> {
+  if (flushing.has(delivery)) return false
+  flushing.add(delivery)
   try {
-    const before = await read($, state), now = await $.clock.now(), generation = before.generation
-    if (before.manager?.registerHarness !== undefined && (!before.manager.registerHarness || !before.manager.harnessReadyAt
-      || now - before.manager.harnessReadyAt >= 2 * QUIET_MS)) return false
+    const before = await read($, state), generation = before.generation
+    const completed = delivery === 'completion'
     const candidates = Object.entries(before.pending).filter(([key]) => {
-      if (key === 'workflow') return false // Reconcile a legacy sentence into current story identities first.
+      if (completed !== key.startsWith('completion:') || key === 'workflow') return false
       if (!key.startsWith('workflow:')) return true
       const watch = before.manager
       return watch && !watch.readError && !watch.offset && watch.scannedAt > 0 && watch.ready.includes(key.slice('workflow:'.length))
-    })
-    if (!candidates.length || (before.retryAt ?? 0) > now) return false
-    const failures = Math.min(before.deliveryFailures ?? 0, 5)
+    }).slice(0, NOTICE_BATCH)
+    if (!candidates.length) return false
+    const now = await $.clock.now()
+    if (before.manager?.registerHarness !== undefined && (!before.manager.registerHarness || !before.manager.harnessReadyAt
+      || now - before.manager.harnessReadyAt >= 2 * QUIET_MS)) return false
+    const deadline = completed ? 'completionRetryAt' : 'retryAt'
+    const failureCount = completed ? 'completionFailures' : 'deliveryFailures'
+    if ((before[deadline] ?? 0) > now) return false
+    const failures = Math.min(before[failureCount] ?? 0, 5)
     const retryAt = now + Math.min(QUIET_MS * 2 ** failures, 15 * 60000)
-    await update($, state, current => current.generation === before.generation ? { ...current, retryAt } : current)
+    await update($, state, current => current.generation === generation ? { ...current, [deadline]: retryAt } : current)
     await save($, generation)
     if (!await continuationCurrent($, before.generation)) return false
     // A different card can occupy the pane after resume. Recheck the queued run itself before delivery.
     const deliver: [string, string][] = [], stale: [string, string][] = [], deferred: [string, string][] = []
-    let checked = 0
     for (const [key, line] of candidates) {
       if (key.startsWith('story:')) {
         const story = key.slice('story:'.length), owned = before.stories[story]
         if (owned?.state?.startsWith('blocked:')) {
-          if (checked >= 8) continue
-          checked++
           const got = await call<Status>($, 'story_status', {factory:owned.factory, story, limit:1})
           if (!await continuationCurrent($, generation)) return false
           if (!got.ok) { deferred.push([key, line]); continue }
@@ -655,8 +675,6 @@ export async function flushContinuation($: EngineInterface): Promise<boolean> {
         }
       }
       if (!key.startsWith('runner:')) { deliver.push([key, line]); continue }
-      if (checked >= 8) continue
-      checked++
       const story = key.slice('runner:'.length), owned = before.stories[story], watch = before.manager
       if (!owned?.waitingRun || !watch || owned.factory !== watch.factory) { stale.push([key, line]); continue }
       const got = await call<Status>($, 'story_status', { factory: watch.factory, workflow: watch.workflow, story, limit: 1 })
@@ -684,8 +702,8 @@ export async function flushContinuation($: EngineInterface): Promise<boolean> {
         const owned = key.startsWith('runner:') && next.stories[key.slice('runner:'.length)]
         if (owned) delete owned.waitingRun
       }
-      if (readFailed) next.deliveryFailures = failures + 1
-      else if (!Object.keys(next.pending).length) { next.deliveryFailures = 0; next.retryAt = 0 }
+      if (readFailed) next[failureCount] = failures + 1
+      else if (!deliver.length) { next[failureCount] = 0; next[deadline] = 0 }
       return next
     })
     if (stale.length || readFailed) await save($, generation)
@@ -694,7 +712,8 @@ export async function flushContinuation($: EngineInterface): Promise<boolean> {
     const entries = deliver.filter(([key, line]) => latest.pending[key] === line)
     if (!entries.length) return false
     const lines = entries.map(([, line]) => line)
-    const text = `CodeBook: ${lines.slice(0, 8).join(' ')}${lines.length > 8 ? ` ${lines.length - 8} other owned stories/orders changed.` : ''} ` +
+    const text = `CodeBook: ${lines.join(' ')} ` +
+      (completed ? 'Report these results to the person now. ' : '') +
       'Use the codebook:factory-manager skill: inspect this session\'s queued runs first, open proposals and the separate Backlog, then continue eligible authorized work. ' +
       'Use the signed-in Claude plan for local stations and record actual usage. Honor provider limits, approvals, capacity and deadlines. Never ask for a CodeBook token budget or switch to a paid fallback. Suggest policy still asks before new unapproved stories. Leave other sessions\' work alone. ' +
       (before.manager ? 'Use Run here only. Check current readiness and ownership before acting. ' : '') +
@@ -702,7 +721,7 @@ export async function flushContinuation($: EngineInterface): Promise<boolean> {
     try {
       await $.prompt.submit({ text })
     } catch {
-      await update($, state, current => current.generation === before.generation ? { ...current, deliveryFailures: failures + 1 } : current)
+      await update($, state, current => current.generation === before.generation ? { ...current, [failureCount]: failures + 1 } : current)
       await save($, generation)
       return false
     }
@@ -710,9 +729,9 @@ export async function flushContinuation($: EngineInterface): Promise<boolean> {
       if (current.generation !== before.generation) return current
       const pending = { ...current.pending }
       for (const [key, line] of entries) if (pending[key] === line) delete pending[key]
-      return { ...current, pending, retryAt: readFailed ? retryAt : 0, deliveryFailures: readFailed ? failures + 1 : 0 }
+      return { ...current, pending, [deadline]: readFailed ? retryAt : 0, [failureCount]: readFailed ? failures + 1 : 0 }
     })
     await save($, generation)
     return true
-  } finally { flushing = false }
+  } finally { flushing.delete(delivery) }
 }
