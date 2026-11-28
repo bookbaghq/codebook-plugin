@@ -11,6 +11,8 @@
 // BACKLOG_LOOK). Change one here only together with that file.
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { proposalGuidance } from '../skills/factory-manager/scripts/proposal-guidance.mjs'
 import { dirname, join, relative, resolve } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
@@ -144,7 +146,7 @@ test('the manager skill: new stories and the next story follow the factory\'s se
     assert.ok(skill.includes(`${said.name} (\`${level}\``), `the level ${level} is not named "${said.name}"`)
     carries(skill, `The manager skill, level ${level}`, [said.rule, said.next])
   }
-  for (const part of ['`manager_brief.goes_alone`', '`{ level, name, alone, rule, next }`', '`confirm_stories { proposal, decided_by: "manager" }`', 'No `goes_alone` in the brief (an older CodeBook): ask "proceed?" before every new story, as before.']) assert.ok(skill.includes(part), `the skill does not say: ${part}`)
+  for (const part of ['`manager_brief.goes_alone`', '`{ level, name, alone, rule, next }`', '`confirm_stories { proposal, decided_by: "manager" }`', 'only the proposal’s own `goes_alone.may_confirm_yourself` set to literal `true` grants manager confirmation']) assert.ok(skill.includes(part), `the skill does not say: ${part}`)
   for (const where of ['`list_my_work { factory }`', '`manager_brief.proposals`', '`factory_board { factory, backlog_offset: 0 }`']) assert.ok(skill.includes(where), `it does not look in ${where}`)
   for (const limit of ['`you.on_my_computer.limit`', '`parallel.cards_at_once`', 'rule 7']) assert.ok(skill.includes(limit), `the limit ${limit} is not named`)
 })
@@ -207,4 +209,109 @@ test('factory continuation checks active work and proposed backlog', () => {
   assert.match(next, /A configured station named Backlog holds stories already on the board/)
   assert.match(next, /the stories it waits for, a paused work order/)
   assert.match(next, /the person's "proceed\?"/)
+})
+
+const proposed = (route) => ({
+  proposal: { proposal: 'wo7' }, stories: [{ item: 1, title: 'Export', criteria: [{ text: 'Export opens' }] }],
+  goes_alone: route,
+})
+// Claude's tool hook imports the selector. The shared skill also exposes it to the Codex CLI on stdin.
+const guidanceFor = (tool, reply) => {
+  const fromHook = proposalGuidance(tool, reply)
+  const fromCli = execFileSync(process.execPath, [join(root, 'skills/factory-manager/scripts/read-proposal-guidance.mjs'), tool],
+    { input: JSON.stringify(reply), encoding: 'utf8' }).trim()
+  assert.equal(fromCli, fromHook ?? '')
+  return fromCli
+}
+
+test('delegated pause selects wait guidance in Claude and Codex', () => {
+  const route = { next_action: 'wait_for_resume', decision_owner: 'manager', factory_paused: true, may_confirm_yourself: false }
+  const wait = guidanceFor('propose_stories', proposed(route))
+  assert.match(wait, /factory is paused.*manager can confirm.*after it resumes/i)
+  assert.match(wait, /re-read this proposal’s current approval route and readiness/)
+  assert.doesNotMatch(wait, /proceed|confirm_stories|ask the person/i)
+  assert.equal(guidanceFor('confirm_stories', { error: { code: 'CONFLICT', goes_alone: route } }), wait)
+  assert.equal(guidanceFor('confirm_stories', { error: { code: 'FORBIDDEN', goes_alone: route } }), '')
+  assert.match(guidanceFor('propose_stories', proposed({ next_action: 'confirm', decision_owner: 'manager', factory_paused: false })), /decided_by: "manager"/)
+})
+
+test('person-owned decisions select owner approval guidance', () => {
+  for (const paused of [true, false]) {
+    const guidance = guidanceFor('propose_stories', proposed({ next_action: 'ask_person', decision_owner: 'person', factory_paused: paused, may_confirm_yourself: true }))
+    assert.match(guidance, /each proposed story and its recorded acceptance criteria.*Proceed.*wait for the person’s yes before calling confirm_stories/s)
+    assert.doesNotMatch(guidance, /decided_by: "manager"/)
+    if (paused) assert.match(guidance, /wait for the factory to resume before placing/)
+  }
+  assert.match(guidanceFor('confirm_stories', { error: { code: 'FORBIDDEN', goes_alone: { next_action: 'ask_person' } } }), /wait for the person’s yes/)
+})
+
+test('legacy approval metadata preserves ask-first fallback', () => {
+  assert.match(guidanceFor('propose_stories', proposed({ may_confirm_yourself: true })), /decided_by: "manager"/)
+  for (const route of [{ may_confirm_yourself: false }, {}, undefined, { level: 'full', alone: true }, { may_confirm_yourself: 'true' }]) {
+    assert.match(guidanceFor('propose_stories', proposed(route)), /wait for the person’s yes/)
+  }
+  assert.match(guidanceFor('propose_stories', proposed({ next_action: 'unknown', may_confirm_yourself: true })), /Leave this proposal pending/)
+  assert.equal(guidanceFor('propose_stories', { proposal: { proposal: 'wo7' }, stories: [], already_there: [{}] }), '')
+})
+
+const mixedRoute = { next_action: 'split', decision_owner: 'mixed', manager_items: [5, 9], person_items: [12, 3], factory_paused: false }
+const mixedProposal = {
+  proposal: { proposal: 'wo7' },
+  stories: [12, 5, 3, 9].map(item => ({ item, title: `Story ${item}`, criteria: [{ text: `Criterion ${item}` }] })),
+  goes_alone: mixedRoute,
+}
+
+function checkItemSelections(guidance, paused) {
+  assert.match(guidance, /titles and recorded criteria for person items \[12, 3\] and ask for approval only for those IDs/)
+  assert.match(guidance, /stories: \[12, 3\], decided_by: "person". For partial approval, pass only the IDs they approved/)
+  const selections = [...guidance.matchAll(/stories: (\[[^\]]*\]), decided_by: "(manager|person)"/g)]
+    .map(([, ids, owner]) => [owner, JSON.parse(ids)])
+  if (paused) {
+    assert.deepEqual(selections, [['person', [12, 3]]])
+    assert.match(guidance, /Manager items \[5, 9\] are waiting.*re-read their current route and readiness after resume/)
+    assert.match(guidance, /After their yes and factory resume, recheck the route/)
+  } else {
+    assert.deepEqual(selections, [['manager', [5, 9]], ['person', [12, 3]]])
+    assert.match(guidance, /independently of the person’s answer/)
+  }
+  assert.doesNotMatch(guidance, /each proposed story|ask “Proceed\?”/i)
+}
+
+test('mixed proposals route numeric items to their decision owners', () => {
+  for (const paused of [false, true]) {
+    checkItemSelections(guidanceFor('propose_stories', { ...mixedProposal, goes_alone: { ...mixedRoute, factory_paused: paused } }), paused)
+  }
+  for (const overrides of [{ decision_owner: 'person' }, { manager_items: [] }, { person_items: ['12', 3] },
+    { manager_items: [5, 5] }, { person_items: [12, 5] }, { manager_items: [5, 77] }, { person_items: [12] },
+    { next_action: undefined, may_confirm_yourself: true }, { factory_paused: null }]) {
+    const text = guidanceFor('propose_stories', { ...mixedProposal, goes_alone: { ...mixedRoute, ...overrides } })
+    assert.match(text, /pending and refresh/)
+    assert.doesNotMatch(text, /confirm_stories|Proceed\?/)
+  }
+})
+
+test('mixed confirmation refusals restrict retries to the routed items', () => {
+  for (const code of ['FORBIDDEN', 'CONFLICT']) {
+    for (const paused of [true, false]) {
+      const error = { code, goes_alone: { ...mixedRoute, factory_paused: paused } }
+      // The refusal's current selection supersedes the earlier proposal response.
+      const text = guidanceFor('confirm_stories', { ...proposed({ next_action: 'confirm' }), error })
+      assert.match(text, /refused confirmation applied no items/)
+      checkItemSelections(text, paused)
+    }
+  }
+  for (const route of [{ ...mixedRoute, person_items: undefined }, { ...mixedRoute, manager_items: [5, 12] }]) {
+    const text = guidanceFor('confirm_stories', { error: { code: 'FORBIDDEN', goes_alone: route } })
+    assert.match(text, /pending and refresh/)
+    assert.doesNotMatch(text, /confirm_stories|Proceed\?/)
+  }
+})
+
+test('local workers obey the live response to a decision request', () => {
+  for (const path of ['agents/factory-worker.md', 'scripts/codex-manager.py']) {
+    const guidance = readFileSync(join(root, path), 'utf8')
+    for (const required of ['brief.factory_decisions', 'asked: false', 'decided_by: "manager"', 'continue', 'Only a confirmed personal wait', 'story_status', 'needs_you', 'reserved', 'criterion']) {
+      assert.ok(guidance.includes(required), path + ' lacks ' + required)
+    }
+  }
 })

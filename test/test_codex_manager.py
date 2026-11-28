@@ -37,6 +37,8 @@ def fake_server():
         elif method == "thread/start":
             count = len(turns) + 1
             value = {"thread": {"id": "observe" if params.get("ephemeral") else f"worker-{count}"}}
+        elif method == "thread/read":
+            value = {"thread": {"id": params["threadId"], "path": None}}
         elif method == "thread/resume":
             value = {"thread": {"id": params["threadId"]}}
         elif method == "mcpServer/tool/call":
@@ -69,24 +71,36 @@ def fake_server():
                     assert item == 8 and cfg["ambiguous"]
                     cfg["ambiguous"] = False
                     cfg["work"].append(["uncertain", 44, False])
-                    created = []  # raced another manager; post-state alone grants no ownership
+                    created = []  # A race is not a creation receipt, and this station belongs to another person.
                 (root/"confirmations.log").open("a").write(story + "\n")
                 write(root/"factory.json", cfg)
                 data = {"decided_by": "manager", "proposal": {"proposal": "wo2"}, "created": created}
+            elif tool == "work_orders":
+                data = {"order": args["order"], "work_order": {"status": "open"}, "milestones": []}
+            elif tool == "needs_you":
+                data = {"for_person": [], "for_manager": []}
             elif tool == "factory_operations":
-                data = {"snapshot": {"control": {"paused": cfg["paused"]}, "holds": []}}
+                data = {"snapshot": {"control": {"paused": cfg["paused"]}, "tiles": cfg.get("tiles", {}), "status": cfg.get("status", {}), "holds": []}}
             elif tool == "list_my_work":
                 data = {"work": [{"story": story, "run": run, "claimed": claimed, "where": "here",
-                                  "factory": {"factory": "factoryA"}, "workflow": {"workflow": "wf9"}}
+                                  "factory": {"factory": "factoryA"}, "workflow": {"workflow": "other" if story == "foreign" else "wf9"}}
                                  for story, run, claimed in cfg["work"]]}
             elif tool == "story_status":
                 story = args["story"]
                 current = next(((r, c) for s,r,c in cfg["work"] if s == story), None)
-                data = {"factory": {"factory": "factoryA"}, "workflow": {"workflow": "wf9"},
+                data = {"story": {"story": story}, "factory": {"factory": "factoryA"}, "workflow": {"workflow": "wf9"},
                         "run_location": {"where": "here", "person": {"is_you": True}},
                         "in_backlog": (story == "newStory" and cfg["ready"]) or (story == "uncertain" and cfg.get("ambiguous")),
                         "station": {"name": "QA", "worker": {"type": "agent", "name": "Jade"}},
                         "run": None, "waiting": None}
+                if story == "uncertain" and current:
+                    data["run_location"] = {"where": "here", "person": {"is_you": False}}
+                if story == "person":
+                    data["station"]["worker"] = {"type": "person", "name": "Owner"}
+                if story == "approval":
+                    data["question"] = {"question": "Review this station"}
+                if story == "noRoute":
+                    data["station"]["name"] = "Development"
                 if current:
                     run, claimed = current
                     data.update(run={"run": run, "status": "external"},
@@ -159,18 +173,26 @@ def rehearsal():
             assert not turns() and status()["cursor"] == 7 and not (root/"confirmations.log").exists()
             assert cli("start", "--cwd", str(root), check=False).returncode
             stop()
+            controls = state.with_name("control.json")
+            write(controls, {**json.loads(controls.read_text()), "local_token_budget": 100})
+            write(state, {**status(), "local_tokens_used": 120, "budget_stop": {"limit": 100, "overrun": 20},
+                          "usage_pending": {"old": {"run": 18, "fence": 1, "turn": "past", "unavailable": True}}})
+            cfg.update(status={"word": "on_hold_budget"}, tiles={"token_budget": 100, "tokens_today": 120})
             cfg["paused"] = True
             write(root/"factory.json", cfg)
             cli("start", "--cwd", str(root), "--manage-ready")
             until(lambda: "pause" in status().get("reason", ""))
             assert not turns()
+            assert "local_token_budget" not in json.loads(controls.read_text())
+            assert status()["previous_token_trial"]["stop"] == {"limit": 100, "overrun": 20}
+            assert status()["usage_pending"]["old"]["unavailable"]
             cfg["paused"] = False
             write(root/"factory.json", cfg)
             cli("follow", "--story", "claimed")
             until(lambda: len(turns()) == 1)
             first = turns()[0]
             assert "[CodeBook local wake newStory:22]" in first["items"][0]["content"][0]["text"]
-            assert "claim_work" in first["items"][0]["content"][0]["text"]
+            assert "factory_station_claim" in first["items"][0]["content"][0]["text"]
             assert status()["adopted"] == ["newStory"]
             assert (root/"confirmations.log").read_text().splitlines() == ["uncertain", "newStory"]
             assert not any("uncertain:44" in t["items"][0]["content"][0]["text"] for t in turns())
@@ -234,9 +256,141 @@ def rehearsal():
             until(lambda: len(turns()) == 5)
             stop()
             assert len(turns()) == 5 and not json.loads(cli("status").stdout)["enabled"]
+            # Another client confirms the next story after the last followed station has finished.
+            last = turns()
+            last[0]["status"] = "completed"
+            write(root/"turns.json", last)
+            cfg.update(cursor=13, work=[["foreign",30,False],["person",31,False],["approval",32,False],
+                                       ["alreadyClaimed",33,True],["noRoute",34,False],["externalStory",35,False]],
+                       tiles={"working":1,"max_concurrent_runs":1}, events=[])
+            write(root/"factory.json", cfg)
+            cli("start", "--cwd", str(root))
+            until(lambda: "concurrency limit" in status().get("reason",""))
+            assert len(turns()) == 5
+            stop()
+            cfg.update(cursor=14, tiles={"working":0,"max_concurrent_runs":1})
+            write(root/"factory.json", cfg)
+            cli("start", "--cwd", str(root))  # persisted workflow opt-in, no story assignment
+            until(lambda: len(turns()) == 6)
+            assert "[CodeBook local wake externalStory:35]" in turns()[0]["items"][0]["content"][0]["text"]
+            assert "noRoute:34" in status()["development_holds"]
+            assert "externalStory" not in status()["adopted"] and "externalStory" not in json.loads(cli("status").stdout)["stories"]
+            stop()
+            cli("start", "--cwd", str(root))
+            until(lambda: status().get("phase") == "working" and status().get("active", {}).get("key") == "externalStory:35")
+            assert len(turns()) == 6 and status()["notices"]["externalStory:35"]["attempts"] == 1
+            stop()
         finally:
             if json.loads(cli("status").stdout)["running"]:
                 stop()
+
+
+def obsolete_operator_holds():
+    api = runpy.run_path(str(SCRIPT))
+    ended = {"run": 7, "status": "completed", "state": "passed", "finished_at": "2026-11-25"}
+    history = {"run": None, "waiting": None, "stations": [{"station": "qa", **ended}]}
+    records = {
+        "ambiguous": {"run": {"run": 7, "state": "with_outside_agent"}, "stations": [ended]},
+        "done": {"finished": "done"},
+        "dropped": {**history, "finished": "dropped"},
+        "ended": {"run": {"run": 7, "state": "blocked", "finished_at": "2026-11-25"}},
+        "foreign": {"workflow": {"workflow": "another"}, "finished": "done"},
+        "history": history,
+        "later": {"run": {"run": 8, "state": "queued"}},
+        "live": {"run": {"run": 7, "state": "with_outside_agent"}},
+        "missing_finish": {"run": {"run": 7, "state": "superseded"}},
+        "older": {"run": {"run": 6, "state": "passed", "finished_at": "2026-11-25"}},
+        "sent_back": {"run": {**ended, "status": "rejected", "state": "sent_back"}},
+        "superseded": {"run": {**ended, "status": "superseded", "state": "superseded"}},
+        "unrelated_history": {**history, "stations": [{**ended, "run": 6}]},
+        "unknown": None,
+        "waiting": {**history, "waiting": {"run": 7, "on": "runner"}},
+        "wrong_story": {"story": {"story": "another"}, "finished": "done"},
+    }
+    calls = []
+
+    class Observer:
+        approval_threads = set()
+
+        def __init__(self, work=None):
+            self.turns = []
+            self.work = work or {}
+
+        def tool(self, name, **args):
+            if name == "factory_events":
+                return {"last_event": 99}
+            if name == "manager_brief":
+                return {"factory": {"factory": "factoryA"}, "workflow": {"workflow": "wf9", "name": "Software"},
+                        "you": {"may_run_here": True}}
+            if name == "factory_operations":
+                return {"snapshot": {"control": {"paused": False}}}
+            if name == "list_my_work":
+                return {"work": [{"story": story, "run": run, "where": "here", "claimed": False,
+                                  "factory": {"factory": "factoryA"}, "workflow": {"workflow": "wf9"}}
+                                 for story, run in self.work.items()]}
+            assert name == "story_status" and args["limit"] == 1
+            story = args["story"]
+            calls.append(story)
+            if records[story] is None:
+                raise api["Hold"]("Snapshot unavailable")
+            return {"factory": {"factory": "factoryA"}, "workflow": {"workflow": "wf9"},
+                    "story": {"story": story}, **records[story]}
+
+        def call(self, method, params):
+            if method == "thread/start":
+                return {"thread": {"id": "ready-thread"}}
+            assert method == "turn/start"
+            self.turns.append(params["input"][0]["text"])
+            return {"turn": {"id": "ready-turn"}}
+
+    cfg = {**SCOPE, "stories": [], "manage_ready": False, "running": True}
+    with tempfile.TemporaryDirectory() as directory:
+        folder = Path(directory)
+        notices = {story + ":7": {"operator_hold": 123} for story in records}
+        write(folder/"status.json", {"cursor": 99, "notices": notices})
+        manager = api["Manager"](folder, cfg, Observer())
+        manager.tick()
+        assert len(calls) == 4 and manager.state["interaction_required"]
+        manager.tick()
+        assert len(calls) == 4  # no repeated reads while polling
+        for _ in range(3):
+            manager.next_hold_read = 0
+            manager.tick()
+        assert "wrong_story" in calls  # keep rotating past the refused story in the same batch
+        expected = {key + ":7" for key in ("ambiguous", "foreign", "live", "missing_finish", "older",
+                                          "unknown", "unrelated_history", "waiting", "wrong_story")}
+        assert set(manager.holds) == expected
+        assert manager.state["notices"] == notices
+        manager = api["Manager"](folder, cfg, Observer())
+        assert set(manager.holds) == expected
+        records.update({key.split(":")[0]: {"finished": "done"} for key in expected})
+        for _ in range(3):
+            manager.next_hold_read = 0
+            manager.tick()
+        persisted = json.loads((folder/"status.json").read_text())
+        assert persisted["run_holds"] == {} and not persisted["interaction_required"]
+
+    with tempfile.TemporaryDirectory() as directory:
+        folder = Path(directory)
+        observer = Observer({"held": 7, "ready": 8})
+        cfg = {**cfg, "cwd": directory, "stories": list(observer.work)}
+        write(folder/"control.json", cfg)
+        write(folder/"status.json", {"cursor": 99, "notices": {"held:7": {"operator_hold": 123}},
+                                     "interaction_required": True})
+        records.update(held=None, ready={
+            "run": {"run": 8}, "waiting": {"run": 8, "on": "runner", "on_you": True, "claimed": False},
+            "station": {"name": "QA", "worker": {"type": "agent", "name": "Jade"}},
+            "run_location": {"where": "here", "person": {"is_you": True}},
+        })
+        calls.clear()
+        manager = api["Manager"](folder, cfg, observer)
+        with patch.object(time, "monotonic", return_value=100):
+            manager.tick()
+        persisted = json.loads((folder/"status.json").read_text())
+        assert persisted["run_holds"] == {"held:7": 123} and persisted["interaction_required"]
+        assert persisted["active"]["key"] == "ready:8"
+        assert calls == ["held", "ready"]
+        assert len(observer.turns) == 1 and observer.turns[0].startswith("[CodeBook local wake ready:8]")
 
 
 def refused_worker_creation():
@@ -261,7 +415,7 @@ def refused_worker_creation():
         write(folder/"control.json", config)
         with patch.dict(globals_for_tick, {
                 "read_events": lambda host, scope, cursor: (cursor + 1, []),
-                "eligible": lambda *args: ([item.copy()], "Eligible.")}):
+                "eligible": lambda *args, **kwargs: ([item.copy()], "Eligible.")}):
             for i in range(5):
                 manager = manager_class(folder, config, DeniedHost())
                 with patch.object(time, "time", return_value=10000 + i*1000):
@@ -467,4 +621,16 @@ if __name__ == "__main__":
         from paired_git_fixture import exercise
         exercise(runpy.run_path(str(SCRIPT)))
         print("ok 3 - Paired local Git operations bind the worker checkout and keep device signing outside the worker")
-        print("1..3")
+        obsolete_operator_holds()
+        print("ok 4 - local manager reconciles obsolete operator holds while preserving live decisions")
+        print("ok 5 - manage-ready continues eligible local station work after completion and restart")
+        from milestone_manager import exercise as milestone_wakes
+        milestone_wakes()
+        print("ok 6 - Codex wakes follow the exact milestone route")
+        from milestone_manager import manager_recovery
+        manager_recovery()
+        print("ok 7 - Codex follows typed recovery targets, verifies receipts and preserves the old policies")
+        from milestone_manager import held_observation
+        held_observation()
+        print("ok 8 - held and pending supervisors observe existing receipts without starting work")
+        print("1..8")

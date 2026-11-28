@@ -21,7 +21,10 @@ if (missing.length > 0) {
 const stage = mkdtempSync(join(tmpdir(), 'codebook-factory-tests-'))
 try {
   for (const name of ['hooks', 'types', '.claude-plugin']) cpSync(join(root, name), join(stage, name), { recursive: true })
+  const skillScripts = 'skills/factory-manager/scripts'
+  cpSync(join(root, skillScripts), join(stage, skillScripts), { recursive: true })
   mkdirSync(join(stage, 'test'))
+  cpSync(join(root, 'test/fixtures'), join(stage, 'test/fixtures'), { recursive: true })
   for (const file of files) cpSync(file, join(stage, 'test', basename(file)))
   console.error(`Running ${files.map(file => `test/${basename(file)}`).join(', ')}`)
   const result = spawnSync('claude', ['plugin', 'test', stage], { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 })

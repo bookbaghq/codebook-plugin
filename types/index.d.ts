@@ -145,6 +145,8 @@ export type CodebookBacklogPage = { factory: string; lines: string[]; next?: { f
 
 /** Compact continuation observations belong to this session, independently of the pane selection. */
 export type CodebookWorkflowWatch = {
+  registerHarness?: boolean
+  harnessReadyAt?: number
   factory: string
   workflow: string
   name: string
@@ -156,13 +158,21 @@ export type CodebookWorkflowWatch = {
   seen: string[]
 }
 
+export type MilestoneMemberSource = { member_item: number; member_story: string; repository: string; commit: string }
+export type Recovery = MilestoneMemberSource & ({kind: 'proof'; proof: number; executor: 'here' | 'runner'} | {kind: 'repair'; item: number; story: string})
+export type RetryRecord = { requested: number; state: 'pending' | 'confirmed'; check?: number; actor?: string;
+  at?: string | number; reason?: string; decidedBy?: number | null }
+export type RecoveryRecord = { check: number; target: Recovery; state: 'pending' | 'completed' | 'failed'; current?: boolean; note: string; run?: number
+  native?: { phase: 'preparing' | 'submitted'; attempt: number; nextReadAt: number } }
+export type MilestoneJournal = { recovery?: Record<string, RecoveryRecord>; prerequisites?: Record<string, string>; seen: string[]; questions: Record<string, string>; retries: Record<string, RetryRecord> }
+
 export type CodebookContinuation = {
   manager?: CodebookWorkflowWatch
   retryAt?: number
   deliveryFailures?: number
   generation: number
   stories: Record<string, { factory: string; reference: string; order: string | null; state: string | null; event: number; waitingRun?: number }>
-  orders: Record<string, { factory: string; reference: string; passes: string[] | null }>
+  orders: Record<string, { factory: string; reference: string; passes: string[] | null; milestones?: MilestoneJournal }>
   feeds: Record<string, number>
   pending: Record<string, string>
   nextFactory: number

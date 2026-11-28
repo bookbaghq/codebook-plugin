@@ -103,6 +103,7 @@ try {
     waits = []
   let mismatchedRuntime = false,
     unrelatedReady = false
+  let stagedAttempts = 0
   const $ = {
     clock: { now: async () => Date.now() },
     env: { get: async (name) => (name === 'HOME' ? temp : undefined) },
@@ -116,6 +117,7 @@ try {
           await writeFile(destination, JSON.stringify(supplied))
         }
         const res = await sys(argv, opt?.cwd || repo)
+        if (argv.includes('-I') && argv.includes('stage')) stagedAttempts++
         if (res.exitCode && argv.includes('-I')) console.error('Native preparer:', res.stderr.slice(-900))
         return res
       }
@@ -164,12 +166,23 @@ try {
       }
     }
   }
-  const invoke = (proof = 123) =>
+  const invoke = (proof = 123, authorized) =>
     runProof($, {
       proof,
+      authorized,
       known: [{ repository: target.repository, checkoutPath: repo }],
       hint: { worktree: repo, branch: 'main' }
     })
+  const checkExpiredRoute = async () => {
+    const before = stagedAttempts
+    const previousCalls = calls.length
+    const result = await invoke(123, async () => stagedAttempts === before)
+    assert.ok(stagedAttempts > before)
+    assert.equal(result.isRun, false)
+    assert.match(result.text, /recovery route changed/)
+    assert.deepEqual(calls.slice(previousCalls), [{ peek: true }])
+  }
+  await checkExpiredRoute()
   const happy = await invoke()
   assert.equal(happy.isRun, true, JSON.stringify(happy))
   assert.equal(reports[0]?.exit_code, 0, reports[0]?.output)
@@ -180,6 +193,7 @@ try {
   assert.equal(await git('status', '--porcelain'), before)
   console.log('PASS delegated proof runs with verified offline dependencies at the pinned commit')
   await rm(cache)
+  await checkExpiredRoute()
   await invoke()
   await invoke()
   assert.equal(waits.length, 1)

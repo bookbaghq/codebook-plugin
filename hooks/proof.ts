@@ -702,12 +702,15 @@ export function summaryOf(repository: string, sandbox: Sandbox, outcomes: StepOu
  * CodeBook last told this session; `hosts` the person's own list of allowed hosts (the `proof_hosts` option). → the
  * summary, or why nothing ran.
  */
-export async function runProof($: EngineInterface, { proof = null, known = [], hosts = null, hint = null }: { proof?: number | null; known?: CodebookCheckout[]; hosts?: unknown; hint?: ProofHint | null }): Promise<{ isRun: boolean; text: string }> {
+export async function runProof($: EngineInterface, { proof = null, known = [], hosts = null, hint = null, expected, authorized }: { proof?: number | null; expected?: { repository: string; commit: string }; authorized?: () => Promise<boolean>; known?: CodebookCheckout[]; hosts?: unknown; hint?: ProofHint | null }): Promise<{ isRun: boolean; text: string }> {
   const peeked = await waitingProofs($)
   if (!peeked.ok) return { isRun: false, text: peeked.message }
   const target = proof === null ? (peeked.waiting.find(one=>!one.dependency_wait) ?? peeked.waiting[0]) : peeked.waiting.find(one => one.proof === proof)
   if (!target) return { isRun: false, text: proof === null ? 'No proof run is waiting for this computer.' : `Proof run ${proof} is not waiting for this computer (it may already have been run, or it was asked for someone else's).` }
 
+  if (expected && (target.repository !== expected.repository || target.commit !== expected.commit || target.commands.length !== 1 || target.commands[0] !== 'test')) {
+    return {isRun:false, text:`Proof ${proof} is waiting for a matching own-test, repository and exact commit.`}
+  }
   const delegated = target.delegated_focused_version !== undefined
   const delegatedSandbox = delegated ? await findSandbox($) : null
   if (delegated && (target.delegated_focused_version !== 1 || !delegatedSandbox?.bin || !FULL_COMMIT.test(target.commit ?? ''))) {
@@ -724,37 +727,39 @@ export async function runProof($: EngineInterface, { proof = null, known = [], h
   if ('refused' in placed) return { isRun: false, text: placed.refused }
   const dir = placed.dir
 
-  // The commit that is checked out, whether anything is uncommitted, and the default branch as this git knows it.
-  if (delegated && delegatedSandbox && target.dependency_wait_version === 1) {
-    const temp = await quiet($, ['/usr/bin/mktemp', '-d', '/tmp/codebook-delegated-XXXXXXXX'])
-    const scratch = temp.stdout.trim()
-    if (temp.exitCode || !/^\/tmp\/codebook-delegated-[A-Za-z0-9]+$/.test(scratch))
-      return parkDependency($, target, unavailable('Cannot allocate an isolated temporary checkout.'))
+  if (delegated && delegatedSandbox) {
+    let scratch: string | undefined
     try {
-      const prepared = await prepareLocked($, target, dir, delegatedSandbox, scratch)
-      if ('code' in prepared) return await parkDependency($, target, prepared)
+      let prepared: Prepared | DependencyProblem | undefined
+      if (target.dependency_wait_version === 1) {
+        const temp = await quiet($, ['/usr/bin/mktemp', '-d', '/tmp/codebook-delegated-XXXXXXXX'])
+        const candidate = temp.stdout.trim()
+        if (!temp.exitCode && /^\/tmp\/codebook-delegated-[A-Za-z0-9]+$/.test(candidate)) {
+          scratch = candidate
+          prepared = await prepareLocked($, target, dir, delegatedSandbox, scratch)
+        } else {
+          prepared = unavailable('Cannot allocate an isolated temporary checkout.')
+        }
+      }
+      // Offline preparation can outlive the manager's route. Recheck before either queue mutation.
+      if (authorized && !await authorized()) return { isRun: false, text: 'The recovery route changed before the proof claim.' }
+      if (prepared && 'code' in prepared) return await parkDependency($, target, prepared)
       const claimed = await call<ProofWork>($, 'claim_proof', {
         proof: target.proof,
         delegated_focused_version: 1,
-        dependency_wait_version: 1
+        ...(prepared && { dependency_wait_version: 1 })
       })
       if (!claimed.ok) return { isRun: false, text: claimed.message }
       const work = claimed.data
       if (work.proof !== target.proof || !work.token || !work.report_url || !work.steps)
-        return { isRun: false, text: 'The prepared proof was unavailable.' }
+        return { isRun: false, text: 'The delegated proof was unavailable.' }
       return await runDelegated($, target, work, dir, delegatedSandbox, prepared)
     } finally {
-      await quiet($, ['/bin/rm', '-rf', scratch])
+      if (scratch) await quiet($, ['/bin/rm', '-rf', scratch])
     }
   }
-  if (delegated && delegatedSandbox) {
-    const claimed = await call<ProofWork>($, 'claim_proof', {proof:target.proof, delegated_focused_version:1})
-    if (!claimed.ok) return {isRun:false, text:claimed.message}
-    const work = claimed.data
-    if (work.proof !== target.proof || !work.token || !work.report_url || !work.steps) return {isRun:false, text:'The delegated proof was unavailable.'}
-    return runDelegated($, target, work, dir, delegatedSandbox)
-  }
 
+  // The commit that is checked out, whether anything is uncommitted, and the default branch as this git knows it.
   const head = (await quiet($, ['git', '-C', dir, 'rev-parse', 'HEAD'])).stdout.trim()
   const status = await quiet($, ['git', '-C', dir, 'status', '--porcelain'])
   const isDirty = status.exitCode !== 0 || status.stdout.trim() !== ''
@@ -762,11 +767,19 @@ export async function runProof($: EngineInterface, { proof = null, known = [], h
   await quiet($, ['git', '-C', dir, 'fetch', '--quiet', 'origin', branch], undefined, 20000)
   const base = (await quiet($, ['git', '-C', dir, 'rev-parse', '--verify', '--quiet', `refs/remotes/origin/${branch}`])).stdout.trim()
 
+  if (expected && (head !== expected.commit || isDirty || (authorized && !await authorized()))) {
+    return {isRun:false, text:"The recovery proof requires a clean checkout at its authorized commit and a current route."}
+  }
   const claimed = await call<ProofWork>($, 'claim_proof', { proof: target.proof, ...(target.case_report_version === 1 ? {case_report_version:1} : {}), ...(/^[0-9a-f]{40,64}$/.test(base) ? { base: { ref: branch, commit: base } } : {}) })
   if (!claimed.ok) return { isRun: false, text: claimed.message }
   const work = claimed.data
   if (work.proof === null || !work.token || !work.report_url || !work.steps) return { isRun: false, text: 'The proof run was taken by another session first.' }
 
+  if (expected && (work.proof !== target.proof || work.expected_commit !== expected.commit
+      || work.repository?.full_name !== expected.repository || !work.steps.some(s => !s.baseline && s.name === 'test')
+      || work.steps.some(s => !s.baseline && s.name !== 'test'))) {
+    return {isRun:false, text:"The proof claim no longer matches the recovery target."}
+  }
   if (work.steps.some(step => step.delegated_focused !== undefined && step.delegated_focused !== false)) {
     return runDelegated($, target, work, dir, {kind:'none', bin:null})
   }

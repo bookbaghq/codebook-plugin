@@ -1,7 +1,8 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
-import { splitRun } from '../hooks/factory'
+import { splitRun, waitOf } from '../hooks/factory'
+import type { Status } from '../hooks/factory'
 import { CONTINUATION_STORE } from '../hooks/continuation'
 
 // A story in the "Payments" factory: Plan passed, Build waits for this person's runner, Review is a person (you).
@@ -18,7 +19,7 @@ const BOARD = {
   ],
 }
 
-type At = 'build' | 'claimed' | 'review' | 'done' | 'asks' | 'escalated' | 'blocked'
+type At = 'build' | 'claimed' | 'review' | 'done' | 'asks' | 'escalated' | 'blocked' | 'numericMine' | 'numericManager' | 'numericReadOnly' | 'numericRunner' | 'numericNext' | 'numericUnavailable'
 const ASKED = 'Refund to the card, or as store credit?'
 /** A CodeBook from before §12.10: person stations carry no on_approve. */
 const older = { codebook: false }
@@ -37,6 +38,11 @@ function status(at: At): Record<string, unknown> {
   if (at === 'escalated') return {
     ...status('build'),
     question: { text: 'Which payment providers are in scope?', choices: ['Stripe only', 'Stripe and PayPal'], on_you: true },
+  }
+  if (at.startsWith('numeric')) return {
+    ...status('build'),
+    waiting: at === 'numericRunner' ? { on: 'runner', run: 899, on_you: true } : null,
+    question: {question: at === 'numericNext' ? 42 : 41, asked: 'Authorize this cost?', tools: at === 'numericReadOnly' ? [] : ['answer_question']},
   }
   if (at === 'done') return {
     ...status('review'),
@@ -195,6 +201,12 @@ function engine(on: On, at: { now: At; asks58?: boolean; done58?: boolean; sessi
     return { result: { content: [{ type: 'text', text: JSON.stringify(data) }], structuredContent: data }, text: JSON.stringify(data) }
   })
   function answer(tool: string, args: Record<string, unknown>) {
+    if (tool === 'needs_you' && args.view === 'person') {
+      if (at.now === 'numericUnavailable') return {error: {code: 'UNREACHABLE', message: 'Temporarily offline'}}
+      const base = {kind: 'question', for: 'person', on_you: true, story: {story: '6KjN'}}
+      return {items: at.now === 'asks' ? [{...base, question_id: 811, run: 811, question: ASKED}]
+        : ['numericMine', 'numericRunner', 'numericNext'].includes(at.now) ? [{...base, question_id: at.now === 'numericNext' ? 42 : 41, run: null, question: 'Authorize this cost?'}] : []}
+    }
     if (tool === 'factory_events') {
       if (at.lifecycle?.feedError) return { error: { code: 'UNREACHABLE', message: 'Temporarily offline' } }
       const events = (at.lifecycle?.events ?? []).filter(e => Number(e.id) > Number(args.after ?? 0))
@@ -1007,8 +1019,9 @@ test('continuation preserves approvals ownership and bounded wakeups', async ($,
   await clock.advance(5000)
   const text = continuationPrompts(prompts)[0]!
   expect(text).toContain('queued runs first, open proposals and the separate Backlog')
-  expect(text).toContain('current approvals, capacity, budgets and deadlines')
-  expect(text).toContain('suggest policy still asks before new unapproved stories')
+  expect(text).toContain('Honor provider limits, approvals, capacity and deadlines')
+  expect(text).toContain('Never ask for a CodeBook token budget or switch to a paid fallback')
+  expect(text).toContain('Suggest policy still asks before new unapproved stories')
   expect(text).toContain("Leave other sessions' work alone")
   expect(calls.some(c => c.args.factory === 'foreign' || c.args.order === 'wo8')).toBe(false)
   // A read in flight at /factory stop must not restore state or submit a late wake.
@@ -1025,4 +1038,61 @@ test('continuation preserves approvals ownership and bounded wakeups', async ($,
   const afterStop = calls.length
   await clock.advance(65000)
   expect(calls.length).toBe(afterStop)
+})
+
+test('only a confirmed personal wait may ask from the Factory pane', async () => {
+  const base = status('build') as Status
+  expect(waitOf({ ...base, question: 'Unassigned' })).toBeNull()
+  expect(waitOf({ ...base, question: { text: 'Unassigned' } })).toBeNull()
+  expect(waitOf({ ...base, question: { text: 'Managed', on_you: true, decided_by: 'manager' } })).toBeNull()
+  expect(waitOf({ ...base, waiting: { on: 'runner', run: 811, on_you: true, question: 'Runner work' } })).toBeNull()
+  const waiting = { on: 'person' as const, run: 811, on_you: true }
+  expect(waitOf({ ...base, waiting: { ...waiting, question: { text: 'Managed', for: 'manager' } } })).toBeNull()
+  expect(waitOf({ ...base, waiting: { ...waiting, question: { text: 'Another person', on_you: false } } })).toBeNull()
+  expect(waitOf({ ...base, waiting: { ...waiting, question: 'Actual personal wait' } })?.question).toBe('Actual personal wait')
+  expect(waitOf({ ...base, question: { text: 'Assigned to me', on_you: true } })?.question).toBe('Assigned to me')
+})
+
+test('a live numeric question id wakes only the viewer assigned its personal decision', async ($, on) => {
+  const at: {now: At} = {now: 'numericReadOnly'}
+  const {prompts, calls, clock} = engine(on, at)
+  await $.session.start({cwd: '/', surface: 'desktop', isInteractive: true})
+  await claudeStarts($)
+  await clock.advance(5000)
+  expect(prompts).toEqual([])
+  expect(calls.some(row => row.tool === 'needs_you' && row.args.view === 'person')).toBe(false)
+  at.now = 'numericManager'
+  await clock.advance(5000)
+  expect(prompts).toEqual([])
+  at.now = 'numericMine'
+  await clock.advance(5000)
+  expect(prompts.length).toBe(1)
+  expect(prompts[0]).toContain('Authorize this cost?')
+  at.now = 'numericUnavailable'
+  await clock.advance(5000)
+  at.now = 'numericRunner'
+  await clock.advance(5000)
+  expect(prompts.length).toBe(1)
+  at.now = 'numericNext'
+  await clock.advance(5000)
+  expect(prompts.length).toBe(2)
+  expect(prompts[1]).toContain('Authorize this cost?')
+})
+
+test('an ownership outage before delivery parks a queued personal question until it is confirmed again', async ($, on) => {
+  const at: {now: At} = {now: 'build'}
+  const {prompts, clock} = engine(on, at)
+  await $.session.start({cwd: '/', surface: 'desktop', isInteractive: true})
+  await claudeStarts($)
+  await clock.advance(5000)
+  at.now = 'numericMine'
+  await $.command.run(typed('status'))
+  expect(prompts.length).toBe(0)
+  at.now = 'numericUnavailable'
+  await $.command.run(typed('status'))
+  await clock.advance(5000)
+  expect(prompts.length).toBe(0)
+  at.now = 'numericRunner'
+  await clock.advance(10000)
+  expect(prompts.length).toBe(1)
 })

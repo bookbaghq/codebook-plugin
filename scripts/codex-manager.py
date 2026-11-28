@@ -20,6 +20,8 @@ from urllib.parse import parse_qs, urlsplit
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import paired_git
+import native_usage
+import milestone_routes
 
 IDENT = re.compile(r"[A-Za-z0-9_-]{1,70}")
 REPOSITORY = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}")
@@ -27,10 +29,15 @@ STORY = re.compile(r"(?:#[1-9][0-9]{0,9}|[A-Za-z0-9_-]{1,70})")
 INTERVAL = 30
 RECONCILE = 180
 MAX_ATTEMPTS = 3
+CLAIM_TOOL = "factory_station_claim"
 
 
 class Hold(Exception):
     pass
+
+
+class ProposalPaused(Hold):
+    """CodeBook explicitly refused the confirmation before creating any stories."""
 
 
 class Refused(Hold):
@@ -131,8 +138,8 @@ class Host:
         try:
             for line in self.proc.stdout:
                 message = json.loads(line)
-                if (self.accept_git and message.get("method") == "item/tool/call" and "id" in message
-                        and (message.get("params") or {}).get("tool") in paired_git.TOOLS):
+                if (message.get("method") == "item/tool/call" and "id" in message and ((message.get("params") or {}).get("tool") == CLAIM_TOOL
+                        or (self.accept_git and (message.get("params") or {}).get("tool") in paired_git.TOOLS))):
                     self.git_requests.put(message)
                 elif "id" in message:
                     self.answers.put(message)
@@ -177,11 +184,20 @@ class Host:
     def tool_in(self, thread, name, **args):
         result = self.call("mcpServer/tool/call", {"threadId": thread, "server": "codebook",
                                                   "tool": name, "arguments": args})
-        if result.get("isError"):
-            raise Hold(f"CodeBook refused {name}; check OAuth access and the selected scope.")
         data = result.get("structuredContent")
         if not isinstance(data, dict):
-            data = json.loads(result["content"][0]["text"])
+            text = next((part.get("text") for part in result.get("content", []) if part.get("type") == "text"), None)
+            try:
+                data = json.loads(text) if isinstance(text, str) else None
+            except ValueError:
+                data = None
+        if result.get("isError"):
+            error = data.get("error") if isinstance(data, dict) else None
+            if name == "confirm_stories" and isinstance(error, dict) and error.get("code") == "CONFLICT":
+                route = error.get("goes_alone")
+                if isinstance(route, dict) and route.get("next_action") == "wait_for_resume":
+                    raise ProposalPaused("CodeBook paused this proposal. Waiting for resume and current readiness.")
+            raise Hold(f"CodeBook refused {name}; check OAuth access and the selected scope.")
         if not isinstance(data, dict):
             raise Hold(f"CodeBook returned an unsupported response for {name}.")
         return data
@@ -203,11 +219,30 @@ def read_events(host, scope, cursor):
     return max(cursor, last or 0), result.get("events", [])
 
 
+def codex_source(row):
+    source = row.get("execution_source")
+    return source is None or isinstance(source, dict) and source.get("kind") == "codex"
+
+
 def hosted_here(status):
     location = status.get("run_location")
     if isinstance(location, dict):
-        return location.get("where") == "here" and (location.get("person") or {}).get("is_you") is True
+        return location.get("where") == "here" and codex_source(location) and (location.get("person") or {}).get("is_you") is True
     return location == "here"
+
+
+def scoped_story_status(host, scope, story, statuses):
+    if story not in statuses:
+        try:
+            status = host.tool("story_status", **scope, story=story, limit=1)
+        except (Hold, OSError):
+            status = {}
+        identities = {**scope, "story": story}
+        statuses[story] = status if all(
+            isinstance(status.get(field), dict) and status[field].get(field) == expected
+            for field, expected in identities.items()
+        ) else None
+    return statuses[story]
 
 
 def development_route(config, brief, status, story):
@@ -352,34 +387,38 @@ def preflight(host, route, scope=None):
         raise Hold(reasons.get(code, "The sandboxed Development capability check did not pass."))
 
 
-def eligible(host, config, adopted, only=None):
+def eligible(host, config, adopted, only=None, statuses=None, access=None, connect=None):
     scope = {k: config[k] for k in ("factory", "workflow")}
+    if statuses is None:
+        statuses = {}
     allowed = set(config["stories"]) | set(adopted)
-    if not allowed and not config["manage_ready"]:
-        return [], "Observing only; assign a story or opt into manager-ready drawer work."
     brief = host.tool("manager_brief", **scope)
     if (brief.get("factory", {}).get("factory") != scope["factory"]
             or brief.get("workflow", {}).get("workflow") != scope["workflow"]
             or brief.get("you", {}).get("may_run_here") is not True):
         return [], "The signed-in person cannot run this workflow locally."
+    if connect is not None and not connect(brief):
+        return [], "Waiting for the selected factory execution connection."
+    if not allowed and not config["manage_ready"]:
+        return [], "Observing only; assign a story or opt into manager-ready drawer work."
     snapshot = host.tool("factory_operations", factory=scope["factory"])["snapshot"]
     control = snapshot["control"]
     if control["paused"] or control.get("autonomy") == "observe":
         return [], "The factory is paused or its autonomy is set to Observe."
-    if (snapshot.get("status") or {}).get("word") == "on_hold_budget":
-        return [], "The factory token budget has been reached."
     tiles = snapshot.get("tiles") or {}
-    if tiles.get("token_budget") is not None and tiles.get("tokens_today", 0) >= tiles["token_budget"]:
-        return [], "The factory token budget has been reached."
     if tiles.get("max_concurrent_runs") is not None and tiles.get("working", 0) >= tiles["max_concurrent_runs"]:
         return [], "The factory concurrency limit has been reached."
     capacity = brief["you"].get("on_my_computer") or {}
     if capacity.get("limit") is not None and capacity.get("working_now", 0) >= capacity["limit"]:
         return [], "The local worker capacity is full."
+    if access is not None:
+        access["may_work"] = True
     candidates = []
     for row in host.tool("list_my_work", factory=scope["factory"])["work"]:
-        if (row.get("story") not in allowed and row.get("reference") not in allowed
-                or row.get("where") != "here" or row.get("claimed") is not False
+        followed = row.get("story") in allowed or row.get("reference") in allowed
+        if not followed and not config["manage_ready"]:
+            continue
+        if (row.get("where") != "here" or not codex_source(row) or row.get("claimed") is not False
                 or row.get("factory", {}).get("factory") != scope["factory"]
                 or row.get("workflow", {}).get("workflow") != scope["workflow"]):
             continue
@@ -409,13 +448,15 @@ def eligible(host, config, adopted, only=None):
     for story, run, proposal, item in dict.fromkeys(candidates):
         if only and (story, proposal, item) != (only["story"], only["proposal"], only["item"]):
             continue
-        status = host.tool("story_status", **scope, story=story, limit=1)
-        if (status.get("factory", {}).get("factory") != scope["factory"]
-                or status.get("workflow", {}).get("workflow") != scope["workflow"] or not hosted_here(status)):
+        status = scoped_story_status(host, scope, story, statuses)
+        if status is None or not hosted_here(status):
             continue
         waiting = status.get("waiting") or {}
         if run:
-            if (waiting.get("on") != "runner" or waiting.get("run") != run or waiting.get("on_you") is not True
+            current = status.get("run") or {}
+            if (status.get("finished") or status.get("in_backlog") or status.get("question")
+                    or current.get("run") != run or current.get("finished_at")
+                    or waiting.get("on") != "runner" or waiting.get("run") != run or waiting.get("on_you") is not True
                     or waiting.get("claimed") is not False):
                 continue
         elif not status.get("in_backlog") or status.get("run"):
@@ -449,7 +490,7 @@ def marker(key):
 def prompt(scope, item):
     route = item.get("route") or {}
     paired = bool(route.get("git_pairing"))
-    claim = "factory_git_claim" if paired else "CodeBook claim_work"
+    claim = "factory_git_claim" if paired else CLAIM_TOOL
     routing = ""
     if paired:
         routing = ("The supervisor has verified the paired clone for " + route["repository"] +
@@ -469,7 +510,12 @@ def prompt(scope, item):
             "instructions and exact fence, heartbeating during work. Start with the server PR and proof records and "
             "git worktree list --porcelain to find the exact local checkout. Claiming needs no remote git operation, "
             "repo search, work-order history or test. Reuse matching verified receipts, investigate only actual gaps, "
-            "and finish using complete_work with your valid fence. Respect the approved scope, proof and human gates. "
+            "and finish using complete_work with your valid fence. Follow brief.factory_decisions and the live server response. "
+            'When decided_by: "manager", follow the manager route and continue within your fence. '
+            'Use the true reserved reason (e.g. spending), or sign_off with the exact criterion ID. '
+            'An asked: false can be a duplicate. For an ambiguous or lost result read story_status for this story '
+            'and match its run/question to needs_you for this factory before retrying or surfacing it. '
+            "Only a confirmed personal wait goes to that person. Respect the approved scope, proof and human gates. "
             "Do not run another station or manager, self-QA, merge or change settings.")
 
 
@@ -496,6 +542,34 @@ def run_holds(state):
     return state["run_holds"]
 
 
+def station_run_ended(run):
+    finished_at = run.get("finished_at")
+    return (isinstance(finished_at, str) and bool(finished_at)
+            and run.get("state") in ("passed", "failed", "blocked", "cancelled", "superseded", "sent_back"))
+
+
+def operator_hold_ended(status, held):
+    current = status.get("run")
+    if current is not None:
+        if not isinstance(current, dict) or type(current.get("run")) is not int:
+            return False
+        if current["run"] == held:
+            return station_run_ended(current)
+    waiting = status.get("waiting")
+    if waiting is not None and (not isinstance(waiting, dict) or waiting.get("run") == held):
+        return False
+    if current is not None and current["run"] > held:
+        return True
+    if current is None and waiting is None and status.get("finished") in ("done", "dropped"):
+        return True
+    # The current station can have no run while a previous station records the exact run's end.
+    stations = status.get("stations")
+    if not isinstance(stations, list):
+        return False
+    exact = [run for run in stations if isinstance(run, dict) and type(run.get("run")) is int and run["run"] == held]
+    return bool(exact) and all(station_run_ended(run) for run in exact)
+
+
 class Manager:
     def __init__(self, folder, config, host):
         self.folder, self.config, self.host = folder, config, host
@@ -503,12 +577,37 @@ class Manager:
         self.state.setdefault("adopted", [])
         self.state.setdefault("lease_events", {})
         self.state.setdefault("workers", {})
+        if "milestone_orders" not in self.state:
+            # A pre-upgrade confirmed receipt establishes ownership; an unacknowledged proposal does not.
+            self.state["milestone_orders"] = {}
+            for key, entry in self.state["notices"].items():
+                parts = key.split(":")
+                if entry.get("confirmation") == "confirmed" and len(parts) == 3 and re.fullmatch(r"wo[1-9]\d*", parts[1]):
+                    self.state["milestone_orders"].setdefault(parts[1], milestone_routes.journal())
         self.holds = run_holds(self.state)
-        self.state.update(pid=os.getpid(), phase="starting")
+        # Preserve trial receipts and uncertain operations from older installations.
+        # They apply to the original worker only. A gross total never gates own-plan dispatch.
+        if "budget_stop" in self.state or "budget_turns" in self.state:
+            trial = self.state["previous_token_trial"] = {
+                "stop": self.state.pop("budget_stop", None), "turns": self.state.pop("budget_turns", {})}
+            for turns in trial["turns"].values():
+                for meter in turns.values():
+                    if meter.get("pending") and meter.get("wake"):
+                        self.holds.setdefault(meter["wake"].partition(":expiry:")[0], time.time_ns())
+        self.state["interaction_required"] = bool(self.holds or any(o["questions"] for o in self.state["milestone_orders"].values()))
+        self.next_hold_read = 0
+        self.next_milestone_read = 0
+        self.last_held_story = ""
+        self.state.update(pid=os.getpid(), phase="starting", observation="connecting")
         self.last_scan = 0
         self.immediate = False
+        self.supports_harness = False
+        self.next_harness_heartbeat = 0
+        self.selected_harness = False
         self.worker = None
         self.development_hosts = {}
+        self.usage_thread = None
+        self.usage_results = queue.Queue()
         self.capability_holds = self.state.setdefault("development_holds", {})
 
     def record(self, reason):
@@ -550,10 +649,16 @@ class Manager:
         if previous:
             info = host.call("thread/resume", {**params, "threadId": previous})
         else:
-            if route and route.get("git_pairing"):
+            if not (route and route.get("git_pairing")):
+                params["dynamicTools"] = [{"type": "function", "name": CLAIM_TOOL,
+                    "description": "Claim the station assigned to this thread. Returns its frozen brief and lease.",
+                    "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}}]
+            else:
                 params["dynamicTools"] = [{"type": "function", "name": name, "description": desc,
                                            "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}}
                                           for name, desc in paired_git.TOOLS.items()]
+            # Compact only this station thread; global account and model selection remain the operator's.
+            params["config"] = {"model_auto_compact_token_limit": 64000}
             info = host.call("thread/start", {**params, "allowProviderModelFallback": False})
         self.worker = self.state["thread"] = info["thread"]["id"]
         self.record("Connected to the independent station worker thread.")
@@ -591,6 +696,78 @@ class Manager:
                     host.close()
                 self.development_hosts.clear()
 
+    def queue_usage(self, worker, turn):
+        # Keep recovery pointers in the existing private supervisor state. No transcript is copied.
+        target = worker.get("item") or worker
+        thread = worker["thread"]
+        trial = self.state.get("previous_token_trial", {}).get("turns", {})
+        if trial.get(thread, {}).get(turn["id"], {}).get("settled"):
+            return
+        pending = self.state.setdefault("usage_pending", {})
+        if (pending.get(thread) or {}).get("turn") == turn["id"]:
+            return
+        pending[thread] = {
+            "run": target["run"], "thread": thread, "turn": turn["id"],
+            "fence": worker.get("native_fence") or (worker.get("git") or {}).get("fence") or native_usage.completion_fence(turn, target["run"]),
+        }
+
+    def deliver_usage(self, entry):
+        # Separate read-only observer transport. Slow disk, OAuth or network cannot hold a station.
+        host = None
+        try:
+            host = Host(self.config["cwd"])
+            host.open(self.config["cwd"])
+            thread = entry["thread"]
+            if not entry.get("fence"):
+                turns = host.call("thread/turns/list", {"threadId": thread, "itemsView": "full", "limit": 3})
+                turn = next((t for t in turns["data"] if t["id"] == entry["turn"]), {})
+                entry["fence"] = native_usage.completion_fence(turn, entry["run"])
+            if not entry.get("usage"):
+                info = host.call("thread/read", {"threadId": thread, "includeTurns": False})["thread"]
+                if info.get("id") == thread and not info.get("forkedFromId") and info.get("path"):
+                    entry["usage"] = native_usage.turn_usage(info["path"], thread, entry["turn"])
+            if not entry.get("fence") or entry.get("usage") is None:
+                raise Hold("Final native usage or claim receipt unavailable.")
+            result = host.tool("report_native_usage", run=entry["run"], fence=entry["fence"], usage=entry["usage"])
+            if result.get("recorded") is not True or result.get("run") != entry["run"]:
+                raise Hold("Native usage delivery is awaiting a receipt.")
+            entry["delivered"] = True
+        except (Hold, OSError, KeyError, TypeError, ValueError):
+            attempts = entry["attempts"] = entry.get("attempts", 0) + 1
+            entry["next"] = int(time.time()) + min(3600, 30 * 2 ** min(attempts, 7))
+            if attempts >= 8:
+                entry["unavailable"] = True
+                entry["reason"] = "Missing native measurement or claim" if not entry.get("usage") or not entry.get("fence") else "No server receipt after eight attempts"
+        finally:
+            self.usage_results.put(entry)
+            if host:
+                host.close()
+
+    def report_usage(self):
+        pending = self.state.setdefault("usage_pending", {})
+        # The worker queues exactly one answer before it exits. Consume it before
+        # selecting a retry, even if it finishes between supervisor ticks.
+        if self.usage_thread and self.usage_thread.is_alive():
+            return
+        try:
+            answered = self.usage_results.get_nowait()
+        except queue.Empty:
+            pass
+        else:
+            existing = pending.get(answered["thread"])
+            matching = existing and (existing["turn"], existing["run"]) == (answered["turn"], answered["run"])
+            if matching and answered.get("delivered"):
+                # Count only a server-acknowledged receipt and persist its removal with the total.
+                self.state["local_tokens_used"] = self.state.get("local_tokens_used", 0) + answered["usage"]["total_tokens"]
+                del pending[answered["thread"]]
+            elif matching:
+                pending[answered["thread"]] = answered
+        for entry in pending.values():
+            if int(time.time()) >= entry.get("next", 0) and not entry.get("unavailable"):
+                self.usage_thread = threading.Thread(target=self.deliver_usage, args=(dict(entry),), daemon=True)
+                self.usage_thread.start()
+                break
+
     def observe_workers(self):
         for key, worker in list(self.state["workers"].items()):
             try:
@@ -601,7 +778,9 @@ class Manager:
                 if worker.get("route"):
                     continue
                 raise
-            if any(t["id"] == worker["turn"] and t["status"] != "inProgress" for t in page["data"]):
+            ended = next((t for t in page["data"] if t["id"] == worker["turn"] and t["status"] != "inProgress"), None)
+            if ended:
+                self.queue_usage(worker, ended)
                 self.approvals()
                 del self.state["workers"][key]
 
@@ -610,7 +789,11 @@ class Manager:
         if not active:
             return False
         route = active["item"].get("route")
-        thread = self.worker_thread(active.get("thread") or self.state.get("thread"), route)
+        self.state["phase"] = "awaiting_receipt"
+        previous = active.get("thread") or self.state.get("thread")
+        if not previous:
+            raise Hold("The pending wake has no recorded worker thread. Inspect its receipt.")
+        thread = self.worker_thread(previous, route)
         page = self.host_for(route).call("thread/turns/list", {"threadId": thread, "limit": 3, "itemsView": "full"})
         for turn in page["data"]:
             found = turn["id"] == active.get("turn") or any(
@@ -632,7 +815,7 @@ class Manager:
                 if (target["run"] and current.get("run") == target["run"] and waiting.get("claimed") is True
                         and type(lease.get("fence")) is int and lease["fence"] > 0 and lease.get("expired") is False):
                     self.state["workers"][active["key"]] = {"thread": thread, "turn": turn["id"], "run": target["run"],
-                            "story": target["story"], "route": target.get("route"), "git": active.get("git", {})}
+                            "story": target["story"], "route": target.get("route"), "git": active.get("git", {}), "native_fence": active.get("native_fence")}
                     self.state["notices"][active["key"]]["done"] = True
                     self.state.pop("active")
                     self.last_scan = 0
@@ -641,6 +824,8 @@ class Manager:
                 self.state["phase"] = "working"
                 self.record("Waiting for the independently dispatched worker's live station claim.")
                 return True
+            if target.get("run"):
+                self.queue_usage(active, turn)
             # A pre-upgrade backlog turn cannot establish ownership from a model transcript.
             progressed = (current.get("run") != target["run"] or waiting.get("claimed") is True
                           or current.get("status") in {"completed", "blocked", "failed", "cancelled"}
@@ -656,6 +841,9 @@ class Manager:
         # May have lost the acknowledgement. Give history time to materialize before rechecking eligibility.
         if time.time() - active["at"] < 60:
             return True
+        if (active.get("git") or {}).get("claim") == "awaiting_receipt" or active.get("claim") == "awaiting_receipt":
+            self.record("Waiting for the recorded station claim receipt.")
+            return True
         self.state.pop("active")
         self.last_scan = 0
         self.record("The unacknowledged wake will be checked against current eligibility.")
@@ -666,20 +854,49 @@ class Manager:
         self.state["interaction_required"] = True
         self.record("An operator decision is required for " + key + "; retry that story explicitly after resolution.")
 
+    def reconcile_operator_holds(self, scope, statuses):
+        """Retire old host decisions only after CodeBook confirms the run has ended."""
+        now = time.monotonic()
+        if not self.holds or now < self.next_hold_read:
+            return
+        self.next_hold_read = now + INTERVAL
+        by_story = {}
+        for key in self.holds:
+            story, _, number = key.partition(":")
+            if STORY.fullmatch(story) and re.fullmatch(r"[1-9][0-9]{0,18}", number):
+                by_story.setdefault(story, []).append((key, int(number)))
+        # Rotate a small batch. A live hold or an unavailable story cannot starve the others.
+        stories = sorted(by_story, key=lambda story: (story <= self.last_held_story, story))
+        for story in stories[:4]:
+            self.last_held_story = story
+            status = scoped_story_status(self.host, scope, story, statuses)
+            if status is None:
+                continue
+            for key, held in by_story[story]:
+                if operator_hold_ended(status, held):
+                    del self.holds[key]
+        self.state["interaction_required"] = bool(self.holds or any(o["questions"] for o in self.state["milestone_orders"].values()))
+
     def confirm(self, item, entry):
         """Caller holds the control fence; record intent before the single allowed MCP mutation."""
         if not self.config["manage_ready"]:
             return
-        fresh, _ = eligible(self.host, self.config, self.state["adopted"], only=item)
+        fresh, _ = eligible(self.host, self.config, self.state["adopted"], only=item, connect=self.connect_harness)
         if not any(row["key"] == item["key"] and not row["run"] for row in fresh):
             return
         entry["confirmation"] = "awaiting_receipt"
         self.record("Submitting one manager-authorized local backlog confirmation for " + item["key"] + ".")
         # A lost reply or crash retains the intent. A later snapshot alone cannot establish our ownership.
-        reply = self.host.tool("confirm_stories", factory=self.config["factory"], proposal=item["proposal"],
-                               stories=[item["item"]], decided_by="manager", run_location="here", start=True)
+        try:
+            reply = self.host.tool("confirm_stories", factory=self.config["factory"], proposal=item["proposal"],
+                                   stories=[item["item"]], decided_by="manager", run_location="here", start=True)
+        except ProposalPaused as pause:
+            del entry["confirmation"]
+            self.record(str(pause))
+            return
         if exact_confirmation(reply, item):
             entry["confirmation"] = "confirmed"
+            self.state["milestone_orders"].setdefault(item["proposal"], milestone_routes.journal())
             if item["story"] not in self.state["adopted"]:
                 self.state["adopted"].append(item["story"])
         else:
@@ -688,6 +905,122 @@ class Manager:
         self.last_scan = 0
         self.immediate = True
         self.record("Received " + entry["confirmation"] + " for " + item["key"] + ".")
+
+    def milestone_snapshot(self, order):
+        factory = self.config["factory"]
+        view = self.host.tool("work_orders", factory=factory, order=order)
+        if view.get("order") != order or not isinstance(view.get("milestones"), list):
+            raise Hold("The owned work order could not be reconciled.")
+        needs = self.host.tool("needs_you", factory=factory)
+        if not all(isinstance(needs.get(k), list) for k in ("for_person", "for_manager")):
+            raise Hold("Milestone attention is unavailable.")
+        return view, milestone_routes.decisions(view, needs, factory, order)
+
+    def observe_milestone(self):
+        """Reconcile receipts only for orders adopted by an exact confirmation."""
+        orders = self.state["milestone_orders"]
+        if not orders:
+            return None
+        order = min(orders, key=lambda o: (o <= self.state.get("last_milestone_order", ""), o))
+        self.state["last_milestone_order"] = order
+        ledger = orders[order]
+        try:
+            view, actions = self.milestone_snapshot(order)
+        except (Hold, OSError):
+            ledger["read_pending"] = True
+            return None
+        ledger.pop("read_pending", None)
+        milestone_routes.recover(view, ledger)
+        targets = ledger.setdefault("recovery", {})
+        proofs = []
+        for key, record in targets.items():
+            record["current"] = key in actions
+            if record["state"] != "pending":
+                continue
+            target = record["target"]
+            if target["kind"] == "proof":
+                proofs.append(key)
+            else:
+                fix = milestone_routes.fix_for(view, record["check"], target)
+                if fix and fix.get("state") == "finished":
+                    record["state"] = "completed"
+        # Rotate through pending receipts so an unavailable proof cannot starve another.
+        proofs.sort(key=lambda k: (k <= ledger.get("last_proof_key", ""), k))
+        for key in proofs[:4]:
+            ledger["last_proof_key"] = key
+            record = targets[key]
+            target = record["target"]
+            try:
+                receipt = self.host.tool("proof_result", factory=self.config["factory"],
+                                         story=target["member_story"], proof=target["proof"])
+            except (Hold, OSError):
+                ledger["read_pending"] = True
+                continue
+            outcome = milestone_routes.proof_outcome(target, receipt)
+            if outcome:
+                record["state"] = outcome
+        ledger["prerequisites"] = {key: route["reason"] for key, (route, _) in actions.items() if route["action"] == "hold"}
+        ledger["questions"] = {key: question for key, question in ledger["questions"].items() if key in actions}
+        self.state["interaction_required"] = bool(self.holds or any(o["questions"] for o in orders.values()))
+        if (view.get("work_order") or {}).get("status") in ("done", "cancelled") and not (ledger["retries"] or targets):
+            del orders[order]
+            return None
+        return order, view, actions
+
+    def act_on_milestone(self, snapshot, may_work):
+        candidates = []
+        if snapshot is None:
+            return candidates
+        order, view, actions = snapshot
+        ledger = self.state["milestone_orders"][order]
+        targets = ledger["recovery"]
+        factory = self.config["factory"]
+        try:
+            for key, (route, policy) in actions.items():
+                question = f"{factory} / {order}, check #{route['check']}: {route['reason']} What would you like to do with this check?"
+                if key in ledger["seen"] and route["action"] == "review":
+                    ledger["questions"][key] = question
+                if route["action"] == "hold" or key in ledger["seen"] or key in ledger["retries"]:
+                    continue
+                if route["owner"] == "manager" and not (may_work and self.config["manage_ready"]):
+                    continue
+                with locked(self.folder / "control.lock"):
+                    if read(self.folder / "control.json", {}) != self.config:
+                        return candidates
+                    if self.milestone_snapshot(order)[1].get(key) != (route, policy):
+                        continue
+                    check = route["check"]
+                    if route["action"] == "repair":
+                        target = route["recovery"]
+                        if target["kind"] == "proof":
+                            if key not in targets:
+                                note = (f"Run /factory prove {target['proof']} with the signed-in local Claude proof plugin."
+                                        if target["executor"] == "here" else f"Waiting for registered executor proof {target['proof']}.")
+                                targets[key] = dict(target=target, check=check, state="pending", current=True, note=note)
+                                self.record(note)
+                        elif milestone_routes.fix_for(view, check, target):
+                            available, _ = eligible(self.host, self.config, self.state["adopted"], connect=self.connect_harness)
+                            for candidate in available:
+                                if candidate["run"] and candidate["story"] == target["story"]:
+                                    candidate["milestone_recovery"] = {"order": order, "key": key, "route": route, "policy": policy}
+                                    candidates.append(candidate)
+                                    targets[key] = dict(target=target, check=check, state="pending", current=True, run=candidate["run"])
+                        continue
+                    if route["action"] == "review":
+                        ledger["seen"].append(key)
+                        ledger["questions"][key] = question
+                        self.record("An operator question is available for " + key + ".")
+                    else:
+                        record = ledger["retries"][key] = dict(requested=check, state="pending", reason=route["reason"])
+                        self.record("Awaiting the server receipt for " + key + ".")
+                        reply = self.host.tool("decide_milestone_check", factory=factory, order=order, check=check,
+                                               authority="manager", decision="retry", **({"expected_policy": policy} if policy else {}))
+                        if milestone_routes.confirmed(reply, route):
+                            record.update(state="confirmed", actor="manager", check=reply["check"]["id"])
+        except (Hold, OSError):
+            ledger["read_pending"] = True
+        self.state["interaction_required"] = bool(self.holds or any(o["questions"] for o in self.state["milestone_orders"].values()))
+        return candidates
 
     def development_ready(self, item, base):
         route = item.get("route")
@@ -709,7 +1042,7 @@ class Manager:
         return True
 
     def service_git(self):
-        for host_key, host in list(self.development_hosts.items()):
+        for host_key, host in [(None, self.host), *self.development_hosts.items()]:
             pending = getattr(host, "git_requests", None)
             for _ in range(8):
                 if not pending:
@@ -732,7 +1065,7 @@ class Manager:
         verify = paired_git.require
         thread, turn = params.get("threadId"), params.get("turnId")
         name, call = params.get("tool"), params.get("callId")
-        verify(name in paired_git.TOOLS and params.get("arguments") == {} and not params.get("namespace")
+        verify((name == CLAIM_TOOL or name in paired_git.TOOLS) and params.get("arguments") == {} and not params.get("namespace")
                and isinstance(call, str) and len(call) <= 160 and bool(call) and thread and turn,
                "Invalid native station operation.")
         sessions = dict(self.state["workers"])
@@ -742,8 +1075,23 @@ class Manager:
         matches = [(k, row) for k, row in sessions.items() if row["thread"] == thread and row.get("turn") == turn]
         verify(len(matches) == 1, "This request has no current assigned worker.")
         key, worker = matches[0]
+        prior_turn = self.state.get("previous_token_trial", {}).get("turns", {}).get(thread, {}).get(turn, {})
+        verify(not prior_turn.get("pending") or key.partition(":expiry:")[0] not in self.holds,
+               "The prior station operation is awaiting its recorded outcome.")
         item = worker.get("item") or worker
-        route, story, run = item["route"], item["story"], item["run"]
+        route, story, run = item.get("route"), item["story"], item["run"]
+        if name == CLAIM_TOOL:
+            verify((self.route_key(route) if route else None) == host_key and not (route or {}).get("git_pairing"),
+                   "This claim does not belong to this worker host.")
+            verify(read(self.folder/"control.json", {}) == self.config and self.config.get("running"),
+                   "The operator changed or stopped this worker.")
+            receipt = host.tool_in(thread, "claim_work", run=run)
+            fence = (receipt.get("lease") or {}).get("fence")
+            verify(receipt.get("run") == run and receipt.get("where") == "here" and type(fence) is int and fence > 0,
+                   "CodeBook did not confirm the assigned local claim.")
+            worker["native_fence"] = fence
+            self.record("Recorded this native thread's station claim.")
+            return receipt
         binding = route.get("git_pairing")
         verify(binding and self.route_key(route) == host_key, "This worker has no paired Development route.")
         scope = {field: self.config[field] for field in ("factory", "workflow")}
@@ -816,10 +1164,7 @@ class Manager:
         self.record("Verified the paired station worker's Git receipt.")
         return receipt
 
-    def tick(self):
-        if not self.config["running"]:
-            return
-        scope = {k: self.config[k] for k in ("factory", "workflow")}
+    def observe_events(self, scope):
         previous = self.state["cursor"]
         cursor, events = read_events(self.host, scope, previous)
         # Expiry gives an already delivered local station a new opportunity on its SAME job ID.
@@ -835,20 +1180,79 @@ class Manager:
             if base in self.state["notices"] or base in self.state["lease_events"]:
                 self.state["lease_events"][base] = event_id
         self.state["last_read"] = int(time.time())
-        changed = self.state["cursor"] != cursor
         self.state["cursor"] = cursor
+        return previous != cursor
+
+    def connect_harness(self, brief=None):
+        if brief is not None:
+            contract = (brief.get("you") or {}).get("local_harness")
+            if contract is not None:
+                if not isinstance(contract, dict) or contract.get("version") != 1 or contract.get("register") != "connect_factory_harness":
+                    return False
+                self.supports_harness = True
+        if not self.supports_harness:
+            return True  # The older factory only has person-scoped Run here assignments.
+        now = time.monotonic()
+        if now >= self.next_harness_heartbeat:
+            previously_selected = self.selected_harness
+            self.selected_harness = False
+            receipt = self.host.tool("connect_factory_harness", factory=self.config["factory"], kind="codex", capabilities=["station"])
+            selected, source = receipt.get("selected"), receipt.get("source")
+            self.selected_harness = (receipt.get("registered") is True and "selected" in receipt and "source" in receipt and
+                                     (selected is None and source is None or selected is True and isinstance(source, dict) and source.get("kind") == "codex"))
+            if self.selected_harness != previously_selected:
+                self.last_scan = 0
+            self.next_harness_heartbeat = now + INTERVAL
+        return self.selected_harness
+
+    def observe(self):
+        """Read one scoped event page, a batch of held stories and one owned order."""
+        scope = {k: self.config[k] for k in ("factory", "workflow")}
+        error = None
+        try:
+            changed = self.observe_events(scope)
+            self.state["observation"] = "watching"
+        except (Hold, OSError) as failure:
+            error, changed = failure, False
+            self.state["observation"] = "events_unavailable"
+        statuses = {}
+        self.reconcile_operator_holds(scope, statuses)
+        snapshot = None
+        now = time.monotonic()
+        if changed or now >= self.next_milestone_read:
+            self.next_milestone_read = now + RECONCILE
+            snapshot = self.observe_milestone()
+        if error is not None:
+            # Keep independent receipts; the supervisor persists them and reconnects.
+            raise error
+        return changed, statuses, snapshot
+
+    def tick(self):
+        if not self.config["running"]:
+            return
+        changed, statuses, snapshot = self.observe()
+        scope = {k: self.config[k] for k in ("factory", "workflow")}
         self.approvals()
+        selected = self.connect_harness()
         self.service_git()
         self.observe_workers()
+        self.report_usage()
         if self.reconcile():
             self.record(self.state.get("reason", "Waiting for the manager receipt."))
             return
         self.state["phase"] = "observing"
-        if not changed and time.monotonic() - self.last_scan < RECONCILE:
+        if not selected:
+            self.record("Waiting for the selected factory execution connection.")
+            return
+        if snapshot is None and not changed and self.last_scan and time.monotonic() - self.last_scan < RECONCILE:
             self.record(self.state.get("reason", "Waiting for a CodeBook event."))
             return
         self.last_scan = time.monotonic()
-        ready, reason = eligible(self.host, self.config, self.state["adopted"])
+        access = {}
+        ready, reason = eligible(self.host, self.config, self.state["adopted"], statuses=statuses, access=access, connect=self.connect_harness)
+        recovery = self.act_on_milestone(snapshot, access.get("may_work", False))
+        selected = {item["key"] for item in recovery}
+        ready = recovery + [item for item in ready if item["key"] not in selected]
         for item in ready:
             expired_at = self.state["lease_events"].get(item["key"])
             if item["run"] and expired_at:
@@ -874,7 +1278,7 @@ class Manager:
                     continue
                 del self.holds[held_run]
                 entry.update(attempts=0, next=0)
-                self.state["interaction_required"] = bool(self.holds)
+                self.state["interaction_required"] = bool(self.holds or any(o["questions"] for o in self.state["milestone_orders"].values()))
             if entry["attempts"] >= MAX_ATTEMPTS:
                 reason = "Wake retry limit reached for " + item["key"] + "; inspect the dedicated thread."
                 continue
@@ -888,6 +1292,16 @@ class Manager:
                 if not item["run"]:
                     self.confirm(item, entry)
                     return
+                recovery = item.get("milestone_recovery")
+                if recovery:
+                    view, actions = self.milestone_snapshot(recovery["order"])
+                    route = recovery["route"]
+                    active = actions.get(recovery["key"]) == (route, recovery["policy"])
+                    if not active or not milestone_routes.fix_for(view, route["check"], route["recovery"]):
+                        continue
+                    eligible_now, _ = eligible(self.host, self.config, self.state["adopted"], only=item, connect=self.connect_harness)
+                    if not any(row["run"] == item["run"] for row in eligible_now):
+                        continue
                 if item.get("development") and not self.development_ready(item, held_run):
                     reason = f"Development hold {held_run}: " + self.capability_holds[held_run]["reason"]
                     continue
@@ -917,7 +1331,7 @@ class Manager:
             return
         uncertain = [k for k, n in notices.items() if n.get("confirmation") == "awaiting_receipt"]
         if uncertain:
-            reason += " Confirmation receipt missing for " + ", ".join(uncertain[:3]) + "; ownership will require an explicit handoff."
+            reason += " Confirmation receipt missing for " + ", ".join(uncertain[:3]) + "; a later station must independently qualify in this workflow."
         self.record(reason)
 
 
@@ -933,7 +1347,7 @@ def supervise(folder):
             if not config.get("running"):
                 break
             if config != manager.config:
-                manager.config, manager.last_scan = config, 0
+                manager.config, manager.last_scan, manager.next_milestone_read = config, 0, 0
             try:
                 if manager.host is None:
                     manager.host = Host(config["cwd"])
@@ -969,7 +1383,7 @@ def supervise(folder):
             pass
         finally:
             manager.close_host()
-            manager.state["phase"] = "stopped"
+            manager.state.update(phase="stopped", observation="stopped")
             manager.record("The local manager is stopped.")
 
 
@@ -983,7 +1397,7 @@ def main():
     parser.add_argument("--checkout", type=Path)
     parser.add_argument("--permissions", type=validated)
     parser.add_argument("--config-profile", type=validated)
-    parser.add_argument("--manage-ready", action="store_true", help="also manage new server-approved local drawer items")
+    parser.add_argument("--manage-ready", action="store_true", help="also manage server-authorized local agent runs and ready drawer items in this workflow")
     parser.add_argument("--story", action="append", type=lambda x: validated(x, STORY), default=[])
     args = parser.parse_args()
     if args.action == "route":
@@ -1012,7 +1426,8 @@ def main():
         print(json.dumps({**state, "running": running(folder), "enabled": config.get("running", False),
                           "stories": config.get("stories", []), "development_routes": config.get("development_routes", {}),
                           "git_pairings": config.get("git_pairings", {}),
-                          "manage_ready": config.get("manage_ready", False), "state_directory": str(folder)}, indent=2))
+                          "manage_ready": config.get("manage_ready", False),
+                          "state_directory": str(folder)}, indent=2))
         return
     with locked(folder/"control.lock"):
         config = read(folder/"control.json", {})
@@ -1099,6 +1514,7 @@ def main():
         if len(stories) > 64:
             parser.error("use at most 64 explicitly owned stories per workflow")
         config = {**config, "factory": args.factory, "workflow": args.workflow, "cwd": cwd, "stories": stories, "retries": config.get("retries", {}), "development_routes": config.get("development_routes", {}), "manage_ready": args.manage_ready or config.get("manage_ready", False), "running": True}
+        config.pop("local_token_budget", None)  # Upgrade the saved control without changing its scope.
         owner = (folder/"owner.lock").open("a+")
         fcntl.flock(owner, fcntl.LOCK_EX | fcntl.LOCK_NB)
         save(folder/"control.json", config)

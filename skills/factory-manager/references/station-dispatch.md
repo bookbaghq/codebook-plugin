@@ -45,6 +45,7 @@ Use `story_status { story, after }` for the one story you need the detail of. Po
     person's stories: do not wait for it in `list_my_work` and do not spawn a worker for it; follow it with
     `story_status` and say "Review runs in CodeBook's cloud on GPT-5." `set_station_cloud { …, always: false }` (after
     a yes) lets it run here again.
+  - **Local subscriptions.** Dispatch on the selected signed-in Codex or Claude Code subscription. Record actual native usage and keep working when a receipt is pending. A CodeBook gross-token ceiling does not apply to these workers. Honor provider quotas, access, pause, context limits and concurrency. Switching to an organization key or the cloud requires the person's explicit choice.
   - **Stories in parallel: one sub-agent per card.** Check every Run here story you follow, not only the first: when
     several have a run waiting for this runner, spawn their workers together, in ONE message (they run side by side).
     Several QA or BA agents at once are several sub-agents of this session. How many: `you.on_my_computer.limit` in all

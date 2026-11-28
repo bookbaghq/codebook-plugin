@@ -118,9 +118,9 @@ sentence, and `evidence` says what will show it:
 to ask, show the person each new story and ask "proceed?" before it starts. Where it lets you, confirm the stories you
 wrote yourself, say so in one line, and start the next ready story when one finishes.
 
-`manager_brief.goes_alone` answers the factory's level: `{ level, name, alone, rule, next }`. Do what its `rule` and
-`next` say: they are CodeBook's sentences for this factory. When it carries `held`, the factory's autonomy level or a
-pause holds you to a lower level for now: say so once. A person changes the setting under Factory settings →
+`manager_brief.goes_alone` answers the factory's level: `{ level, name, alone, rule, next }`. Its `rule` and
+`next` describe the factory default. Use the proposal-specific route below to decide who acts. A `held` level
+describes a current limit. A person changes the setting under Factory settings →
 Controls; you change it only where the factory lets you, after their yes (`change_factory_setting { factory, setting:
 "goes_alone", value }`, "The factory's settings" above). The levels:
 
@@ -132,20 +132,41 @@ Controls; you change it only where the factory lets you, after their yes (`chang
 - **Any story it wrote** (`full`): Confirm the stories you wrote yourself, in any work order, and say so in one line.
   For a story a person wrote, show it and ask "proceed?" first.
 
-`propose_stories` answers, for exactly the stories it holds, `goes_alone.may_confirm_yourself` (and `why_not`), and
-its `next` says which applies. To confirm alone, show the proposal in a few lines and call `confirm_stories {
-proposal, decided_by: "manager" }`, then tell the person in one line what you confirmed (the answer's `tell_person`).
-CodeBook checks the factory's level and refuses with the reason when it says to ask: then ask "proceed?", and after
-their yes call `confirm_stories` without `decided_by`. Without `decided_by` the call means what it always meant: the
-person said "proceed". A story the story writer wrote for you counts as one you wrote.
+Use `goes_alone.next_action` from the current proposal response. `decision_owner` identifies the approver and
+`factory_paused` describes the operating state. A paused factory can still have person-owned decisions.
 
-No `goes_alone` in the brief (an older CodeBook): ask "proceed?" before every new story, as before.
+- `wait_for_resume` — Tell the person once that the factory is paused and the workflow manager can confirm this
+  proposal after it resumes. Keep it pending without an approval question or a confirmation call. If a confirmation
+  races a pause and returns `CONFLICT` with `error.goes_alone.next_action: "wait_for_resume"`, do the same. After
+  resume, read current readiness for this proposal and its eligible items before acting. Follow the new decision owner.
+- `confirm` — Show the eligible stories and criteria. Call `confirm_stories { proposal, decided_by: "manager" }`
+  and report what was confirmed in one line.
+- `ask_person` — Show each proposed story and its recorded criteria and evidence. Ask “Proceed?” and wait.
+  Only after the person says yes, call `confirm_stories` without `decided_by`. If the factory is paused, keep their
+  answer and wait for resume before placing the approved stories. A manager confirmation refused with `FORBIDDEN`
+  and an explicit `ask_person` uses this person-owned route.
+- `split` with `decision_owner: "mixed"` — The two lists identify items within this proposal. With
+  `manager_items: [5, 9]` and `person_items: [12]`, show item 12’s title and recorded criteria and ask whether
+  the person approves item 12. When active, independently call `confirm_stories { proposal, stories: [5, 9],
+  decided_by: "manager" }`. When paused, keep items 5 and 9 with their workflow manager until resume and
+  read the current route before any placement. Record the person's answer for their subset alone. Confirm only
+  the IDs they approved in an explicit `stories` list with `decided_by: "person"`, once the factory is active.
+  A mixed refusal in `error.goes_alone` applied no items. Follow its returned lists exactly. If a list is missing,
+  the IDs overlap, or the route is inconsistent, keep the selection pending and refresh it.
+- If the response omits `next_action`, only the proposal’s own `goes_alone.may_confirm_yourself` set to literal
+  `true` grants manager confirmation. False or missing means ask first. A factory-wide level cannot supply the grant.
+  An unrecognized explicit action leaves the proposal pending until CodeBook supplies a recognized route.
+
+Claude’s tool hook attaches this guidance to the proposal or pause refusal. In either CLI with this skill installed,
+the same selector reads the tool’s JSON payload on standard input: run `node scripts/read-proposal-guidance.mjs
+propose_stories` from this skill’s directory (use `confirm_stories` for a refusal). It makes no connector calls.
+A story the story writer wrote for you counts as one you wrote.
 
 Whatever the level, a proposal that needs one of the six things (it spends money, touches production data, deletes
-something) asks for that thing first. And "proceed?" is one question about the whole list: never ask about a split,
+something) asks for that thing first. And "proceed?" covers only the IDs assigned to the person. Never ask about a delivery split,
 an order or an agent beside it.
 
-Show the proposal plainly: its reference (WO-7), each story's title, a one-line summary and risk, and the link. Under
+For the approval question, show the proposal reference (WO-7) and each person-owned story’s title, one-line summary, risk and link. Under
 each story list its criteria as `propose_stories` answered them (`stories[].criteria`), each with the evidence that will
 show it ("A person signs in with a valid code: the test `signs in with a valid code` passes"). The person's "proceed" is
 their yes to that list as what done means, so they have to see it. A story with no criteria: nothing but an agent's
@@ -170,15 +191,15 @@ on the website (`add_station` adds only an agent's), so CodeBook merges the comm
 sentence, not a question to wait on. If they already told you in this conversation ("auto merge", "no review"), do not offer it again.
 
 Never approve for them, and never treat a green QA as a yes. A stage the workflow does not have is not run: do not test in
-its place, and do not add a step of your own to replace it. Where the level says to ask, ask in these words: **"Proceed?"** and
-wait for the person.
+its place, and do not add a step of your own to replace it. When the proposal calls for a person, name the specific items, ask **"Proceed?"** and wait for the person.
 
-- Yes (or your own confirmation, where the level lets you) → `confirm_stories { proposal }` (the stories run here for
-  you, the proposal's runner). Say which stories moved
+- The person says yes → select only the item IDs they approved in `confirm_stories { proposal, stories, decided_by: "person" }`. Say which stories moved
   from the Backlog (`from_backlog`) or were created (#58, #59) and where each starts; a card the person had already
   moved by hand (`moved_by_hand`) stays where they put it. `created[].criteria` is each story's list as it stands on
   its card: if the person edited a criterion in the Backlog, that edit is what was confirmed, so say what changed.
 - They change something → `propose_stories` again with `proposal` to add to it, or `discard_proposal` with `stories`
-  for the ones to drop, then ask again.
-- No → `discard_proposal { proposal, reason }`. Its `backlog_cards` say which Backlog cards were removed and which
+  for the ones to drop, then follow the updated proposal’s route.
+- The person declines → for a mixed proposal, keep the manager’s items pending or moving independently.
+  Use `discard_proposal { proposal, stories, reason }` only for the person’s rejected IDs. For rejection of an
+  entirely person-owned proposal, use `discard_proposal { proposal, reason }`. Its `backlog_cards` say which Backlog cards were removed and which
   were kept (someone touched them): say so.

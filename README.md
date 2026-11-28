@@ -78,6 +78,8 @@ do what you can do on app.codebook.work.
 | `/factory stop` | Stops following; the story keeps moving on app.codebook.work. |
 | `/factory outside` / `/factory inside` | In a factory's checkout: work outside the factory for this session (no story first, no question before a push), or through it again. |
 
+Claude and Codex follow the same milestone decision for each owned order. A running check waits for proof, repair work stays with its existing fix cards, and a held check waits for its policy to change. A request addressed to you identifies the exact check and reason. A manual waiver requires your approval for that attempt and your reason.
+
 For a local manager that outlives the terminal, start a dedicated session with `claude --bg --name "Payments manager"`
 and attach with `claude attach <id>`. Enter `/factory manage Payments --workflow wf12` there. Start new work in that
 session or explicitly hand it a story with `/factory follow <story-id> Payments`. Keep one owner for each story. Detach
