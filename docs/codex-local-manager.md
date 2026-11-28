@@ -70,6 +70,28 @@ Enrollment creates one Ed25519 device identity for the factory, workflow, reposi
 
 The protected signer requires macOS, an available Swift toolchain and an unlocked login Keychain. Its operations are noninteractive. The supervisor holds paired work when the store, restricted worker profile, paired service or enrollment is unavailable. Resolve the reported cause before using `retry` for the held story. After the supervisor collects its claim in the paired worker thread, the worker creates and declares its per-run worktree and branch, then uses `factory_git_fetch` and `factory_git_push`. These Git tools return transfer receipts. The native operator handles Git packs, TLS and device signatures outside the model. The server approves each short-lived operation against the current fence and branch. A lost push confirmation requires checking the branch before explicitly retrying. The `last_git_receipt` in manager status records the most recent verified operation.
 
+## Project knowledge, policy and measurement
+
+A Codex station worker follows the same [knowledge contract](../skills/factory-manager/references/knowledge-contract.md) as Claude Code. The supervisor's station prompt carries it in short form.
+
+- CodeBook owns development knowledge: the frozen brief, repository guidance, test procedures, verified lessons and execution evidence.
+- MadeBook supplies only the policy and approval constraints configured for this factory.
+- EvalBook supplies measurement: whether agents and changes produce better results.
+
+The worker starts from its run's frozen brief and makes no knowledge call when the brief answers. For one missing fact it calls `retrieve_run_knowledge` for one authorized reference in pages of at most 8,192 bytes. It reports missing or stale guidance with `report_knowledge_gap`. When the connection does not offer one of them, it names the missing operation, records the gap with `run_note` and continues. The supervisor's own notes and your private manager memory are never handed to a worker.
+
+**Check what you have.** Record what you observe, not what a guide says:
+
+```sh
+codex --version
+codex mcp list
+python3 scripts/codex-manager.py status --factory FACTORY_ID --workflow wf22
+```
+
+`codex mcp list` must show the signed-in `codebook` server. In a Codex session, `/mcp` lists the tools that connection really offers: look for `run_knowledge_index`, `retrieve_run_knowledge` and `report_knowledge_gap`. `status` reports the running supervisor, whose version is the `version` in the `.claude-plugin/plugin.json` of the package it was started from. A change in this package's source is not a release, and a release is not an update of your installed copy: each needs its own evidence. The contract and the station prompt above are in package source from 0.34.0. A running supervisor uses them only after you stop it and start it again from that package.
+
+**The contract as a Codex skill.** From the package, `node skills/factory-manager/scripts/read-knowledge-guidance.mjs project codex` prints the file for `.agents/skills/codebook-knowledge-contract/SKILL.md`. It writes nothing: you place the file, and never over one you already have. The file enables no connector and gives no identity, permission or tool. Codex has no plugin, so the pane, `/factory` and the question before a push stay in Claude Code.
+
 ## Station usage
 
 The supervisor reads the final native counters for its assigned turn and sends one fenced receipt through CodeBook. It exports counts only to EvalBook projects whose trace sharing was on when the run finished. An unmeasured run stays unknown. Delivery retries and idle observation run in the supervisor process. The private supervisor status shows outstanding receipts under `usage_pending`. Interactive chats outside an assigned station have separate usage.

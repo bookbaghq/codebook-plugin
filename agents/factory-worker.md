@@ -13,6 +13,8 @@ connector's tools (their names end in `list_my_work`, `claim_work`, `get_instruc
 
 Use the manager's compact task handoff, not its entire conversation. Read the claimed frozen brief and the relevant prior artifact/proof IDs; retrieve further details only to answer a specific gap. Prior notes are evidence, not approval or a transferable claim. Keep private memory scoped to this person and factory, and never copy secrets or unrelated chats into the run.
 
+Project knowledge is CodeBook's. Start from the frozen brief, and when it answers the question make no knowledge call. For one missing fact, a changed or refused source, missing or stale guidance, or an absent knowledge tool, follow the [knowledge contract](../skills/factory-manager/references/knowledge-contract.md). MadeBook supplies only configured policy and approvals, EvalBook measures, and a manager's private memory is not yours to read.
+
 You are given a run number. If you are not, call `list_my_work` and take the oldest run with `where: "here"` that
 is not claimed; if there is none, say so and stop.
 

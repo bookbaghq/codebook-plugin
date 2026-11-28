@@ -246,8 +246,9 @@ wrong; it never falls back to the session's folder. Code stations work in a work
 **Your computer** setting, the session's folder is the checkout, as before.
 
 Claude chat and ChatGPT on the web cannot reach your computer: stations that change code run here in Claude Code, or in
-CodeBook's cloud. Codex can work in a checkout, but Run here, the pane and the question before a push are this
-plugin's: from Codex, the factory's stations are started in CodeBook's cloud.
+CodeBook's cloud. Codex can work a station in a checkout too, through the supervisor in the
+[local Codex manager guide](docs/codex-local-manager.md). The pane, `/factory` and the question before a push are this
+plugin's and exist only in Claude Code.
 
 ### What the manager decides, and what it asks you
 
@@ -334,6 +335,26 @@ another model than the station asks for, CodeBook notes it on the story.
 
 **Run in CodeBook**: CodeBook's own agents run the stations on its servers, as from the website. The pane still follows
 the story and you still approve your stations here. Nothing runs on your computer unless you press **Work it here**.
+
+## Project knowledge, policy and measurement
+
+Each product owns one thing, by the owner's decision of 25 Nov 2026:
+
+- CodeBook owns development knowledge: the frozen brief, repository guidance, test procedures, verified lessons and execution evidence.
+- MadeBook supplies only the policy and approval constraints configured for this factory.
+- EvalBook supplies measurement: whether agents and changes produce better results.
+
+The manager skill and the factory-worker agent follow one short [knowledge contract](skills/factory-manager/references/knowledge-contract.md), the same for Claude Code and Codex. A worker starts from its run's frozen brief and makes no knowledge call when the brief answers. For one missing fact it reads one authorized reference in bounded pages and cites the version it read. It reports missing or stale guidance as a proposed correction, and it says so plainly when this session offers no such tool. The package holds no project knowledge of its own, and your private manager memory is never handed to a worker.
+
+| | Where it stands |
+| --- | --- |
+| Shipped in CodeBook | A claimed brief carries `knowledge`, and the connector answers `run_knowledge_index`, `retrieve_run_knowledge`, `report_knowledge_gap`, `list_knowledge_gaps`, `read_knowledge_gap` and `read_verified_lessons` (seen on app.codebook.work on 28 Nov 2026). |
+| In this package's source | The contract, its selector and both skill projections, from version 0.34.0. |
+| Decided, not yet shipped | MadeBook as the only home of policy and approvals. A factory linked to MadeBook can still receive its governed brief the earlier way, so follow what the current brief and tools return. The self-fixing rule for tool problems is a separate story and is not in this package yet. |
+
+**Check what you have.** `claude plugin list` shows the installed version of **codebook@codebook**, and `claude plugin details codebook@codebook` its skill and agent. In a session, `/mcp` → **plugin:codebook:codebook** lists the tools the connector really offers you. A change in this package's source is not a release, and a release is not an update of your installed copy: each needs its own evidence. The contract is in your installed plugin only when that list shows 0.34.0 or later, after the steps under [Update](#update).
+
+**A session without the plugin.** `node skills/factory-manager/scripts/read-knowledge-guidance.mjs project claude_code` prints the contract as a skill for `.claude/skills/codebook-knowledge-contract/SKILL.md`, and `project codex` for `.agents/skills/codebook-knowledge-contract/SKILL.md`. Add `--path` to print the path. The command writes nothing: you place the file, and never over one you already have. The file enables no connector and gives no identity, permission or tool. A CodeBook agent's own skills are projected by CodeBook's `project_skills`, not by this command.
 
 ## Permissions
 
@@ -446,6 +467,8 @@ On your computer that program is this plugin.
   saving conversations belongs to MadeBook.
   And, for the folder a session is in, when it is a git checkout: the repository's host and `owner/name`, to ask which
   of your factories work on it. Never the address as git holds it (it can carry a token), the folder's path or any file.
+  And, when a station reads project guidance or reports a gap in it: the reference it asked for and the byte range,
+  and for a gap the repository, the commit, a subject and a short observation, which you can read on the story.
   And, for a proof run: each command's exit code, the last million characters of its output, a hash of it, the commit
   and whether the checkout had uncommitted changes, and, when the run had a list of allowed hosts, that list (see Proof
   runs).
@@ -467,10 +490,13 @@ The plugin runs a confirmed Python static-site recipe or, on macOS with Seatbelt
 | `.mcp.json` | The CodeBook connector (`https://app.codebook.work/mcp`), with no credentials. |
 | `hooks/` | The Factory pane, `/factory` and the repository guard (a Claude Code hooks module): `register.tsx`, `pane.tsx`, `factory.ts`, `connector.ts`, `guard.ts`, `resolve.ts` (what git and gh decide for a push), `checkout.ts` (a checkout that knows its factory: the lookup, the note for the session and the question before a push), `local.ts` (the checkouts `/factory status` shows), and `art.ts` (the illustrations, small WebP). |
 | `skills/factory-manager/` | The manager skill Run here follows: the code on your computer, stories, "proceed?", stations, what it decides and the six things it asks a person, taking the next story, narration. |
+| `skills/factory-manager/references/knowledge-contract.md` | The knowledge contract both clients follow: who owns what, bounded reads, gap reports and absent tools. It holds no project knowledge. |
+| `skills/factory-manager/scripts/knowledge-contract.mjs`, `read-knowledge-guidance.mjs` | The contract's selector: it reads the advertised tools and CodeBook's answers on standard input and names the next step, and prints the contract as a skill file. No connector or model call. |
 | `agents/factory-worker.md` | The sub-agent that works one station run here as that station's agent, testing on a local copy of the app it builds itself. |
 | `test/typecheck.mjs` | Runs TypeScript 5.6.3 over `hooks/`, `types/` and `test/` with `tsconfig.json` against the `claude-code` declarations of the Claude Code installed here, and fails on any error. |
 | `tsconfig.json` | The type-check options the `claude-code` declarations give a hooks module. |
-| `test/rule-texts.mjs` | Checks, with plain Node, that the skill and the agent carry CodeBook's rule sentences word for word, and that nothing tells the manager to ask about a split, an order or a retry. |
+| `test/rule-texts.mjs` | Checks, with plain Node, that the skill and the agent carry CodeBook's rule sentences word for word, and that nothing tells the manager to ask about a split, an order or a retry. It also runs `test/knowledge-contract.mjs`. |
+| `test/knowledge-contract.mjs`, `test/support/knowledge-stand-in.mjs` | The knowledge contract for both clients against a stand-in CodeBook: the same instructions everywhere, bounded reads, a changed source, withdrawn access, gap reports and absent tools. No model call. |
 | `hooks/browser-proof.ts`, `scripts/milestone-browser.mjs` | Capture an approved milestone browser interaction from the clean, pinned checkout. |
 | `hooks/proof.ts` | Proof runs: the repository's checks, run here boxed and reported by the plugin itself. |
 | `hooks/egress.ts` | A proof run's list of allowed hosts: reading the list, and the filtering proxy and forwarder that enforce it. |
