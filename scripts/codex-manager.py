@@ -1065,7 +1065,9 @@ class Manager:
         matches = [(k, row) for k, row in sessions.items() if row["thread"] == thread and row.get("turn") == turn]
         verify(len(matches) == 1, "This request has no current assigned worker.")
         key, worker = matches[0]
-        verify(key.partition(":expiry:")[0] not in self.holds, "An operator decision is pending for this station.")
+        prior_turn = self.state.get("previous_token_trial", {}).get("turns", {}).get(thread, {}).get(turn, {})
+        verify(not prior_turn.get("pending") or key.partition(":expiry:")[0] not in self.holds,
+               "The prior station operation is awaiting its recorded outcome.")
         item = worker.get("item") or worker
         route, story, run = item.get("route"), item["story"], item["run"]
         if name == CLAIM_TOOL:
