@@ -16,6 +16,8 @@ import { proposalGuidance } from '../skills/factory-manager/scripts/proposal-gui
 import { dirname, join, relative, resolve } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
+// The knowledge contract's checks for both clients (SD-189) run with this file's command.
+import './knowledge-contract.mjs'
 
 export const RULES = {
   DECIDES: 'You decide how the work gets delivered. Say what you decided in one line, and never ask the person about it: whether to split a story, the order stories merge in, which story a fix belongs in, which agent or model works a station, and whether to retry a failed run.',

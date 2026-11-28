@@ -516,6 +516,12 @@ def prompt(scope, item):
             'Keep an exact wait with delivery: "board_only" on the factory board. Continue independent work. '
             'For delivery: "chat" or an absent/unknown delivery, preserve the confirmed personal approval or question. '
             "Respect the approved scope, proof and human gates. "
+            "Project knowledge is CodeBook's: start from the frozen brief and make no knowledge call when it answers. "
+            "For one missing fact, read one authorized reference by its handle with retrieve_run_knowledge in pages of "
+            "at most 8192 bytes, stop when it is answered and cite only the version you read. Report missing or stale "
+            "guidance with report_knowledge_gap when this session advertises it. When a knowledge tool is absent, name it, "
+            "record the gap with run_note and continue. MadeBook supplies only configured policy and approvals, EvalBook "
+            "measures, and private manager memory is not worker guidance. "
             "Do not run another station or manager, self-QA, merge or change settings.")
 
 
