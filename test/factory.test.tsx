@@ -1019,8 +1019,9 @@ test('continuation preserves approvals ownership and bounded wakeups', async ($,
   await clock.advance(5000)
   const text = continuationPrompts(prompts)[0]!
   expect(text).toContain('queued runs first, open proposals and the separate Backlog')
-  expect(text).toContain('current approvals, capacity, budgets and deadlines')
-  expect(text).toContain('suggest policy still asks before new unapproved stories')
+  expect(text).toContain('Honor provider limits, approvals, capacity and deadlines')
+  expect(text).toContain('Never ask for a CodeBook token budget or switch to a paid fallback')
+  expect(text).toContain('Suggest policy still asks before new unapproved stories')
   expect(text).toContain("Leave other sessions' work alone")
   expect(calls.some(c => c.args.factory === 'foreign' || c.args.order === 'wo8')).toBe(false)
   // A read in flight at /factory stop must not restore state or submit a late wake.

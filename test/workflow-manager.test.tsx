@@ -617,3 +617,58 @@ test('a lost native claim reply stays single flight across restart', async ($, o
   await f.clock.advance(35000)
   expect(Object.values(f.ledger('wo46')!.recovery!)[0]!.state).toBe('completed')
 })
+
+test('a Claude subscription manages web-started stations only for its selected connection', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const factory = {factory: 'pay'}, workflow = {workflow: 'wf1', name: 'Ship'}
+  const store = new Map<string, unknown>(), submitted: string[] = []
+  let selected = false, subscription = false, beats = 0
+  const source = {kind: 'claude_code', connection_id: 2}
+  on('session.id', () => ({value:'paired-fixture'}))
+  on('session.start', (_, e) => ({cwd:e.cwd}))
+  on('ui.open', () => ({value:{isPlaced:true}}))
+  on('command.register', () => ({value:{command:'factory'}}))
+  on('store.keys', () => ({value:[...store.keys()]}))
+  on('store.get', (_, e) => ({value:store.get(e.key)}))
+  on('store.set', (_, e) => { store.set(e.key, e.value); return {value:undefined} })
+  on('store.delete', (_, e) => { store.delete(e.key); return {value:undefined} })
+  on('mcp.connect', () => ({value:{isConnected:true,server:'codebook'}}))
+  on('process.run', (_, e) => {
+    const auth = e.argv.join(' ') === 'claude auth status --json'
+    const status = {loggedIn:true, authMethod:subscription ? 'claude.ai' : 'api-key', apiProvider:'firstParty', subscriptionType:'max'}
+    return {value:{exitCode:auth ? 0 : 1, stdout:auth ? JSON.stringify(status) : '', stderr:'', isStdoutTruncated:false,isStderrTruncated:false}}
+  })
+  on('mcp.call', (_, e) => {
+    let data: unknown
+    if (e.tool === 'manager_brief') data = {factory, workflow, you:{may_run_here:true, local_harness:{version:1,register:'connect_factory_harness'}}, backlog:{stories:[]}}
+    else if (e.tool === 'connect_factory_harness') {
+      expect(e.args).toEqual({factory:'pay',kind:'claude_code',capabilities:['station']})
+      beats++
+      data = {registered:true,selected,source:selected ? source : {kind:'codex',connection_id:3}}
+    } else if (e.tool === 'factory_events') data = {events:[],last_event:1}
+    else if (e.tool === 'list_my_work') data = {work:[
+      {story:'chosen',reference:'#7',run:77,claimed:false,where:'here',factory,workflow,execution_source:source},
+      {story:'foreign',reference:'#8',run:78,claimed:false,where:'here',factory,workflow,execution_source:{...source,connection_id:4}},
+    ]}
+    else if (e.tool === 'story_status') data = {story:{story:e.args.story},factory,workflow,station:null, in_backlog:false,finished:null,
+      run_location:{where:'here',execution_source:source}, run:{run:77,state:'with_outside_agent',where:'here'},
+      waiting:{on:'runner',run:77,on_you:true,claimed:false},stations:[],events:[],last_event:1}
+    else throw Error('Unexpected connector call: '+e.tool)
+    return {value:{structuredContent:data,content:[]}} as never
+  })
+  on('prompt.submit', (_, e) => { submitted.push(e.text); return {text:e.text, context:e.context} as never })
+  await $.session.start({cwd:'/',surface:'desktop',isInteractive:true})
+  await $.command.run(typed('manage pay --workflow wf1'))
+  await clock.advance(65000)
+  expect(beats).toBe(0)
+  expect(submitted.length).toBe(0)
+  subscription = true
+  await clock.advance(65000)
+  expect(beats > 0).toBe(true)
+  expect(submitted.length).toBe(0)
+  selected = true
+  await clock.advance(65000)
+  expect(submitted.length).toBe(1)
+  expect(submitted[0]).toContain('#7 has local run 77')
+  expect(submitted[0]).not.toContain('#8')
+})

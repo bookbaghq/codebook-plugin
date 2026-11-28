@@ -80,7 +80,7 @@ def fake_server():
             elif tool == "needs_you":
                 data = {"for_person": [], "for_manager": []}
             elif tool == "factory_operations":
-                data = {"snapshot": {"control": {"paused": cfg["paused"]}, "tiles": cfg.get("tiles", {}), "holds": []}}
+                data = {"snapshot": {"control": {"paused": cfg["paused"]}, "tiles": cfg.get("tiles", {}), "status": cfg.get("status", {}), "holds": []}}
             elif tool == "list_my_work":
                 data = {"work": [{"story": story, "run": run, "claimed": claimed, "where": "here",
                                   "factory": {"factory": "factoryA"}, "workflow": {"workflow": "other" if story == "foreign" else "wf9"}}
@@ -173,11 +173,19 @@ def rehearsal():
             assert not turns() and status()["cursor"] == 7 and not (root/"confirmations.log").exists()
             assert cli("start", "--cwd", str(root), check=False).returncode
             stop()
+            controls = state.with_name("control.json")
+            write(controls, {**json.loads(controls.read_text()), "local_token_budget": 100})
+            write(state, {**status(), "local_tokens_used": 120, "budget_stop": {"limit": 100, "overrun": 20},
+                          "usage_pending": {"old": {"run": 18, "fence": 1, "turn": "past", "unavailable": True}}})
+            cfg.update(status={"word": "on_hold_budget"}, tiles={"token_budget": 100, "tokens_today": 120})
             cfg["paused"] = True
             write(root/"factory.json", cfg)
             cli("start", "--cwd", str(root), "--manage-ready")
             until(lambda: "pause" in status().get("reason", ""))
             assert not turns()
+            assert "local_token_budget" not in json.loads(controls.read_text())
+            assert status()["previous_token_trial"]["stop"] == {"limit": 100, "overrun": 20}
+            assert status()["usage_pending"]["old"]["unavailable"]
             cfg["paused"] = False
             write(root/"factory.json", cfg)
             cli("follow", "--story", "claimed")

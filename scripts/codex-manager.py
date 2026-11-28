@@ -219,10 +219,15 @@ def read_events(host, scope, cursor):
     return max(cursor, last or 0), result.get("events", [])
 
 
+def codex_source(row):
+    source = row.get("execution_source")
+    return source is None or isinstance(source, dict) and source.get("kind") == "codex"
+
+
 def hosted_here(status):
     location = status.get("run_location")
     if isinstance(location, dict):
-        return location.get("where") == "here" and (location.get("person") or {}).get("is_you") is True
+        return location.get("where") == "here" and codex_source(location) and (location.get("person") or {}).get("is_you") is True
     return location == "here"
 
 
@@ -382,27 +387,25 @@ def preflight(host, route, scope=None):
         raise Hold(reasons.get(code, "The sandboxed Development capability check did not pass."))
 
 
-def eligible(host, config, adopted, only=None, statuses=None, access=None):
+def eligible(host, config, adopted, only=None, statuses=None, access=None, connect=None):
     scope = {k: config[k] for k in ("factory", "workflow")}
     if statuses is None:
         statuses = {}
     allowed = set(config["stories"]) | set(adopted)
-    if not allowed and not config["manage_ready"]:
-        return [], "Observing only; assign a story or opt into manager-ready drawer work."
     brief = host.tool("manager_brief", **scope)
     if (brief.get("factory", {}).get("factory") != scope["factory"]
             or brief.get("workflow", {}).get("workflow") != scope["workflow"]
             or brief.get("you", {}).get("may_run_here") is not True):
         return [], "The signed-in person cannot run this workflow locally."
+    if connect is not None and not connect(brief):
+        return [], "Waiting for the selected factory execution connection."
+    if not allowed and not config["manage_ready"]:
+        return [], "Observing only; assign a story or opt into manager-ready drawer work."
     snapshot = host.tool("factory_operations", factory=scope["factory"])["snapshot"]
     control = snapshot["control"]
     if control["paused"] or control.get("autonomy") == "observe":
         return [], "The factory is paused or its autonomy is set to Observe."
-    if (snapshot.get("status") or {}).get("word") == "on_hold_budget":
-        return [], "The factory token budget has been reached."
     tiles = snapshot.get("tiles") or {}
-    if tiles.get("token_budget") is not None and tiles.get("tokens_today", 0) >= tiles["token_budget"]:
-        return [], "The factory token budget has been reached."
     if tiles.get("max_concurrent_runs") is not None and tiles.get("working", 0) >= tiles["max_concurrent_runs"]:
         return [], "The factory concurrency limit has been reached."
     capacity = brief["you"].get("on_my_computer") or {}
@@ -415,7 +418,7 @@ def eligible(host, config, adopted, only=None, statuses=None, access=None):
         followed = row.get("story") in allowed or row.get("reference") in allowed
         if not followed and not config["manage_ready"]:
             continue
-        if (row.get("where") != "here" or row.get("claimed") is not False
+        if (row.get("where") != "here" or not codex_source(row) or row.get("claimed") is not False
                 or row.get("factory", {}).get("factory") != scope["factory"]
                 or row.get("workflow", {}).get("workflow") != scope["workflow"]):
             continue
@@ -582,6 +585,15 @@ class Manager:
                 if entry.get("confirmation") == "confirmed" and len(parts) == 3 and re.fullmatch(r"wo[1-9]\d*", parts[1]):
                     self.state["milestone_orders"].setdefault(parts[1], milestone_routes.journal())
         self.holds = run_holds(self.state)
+        # Preserve trial receipts and uncertain operations from older installations.
+        # They apply to the original worker only. A gross total never gates own-plan dispatch.
+        if "budget_stop" in self.state or "budget_turns" in self.state:
+            trial = self.state["previous_token_trial"] = {
+                "stop": self.state.pop("budget_stop", None), "turns": self.state.pop("budget_turns", {})}
+            for turns in trial["turns"].values():
+                for meter in turns.values():
+                    if meter.get("pending") and meter.get("wake"):
+                        self.holds.setdefault(meter["wake"].partition(":expiry:")[0], time.time_ns())
         self.state["interaction_required"] = bool(self.holds or any(o["questions"] for o in self.state["milestone_orders"].values()))
         self.next_hold_read = 0
         self.next_milestone_read = 0
@@ -589,6 +601,9 @@ class Manager:
         self.state.update(pid=os.getpid(), phase="starting", observation="connecting")
         self.last_scan = 0
         self.immediate = False
+        self.supports_harness = False
+        self.next_harness_heartbeat = 0
+        self.selected_harness = False
         self.worker = None
         self.development_hosts = {}
         self.usage_thread = None
@@ -685,7 +700,13 @@ class Manager:
         # Keep recovery pointers in the existing private supervisor state. No transcript is copied.
         target = worker.get("item") or worker
         thread = worker["thread"]
-        self.state.setdefault("usage_pending", {})[thread] = {
+        trial = self.state.get("previous_token_trial", {}).get("turns", {})
+        if trial.get(thread, {}).get(turn["id"], {}).get("settled"):
+            return
+        pending = self.state.setdefault("usage_pending", {})
+        if (pending.get(thread) or {}).get("turn") == turn["id"]:
+            return
+        pending[thread] = {
             "run": target["run"], "thread": thread, "turn": turn["id"],
             "fence": worker.get("native_fence") or (worker.get("git") or {}).get("fence") or native_usage.completion_fence(turn, target["run"]),
         }
@@ -734,13 +755,12 @@ class Manager:
             pass
         else:
             existing = pending.get(answered["thread"])
-            if existing and existing["turn"] == answered["turn"] and answered.get("delivered"):
-                # Removing the pending receipt and charging it are persisted together.
-                # A duplicate reply or a restart cannot charge the same turn twice.
-                if self.config.get("local_token_budget") is not None:
-                    self.state["local_tokens_used"] = self.state.get("local_tokens_used", 0) + answered["usage"]["total_tokens"]
+            matching = existing and (existing["turn"], existing["run"]) == (answered["turn"], answered["run"])
+            if matching and answered.get("delivered"):
+                # Count only a server-acknowledged receipt and persist its removal with the total.
+                self.state["local_tokens_used"] = self.state.get("local_tokens_used", 0) + answered["usage"]["total_tokens"]
                 del pending[answered["thread"]]
-            elif existing and existing["turn"] == answered["turn"]:
+            elif matching:
                 pending[answered["thread"]] = answered
         for entry in pending.values():
             if int(time.time()) >= entry.get("next", 0) and not entry.get("unavailable"):
@@ -763,21 +783,6 @@ class Manager:
                 self.queue_usage(worker, ended)
                 self.approvals()
                 del self.state["workers"][key]
-
-    def budget_exhausted(self):
-        limit = self.config.get("local_token_budget")
-        return limit is not None and self.state.get("local_tokens_used", 0) >= limit
-
-    def local_budget_hold(self):
-        if self.budget_exhausted():
-            return "The local workflow token budget has been reached."
-        if self.config.get("local_token_budget") is None:
-            return None
-        if self.state.get("usage_pending"):
-            return "Waiting for a verified native usage receipt before spending more of the local token budget."
-        if self.state.get("workers"):
-            return "A local station is still spending against this workflow's token budget."
-        return None
 
     def reconcile(self):
         active = self.state.get("active")
@@ -836,8 +841,8 @@ class Manager:
         # May have lost the acknowledgement. Give history time to materialize before rechecking eligibility.
         if time.time() - active["at"] < 60:
             return True
-        if self.config.get("local_token_budget") is not None:
-            self.record("Waiting for the unacknowledged turn before spending more local tokens.")
+        if (active.get("git") or {}).get("claim") == "awaiting_receipt" or active.get("claim") == "awaiting_receipt":
+            self.record("Waiting for the recorded station claim receipt.")
             return True
         self.state.pop("active")
         self.last_scan = 0
@@ -876,7 +881,7 @@ class Manager:
         """Caller holds the control fence; record intent before the single allowed MCP mutation."""
         if not self.config["manage_ready"]:
             return
-        fresh, _ = eligible(self.host, self.config, self.state["adopted"], only=item)
+        fresh, _ = eligible(self.host, self.config, self.state["adopted"], only=item, connect=self.connect_harness)
         if not any(row["key"] == item["key"] and not row["run"] for row in fresh):
             return
         entry["confirmation"] = "awaiting_receipt"
@@ -994,7 +999,7 @@ class Manager:
                                 targets[key] = dict(target=target, check=check, state="pending", current=True, note=note)
                                 self.record(note)
                         elif milestone_routes.fix_for(view, check, target):
-                            available, _ = eligible(self.host, self.config, self.state["adopted"])
+                            available, _ = eligible(self.host, self.config, self.state["adopted"], connect=self.connect_harness)
                             for candidate in available:
                                 if candidate["run"] and candidate["story"] == target["story"]:
                                     candidate["milestone_recovery"] = {"order": order, "key": key, "route": route, "policy": policy}
@@ -1070,6 +1075,9 @@ class Manager:
         matches = [(k, row) for k, row in sessions.items() if row["thread"] == thread and row.get("turn") == turn]
         verify(len(matches) == 1, "This request has no current assigned worker.")
         key, worker = matches[0]
+        prior_turn = self.state.get("previous_token_trial", {}).get("turns", {}).get(thread, {}).get(turn, {})
+        verify(not prior_turn.get("pending") or key.partition(":expiry:")[0] not in self.holds,
+               "The prior station operation is awaiting its recorded outcome.")
         item = worker.get("item") or worker
         route, story, run = item.get("route"), item["story"], item["run"]
         if name == CLAIM_TOOL:
@@ -1175,6 +1183,28 @@ class Manager:
         self.state["cursor"] = cursor
         return previous != cursor
 
+    def connect_harness(self, brief=None):
+        if brief is not None:
+            contract = (brief.get("you") or {}).get("local_harness")
+            if contract is not None:
+                if not isinstance(contract, dict) or contract.get("version") != 1 or contract.get("register") != "connect_factory_harness":
+                    return False
+                self.supports_harness = True
+        if not self.supports_harness:
+            return True  # The older factory only has person-scoped Run here assignments.
+        now = time.monotonic()
+        if now >= self.next_harness_heartbeat:
+            previously_selected = self.selected_harness
+            self.selected_harness = False
+            receipt = self.host.tool("connect_factory_harness", factory=self.config["factory"], kind="codex", capabilities=["station"])
+            selected, source = receipt.get("selected"), receipt.get("source")
+            self.selected_harness = (receipt.get("registered") is True and "selected" in receipt and "source" in receipt and
+                                     (selected is None and source is None or selected is True and isinstance(source, dict) and source.get("kind") == "codex"))
+            if self.selected_harness != previously_selected:
+                self.last_scan = 0
+            self.next_harness_heartbeat = now + INTERVAL
+        return self.selected_harness
+
     def observe(self):
         """Read one scoped event page, a batch of held stories and one owned order."""
         scope = {k: self.config[k] for k in ("factory", "workflow")}
@@ -1202,30 +1232,24 @@ class Manager:
             return
         changed, statuses, snapshot = self.observe()
         scope = {k: self.config[k] for k in ("factory", "workflow")}
-        if self.budget_exhausted():
-            self.state["phase"] = "held"
-            self.record(self.local_budget_hold())
-            return
         self.approvals()
+        selected = self.connect_harness()
         self.service_git()
         self.observe_workers()
         self.report_usage()
         if self.reconcile():
             self.record(self.state.get("reason", "Waiting for the manager receipt."))
             return
-        # Acknowledging a worker may create a budget reservation or pending usage.
-        budget_hold = self.local_budget_hold()
-        if budget_hold:
-            self.state["phase"] = "held"
-            self.record(budget_hold)
-            return
         self.state["phase"] = "observing"
+        if not selected:
+            self.record("Waiting for the selected factory execution connection.")
+            return
         if snapshot is None and not changed and self.last_scan and time.monotonic() - self.last_scan < RECONCILE:
             self.record(self.state.get("reason", "Waiting for a CodeBook event."))
             return
         self.last_scan = time.monotonic()
         access = {}
-        ready, reason = eligible(self.host, self.config, self.state["adopted"], statuses=statuses, access=access)
+        ready, reason = eligible(self.host, self.config, self.state["adopted"], statuses=statuses, access=access, connect=self.connect_harness)
         recovery = self.act_on_milestone(snapshot, access.get("may_work", False))
         selected = {item["key"] for item in recovery}
         ready = recovery + [item for item in ready if item["key"] not in selected]
@@ -1275,7 +1299,7 @@ class Manager:
                     active = actions.get(recovery["key"]) == (route, recovery["policy"])
                     if not active or not milestone_routes.fix_for(view, route["check"], route["recovery"]):
                         continue
-                    eligible_now, _ = eligible(self.host, self.config, self.state["adopted"], only=item)
+                    eligible_now, _ = eligible(self.host, self.config, self.state["adopted"], only=item, connect=self.connect_harness)
                     if not any(row["run"] == item["run"] for row in eligible_now):
                         continue
                 if item.get("development") and not self.development_ready(item, held_run):
@@ -1374,7 +1398,6 @@ def main():
     parser.add_argument("--permissions", type=validated)
     parser.add_argument("--config-profile", type=validated)
     parser.add_argument("--manage-ready", action="store_true", help="also manage server-authorized local agent runs and ready drawer items in this workflow")
-    parser.add_argument("--local-token-budget", type=int, help="stop new local turns once this workflow's measured gross tokens reach the limit")
     parser.add_argument("--story", action="append", type=lambda x: validated(x, STORY), default=[])
     args = parser.parse_args()
     if args.action == "route":
@@ -1391,8 +1414,6 @@ def main():
         parser.error("--story is valid on start, follow, retry or route")
     if args.manage_ready and args.action != "start":
         parser.error("--manage-ready is an option for start")
-    if args.local_token_budget is not None and (args.action != "start" or args.local_token_budget < 1):
-        parser.error("--local-token-budget requires start and a positive number of tokens")
     if args.cwd and args.action != "start":
         parser.error("--cwd is only valid on start")
     os.umask(0o077)
@@ -1405,7 +1426,7 @@ def main():
         print(json.dumps({**state, "running": running(folder), "enabled": config.get("running", False),
                           "stories": config.get("stories", []), "development_routes": config.get("development_routes", {}),
                           "git_pairings": config.get("git_pairings", {}),
-                          "manage_ready": config.get("manage_ready", False), "local_token_budget": config.get("local_token_budget"),
+                          "manage_ready": config.get("manage_ready", False),
                           "state_directory": str(folder)}, indent=2))
         return
     with locked(folder/"control.lock"):
@@ -1493,8 +1514,7 @@ def main():
         if len(stories) > 64:
             parser.error("use at most 64 explicitly owned stories per workflow")
         config = {**config, "factory": args.factory, "workflow": args.workflow, "cwd": cwd, "stories": stories, "retries": config.get("retries", {}), "development_routes": config.get("development_routes", {}), "manage_ready": args.manage_ready or config.get("manage_ready", False), "running": True}
-        if args.local_token_budget is not None:
-            config["local_token_budget"] = args.local_token_budget
+        config.pop("local_token_budget", None)  # Upgrade the saved control without changing its scope.
         owner = (folder/"owner.lock").open("a+")
         fcntl.flock(owner, fcntl.LOCK_EX | fcntl.LOCK_NB)
         save(folder/"control.json", config)
