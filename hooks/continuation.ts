@@ -23,7 +23,7 @@ let previousCheckpoint: { key: string; value: string | null } | undefined
 // These counters schedule work in this process. A resumed manager reconciles from the first page.
 function checkpoint(current: CodebookContinuation): CodebookContinuation {
   return { ...current, checkedAt: 0, nextOrder: 0, nextFactory: 0,
-    ...(current.manager && { manager: { ...current.manager, offset: 0, seen: [], scannedAt: 0 } }) }
+    ...(current.manager && { manager: { ...current.manager, offset: 0, seen: [], scannedAt: 0, harnessReadyAt: 0 } }) }
 }
 
 async function save($: EngineInterface, generation: number): Promise<void> {
@@ -80,13 +80,16 @@ export async function restoreContinuation($: EngineInterface, generation: number
 type ManagerBrief = {
   factory?: { factory: string }
   workflow?: { workflow: string; name: string }
-  you?: { may_run_here?: boolean; run_here_refusal?: string }
+  you?: { may_run_here?: boolean; run_here_refusal?: string; local_harness?: {version: number; register: string} }
   backlog?: { next_offset?: number | null; stories?: { story: string; reference?: string; workflow: string; ready: boolean; start_with?: string }[] }
 }
 
 export const manageUsage = '/factory manage <factory> [--workflow <name or ID>]'
 
 function observeReady(next: CodebookContinuation, watch: CodebookWorkflowWatch, brief: ManagerBrief, now: number): void {
+  if (brief.you?.local_harness) {
+    watch.registerHarness = brief.you.local_harness.version === 1 && brief.you.local_harness.register === 'connect_factory_harness'
+  }
   const seen = new Set(watch.seen)
   // Older checkpoints kept a single sentence containing the references that had failed to deliver.
   const prefix = `Independent backlog work is ready in ${watch.name} (${watch.factory}, ${watch.workflow}): `
@@ -144,7 +147,8 @@ export async function watchWorkflow($: EngineInterface, words: string[]): Promis
 export async function workflowStatus($: EngineInterface): Promise<string> {
   const current = await read($, state), watch = current.manager
   const checked = current.checkedAt ? new Date(current.checkedAt).toISOString() : 'awaiting first poll'
-  const readError = watch?.readError ? ` Last readiness read failed (${watch.readError}).` : ''
+  const readError = watch?.readError ? ` Last readiness read failed (${watch.readError}).`
+    : watch?.registerHarness !== undefined && !watch.harnessReadyAt ? ' Waiting for a selected, signed-in local subscription.' : ''
   const delivery = current.deliveryFailures ? ` Last prompt submission failed. Retry after ${new Date(current.retryAt ?? 0).toISOString()}.` : ''
   const questions = Object.values(current.orders).flatMap(order => Object.values(order.milestones?.questions ?? {})).join('\n')
   const watching = watch ? `Watching workflow ${watch.name} (${watch.factory}, ${watch.workflow}) for local manager work. Last poll: ${checked}. Pending notices: ${Object.keys(current.pending).length}.${readError}${delivery}` : ''
@@ -206,7 +210,7 @@ export async function observeContinuation($: EngineInterface, story: string, sta
     const outcome = status.finished || (status.run?.state === 'blocked' ? `blocked:${status.run.run}` : null)
     const watch = next.manager, waiting = status.waiting
     if (watch && watch.factory === one.factory && watch.workflow === status.workflow?.workflow) {
-      const readyRun = !outcome && status.run?.where === 'here' && waiting?.on === 'runner' && waiting.on_you === true &&
+      const readyRun = !outcome && claudeSource(status.run_location) && status.run?.where === 'here' && waiting?.on === 'runner' && waiting.on_you === true &&
         waiting.claimed === false && status.run.run === waiting.run ? waiting.run : undefined
       if (readyRun && readyRun !== one.waitingRun) next.pending[`runner:${story}`] = `${one.reference} has local run ${readyRun} waiting for its owner.`
       if (!readyRun) delete next.pending[`runner:${story}`]
@@ -238,7 +242,11 @@ function milestoneQuestion(factory: string, reference: string, id: string, check
   return `${factory} / ${reference} (${id}), check #${check}: ${reason} What would you like to do with this check?`
 }
 
-type LocalRun = {story: string; run: number; claimed: boolean; where: string; factory?: {factory?: string}; workflow?: {workflow?: string}}
+function claudeSource(row?: {execution_source?: {kind: string} | null} | null): boolean {
+  return row?.execution_source == null || row.execution_source.kind === 'claude_code'
+}
+
+type LocalRun = {execution_source?: {kind: string; connection_id: number} | null; reference?: string; story: string; run: number; claimed: boolean; where: string; factory?: {factory?: string}; workflow?: {workflow?: string}}
 
 async function readyRepairs($: EngineInterface, view: Order, factory: string, check: number, workflow?: string, target?: Recovery) {
   const fixes = view.milestones?.find(m => m.check?.latest?.id === check)?.fixes ?? []
@@ -247,7 +255,7 @@ async function readyRepairs($: EngineInterface, view: Order, factory: string, ch
   if (!stories.size) return []
   const work = await call<{work?: LocalRun[]}>($, 'list_my_work', {factory})
   if (!work.ok || !Array.isArray(work.data?.work)) return []
-  return work.data.work.filter(r => r.where === 'here' && r.claimed === false && r.factory?.factory === factory
+  return work.data.work.filter(r => r.where === 'here' && claudeSource(r) && r.claimed === false && r.factory?.factory === factory
     && (!workflow || r.workflow?.workflow === workflow) && stories.has(r.story) && Number.isSafeInteger(r.run) && r.run > 0)
 }
 
@@ -480,6 +488,49 @@ async function pollBackgroundStory($: EngineInterface, before: CodebookContinuat
   }
 }
 
+export async function ownsHarnessRegistration($: EngineInterface, input: unknown): Promise<boolean> {
+  if (!input || typeof input !== 'object' || !('factory' in input) || !('kind' in input) || !('capabilities' in input)
+    || Object.keys(input).sort().join(',') !== 'capabilities,factory,kind' || input.kind !== 'claude_code'
+    || !Array.isArray(input.capabilities) || input.capabilities.join(',') !== 'station') return false
+  const watch = (await read($, state)).manager
+  return watch?.registerHarness === true && watch.factory === input.factory
+}
+
+async function registerHarness($: EngineInterface, watch: CodebookWorkflowWatch, generation: number): Promise<boolean> {
+  // A Claude API key can run the same plugin. Register only a signed-in Claude subscription.
+  const result = await $.process.run(['claude', 'auth', 'status', '--json'], { timeoutMs: 5000 })
+  if (result.exitCode !== 0) return false
+  try {
+    const auth = JSON.parse(result.stdout)
+    if (auth.loggedIn !== true || auth.authMethod !== 'claude.ai' || auth.apiProvider !== 'firstParty' || !auth.subscriptionType) return false
+  } catch { return false }
+  const got = await call<{registered?: boolean; selected?: boolean | null; source?: {kind: string; connection_id: number} | null}>(
+    $, 'connect_factory_harness', {factory: watch.factory, kind: 'claude_code', capabilities: ['station']})
+  if (!got.ok || got.data?.registered !== true) return false
+  if (got.data.selected === null && got.data.source === null) return true
+  const source = got.data.source
+  if (got.data.selected !== true || source?.kind !== 'claude_code' || !Number.isSafeInteger(source.connection_id)) return false
+  const listed = await call<{work?: LocalRun[]}>($, 'list_my_work', {factory: watch.factory})
+  if (listed.ok && Array.isArray(listed.data?.work)) await update($, state, current => {
+    if (current.generation !== generation || current.manager?.factory !== watch.factory) return current
+    const next = structuredClone(current)
+    for (const row of listed.data.work!) {
+      if (row.where !== 'here' || row.claimed !== false || row.factory?.factory !== watch.factory
+        || row.workflow?.workflow !== watch.workflow || row.execution_source?.kind !== 'claude_code'
+        || row.execution_source.connection_id !== source.connection_id || typeof row.story !== 'string'
+        || !/^[A-Za-z0-9_-]{1,64}$/.test(row.story) || !Number.isSafeInteger(row.run) || row.run <= 0) continue
+      if (!next.stories[row.story] && Object.keys(next.stories).length >= MAX_STORIES) continue
+      const ref = /^#[0-9]+$/.test(row.reference ?? '') ? row.reference! : row.story
+      const owned = next.stories[row.story] ??= {factory: watch.factory, reference: ref, order: null, state: 'moving', event: 0}
+      if (owned.waitingRun === row.run) continue
+      owned.waitingRun = row.run
+      next.pending[`runner:${row.story}`] = `${ref} has local run ${row.run} waiting for its owner.`
+    }
+    return next
+  })
+  return true
+}
+
 /** One page and one owned-order snapshot per quiet interval, round robin. No catch-up loop or model on empty reads. */
 export async function pollContinuation($: EngineInterface, monitored: Set<string>, runProof: RunRecovery): Promise<ReadFailure | void> {
   if (polling) return
@@ -492,6 +543,13 @@ export async function pollContinuation($: EngineInterface, monitored: Set<string
     const generation = before.generation
     const factory = factories.length ? factories[before.nextFactory % factories.length] : undefined
     await update($, state, current => current.generation === generation ? { ...current, checkedAt: now, nextFactory: current.nextFactory + 1 } : current)
+    if (before.manager?.registerHarness !== undefined) {
+      let ready = false
+      try { ready = before.manager.registerHarness && await registerHarness($, before.manager, generation) } catch { /* Offline or signed out. */ }
+      await update($, state, value => value.generation === generation && value.manager
+        ? {...value, manager: {...value.manager, harnessReadyAt: ready ? now : 0}} : value)
+      if (!ready || !await continuationCurrent($, generation)) return
+    }
     const workflowFailure = await pollWorkflow($, before, now) || undefined
     if (!await continuationCurrent($, generation)) return
     if (before.manager && before.manager.readError !== workflowFailure?.code) {
@@ -559,6 +617,8 @@ export async function flushContinuation($: EngineInterface): Promise<boolean> {
   flushing = true
   try {
     const before = await read($, state), now = await $.clock.now(), generation = before.generation
+    if (before.manager?.registerHarness !== undefined && (!before.manager.registerHarness || !before.manager.harnessReadyAt
+      || now - before.manager.harnessReadyAt >= 2 * QUIET_MS)) return false
     const candidates = Object.entries(before.pending).filter(([key]) => {
       if (key === 'workflow') return false // Reconcile a legacy sentence into current story identities first.
       if (!key.startsWith('workflow:')) return true
@@ -585,7 +645,7 @@ export async function flushContinuation($: EngineInterface): Promise<boolean> {
       if (!got.ok) { deferred.push([key, line]); continue }
       const status = got.data, waiting = status.waiting
       if (status.story.story === story && status.factory.factory === watch.factory && status.workflow?.workflow === watch.workflow
-          && !status.finished && !status.in_backlog && status.run?.where === 'here' && status.run.run === owned.waitingRun
+          && !status.finished && !status.in_backlog && claudeSource(status.run_location) && status.run?.where === 'here' && status.run.run === owned.waitingRun
           && waiting?.on === 'runner' && waiting.on_you === true && waiting.claimed === false && waiting.run === owned.waitingRun) {
         deliver.push([key, line])
       } else stale.push([key, line])

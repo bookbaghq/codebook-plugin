@@ -10,7 +10,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { CodebookActive, CodebookCheckout, CodebookClaim, CodebookLink, CodebookMode, CodebookStory, CodebookWatch } from '../types'
 import { call, words } from './connector'
 import { proposalGuidance } from '../skills/factory-manager/scripts/proposal-guidance.mjs'
-import { continuationCurrent, continuationGeneration, flushContinuation, hasContinuation, manageUsage, ownsMilestoneRead, pollContinuation, restoreContinuation, watchContinuation, watchWorkflow, workflowStatus } from './continuation'
+import { continuationCurrent, continuationGeneration, flushContinuation, hasContinuation, manageUsage, ownsHarnessRegistration, ownsMilestoneRead, pollContinuation, restoreContinuation, watchContinuation, watchWorkflow, workflowStatus } from './continuation'
 import { carriesKey, claimOf, defaultBranchesOf, expiresOf, leaseOf, liveClaims, mayReach, ownedOf, readCommand } from './guard'
 import type { Target } from './guard'
 import { checkOne, checkShellWords, folderOf, ownPushOf, pushedFrom, reaches, shellState } from './resolve'
@@ -391,6 +391,9 @@ export const register: Register = (on, options) => {
   // classifier judges the model's requests and has no verdict for a timer's read, so these are allowed here. Nothing
   // else is: writes are requests the person sends, and the model's calls keep the person's permission settings.
   on('tool.check', async ($, e, next) => {
+    if (next.origin.plugin === $.plugin.name && e.tool === OWN_TOOLS + 'connect_factory_harness' && await ownsHarnessRegistration($, e.input)) {
+      return {decision: 'allow', reason: 'The signed-in subscription is available for the workflow you chose to manage.'}
+    }
     if (next.origin.plugin === $.plugin.name && [OWN_TOOLS + 'needs_you', OWN_TOOLS + 'proof_result'].includes(e.tool)
       && await ownsMilestoneRead($, e.tool.slice(OWN_TOOLS.length), e.input)) {
       return { decision: 'allow', reason: 'The CodeBook manager reading milestone attention for an order owned by this session.' }

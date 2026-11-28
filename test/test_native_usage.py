@@ -43,6 +43,32 @@ class NativeUsage(unittest.TestCase):
             self.assertEqual(restored.state["usage_pending"], {})
             self.assertEqual(manager.holds, restored.holds)
 
+    def test_local_harness_must_match_the_signed_in_selection(self):
+        api = runpy.run_path(str(Path(__file__).resolve().parents[1] / "scripts/codex-manager.py"))
+        class Host:
+            def tool(self, name, **args):
+                self.calls.append((name, args))
+                return self.reply
+        host = Host()
+        host.calls = []
+        with tempfile.TemporaryDirectory() as directory:
+            manager = api["Manager"](Path(directory), {"factory": "mine"}, host)
+            self.assertTrue(manager.connect_harness({"you": {}}))
+            self.assertEqual(host.calls, [])
+            contract = {"you": {"local_harness": {"version": 1, "register": "connect_factory_harness"}}}
+            for reply, wanted in [({}, False), ({"selected": False, "source": {"kind": "claude_code"}}, False),
+                                  ({"selected": True, "source": {"kind": "claude_code"}}, False),
+                                  ({"selected": None, "source": None}, True),
+                                  ({"selected": True, "source": {"kind": "codex", "connection_id": 9}}, True)]:
+                host.reply = {"registered": True, **reply}
+                manager.next_harness_heartbeat = 0
+                self.assertEqual(manager.connect_harness(contract), wanted)
+                self.assertEqual(manager.connect_harness(), wanted)
+            self.assertEqual(len(host.calls), 5)
+            self.assertEqual(host.calls[0], ("connect_factory_harness", {"factory": "mine", "kind": "codex", "capabilities": ["station"]}))
+            self.assertFalse(api["hosted_here"]({"run_location": {"where": "here", "person": {"is_you": True},
+                                                            "execution_source": {"kind": "claude_code", "connection_id": 9}}}))
+
     def test_finished_turn_isolated_from_adjacent_work_and_repeated_events(self):
         def event(kind, **payload):
             return {"type": "event_msg", "payload": {"type": kind, **payload}}

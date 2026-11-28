@@ -219,10 +219,15 @@ def read_events(host, scope, cursor):
     return max(cursor, last or 0), result.get("events", [])
 
 
+def codex_source(row):
+    source = row.get("execution_source")
+    return source is None or isinstance(source, dict) and source.get("kind") == "codex"
+
+
 def hosted_here(status):
     location = status.get("run_location")
     if isinstance(location, dict):
-        return location.get("where") == "here" and (location.get("person") or {}).get("is_you") is True
+        return location.get("where") == "here" and codex_source(location) and (location.get("person") or {}).get("is_you") is True
     return location == "here"
 
 
@@ -382,18 +387,20 @@ def preflight(host, route, scope=None):
         raise Hold(reasons.get(code, "The sandboxed Development capability check did not pass."))
 
 
-def eligible(host, config, adopted, only=None, statuses=None, access=None):
+def eligible(host, config, adopted, only=None, statuses=None, access=None, connect=None):
     scope = {k: config[k] for k in ("factory", "workflow")}
     if statuses is None:
         statuses = {}
     allowed = set(config["stories"]) | set(adopted)
-    if not allowed and not config["manage_ready"]:
-        return [], "Observing only; assign a story or opt into manager-ready drawer work."
     brief = host.tool("manager_brief", **scope)
     if (brief.get("factory", {}).get("factory") != scope["factory"]
             or brief.get("workflow", {}).get("workflow") != scope["workflow"]
             or brief.get("you", {}).get("may_run_here") is not True):
         return [], "The signed-in person cannot run this workflow locally."
+    if connect is not None and not connect(brief):
+        return [], "Waiting for the selected factory execution connection."
+    if not allowed and not config["manage_ready"]:
+        return [], "Observing only; assign a story or opt into manager-ready drawer work."
     snapshot = host.tool("factory_operations", factory=scope["factory"])["snapshot"]
     control = snapshot["control"]
     if control["paused"] or control.get("autonomy") == "observe":
@@ -411,7 +418,7 @@ def eligible(host, config, adopted, only=None, statuses=None, access=None):
         followed = row.get("story") in allowed or row.get("reference") in allowed
         if not followed and not config["manage_ready"]:
             continue
-        if (row.get("where") != "here" or row.get("claimed") is not False
+        if (row.get("where") != "here" or not codex_source(row) or row.get("claimed") is not False
                 or row.get("factory", {}).get("factory") != scope["factory"]
                 or row.get("workflow", {}).get("workflow") != scope["workflow"]):
             continue
@@ -594,6 +601,9 @@ class Manager:
         self.state.update(pid=os.getpid(), phase="starting", observation="connecting")
         self.last_scan = 0
         self.immediate = False
+        self.supports_harness = False
+        self.next_harness_heartbeat = 0
+        self.selected_harness = False
         self.worker = None
         self.development_hosts = {}
         self.usage_thread = None
@@ -871,7 +881,7 @@ class Manager:
         """Caller holds the control fence; record intent before the single allowed MCP mutation."""
         if not self.config["manage_ready"]:
             return
-        fresh, _ = eligible(self.host, self.config, self.state["adopted"], only=item)
+        fresh, _ = eligible(self.host, self.config, self.state["adopted"], only=item, connect=self.connect_harness)
         if not any(row["key"] == item["key"] and not row["run"] for row in fresh):
             return
         entry["confirmation"] = "awaiting_receipt"
@@ -989,7 +999,7 @@ class Manager:
                                 targets[key] = dict(target=target, check=check, state="pending", current=True, note=note)
                                 self.record(note)
                         elif milestone_routes.fix_for(view, check, target):
-                            available, _ = eligible(self.host, self.config, self.state["adopted"])
+                            available, _ = eligible(self.host, self.config, self.state["adopted"], connect=self.connect_harness)
                             for candidate in available:
                                 if candidate["run"] and candidate["story"] == target["story"]:
                                     candidate["milestone_recovery"] = {"order": order, "key": key, "route": route, "policy": policy}
@@ -1173,6 +1183,28 @@ class Manager:
         self.state["cursor"] = cursor
         return previous != cursor
 
+    def connect_harness(self, brief=None):
+        if brief is not None:
+            contract = (brief.get("you") or {}).get("local_harness")
+            if contract is not None:
+                if not isinstance(contract, dict) or contract.get("version") != 1 or contract.get("register") != "connect_factory_harness":
+                    return False
+                self.supports_harness = True
+        if not self.supports_harness:
+            return True  # The older factory only has person-scoped Run here assignments.
+        now = time.monotonic()
+        if now >= self.next_harness_heartbeat:
+            previously_selected = self.selected_harness
+            self.selected_harness = False
+            receipt = self.host.tool("connect_factory_harness", factory=self.config["factory"], kind="codex", capabilities=["station"])
+            selected, source = receipt.get("selected"), receipt.get("source")
+            self.selected_harness = (receipt.get("registered") is True and "selected" in receipt and "source" in receipt and
+                                     (selected is None and source is None or selected is True and isinstance(source, dict) and source.get("kind") == "codex"))
+            if self.selected_harness != previously_selected:
+                self.last_scan = 0
+            self.next_harness_heartbeat = now + INTERVAL
+        return self.selected_harness
+
     def observe(self):
         """Read one scoped event page, a batch of held stories and one owned order."""
         scope = {k: self.config[k] for k in ("factory", "workflow")}
@@ -1201,6 +1233,7 @@ class Manager:
         changed, statuses, snapshot = self.observe()
         scope = {k: self.config[k] for k in ("factory", "workflow")}
         self.approvals()
+        selected = self.connect_harness()
         self.service_git()
         self.observe_workers()
         self.report_usage()
@@ -1208,12 +1241,15 @@ class Manager:
             self.record(self.state.get("reason", "Waiting for the manager receipt."))
             return
         self.state["phase"] = "observing"
+        if not selected:
+            self.record("Waiting for the selected factory execution connection.")
+            return
         if snapshot is None and not changed and self.last_scan and time.monotonic() - self.last_scan < RECONCILE:
             self.record(self.state.get("reason", "Waiting for a CodeBook event."))
             return
         self.last_scan = time.monotonic()
         access = {}
-        ready, reason = eligible(self.host, self.config, self.state["adopted"], statuses=statuses, access=access)
+        ready, reason = eligible(self.host, self.config, self.state["adopted"], statuses=statuses, access=access, connect=self.connect_harness)
         recovery = self.act_on_milestone(snapshot, access.get("may_work", False))
         selected = {item["key"] for item in recovery}
         ready = recovery + [item for item in ready if item["key"] not in selected]
@@ -1263,7 +1299,7 @@ class Manager:
                     active = actions.get(recovery["key"]) == (route, recovery["policy"])
                     if not active or not milestone_routes.fix_for(view, route["check"], route["recovery"]):
                         continue
-                    eligible_now, _ = eligible(self.host, self.config, self.state["adopted"], only=item)
+                    eligible_now, _ = eligible(self.host, self.config, self.state["adopted"], only=item, connect=self.connect_harness)
                     if not any(row["run"] == item["run"] for row in eligible_now):
                         continue
                 if item.get("development") and not self.development_ready(item, held_run):

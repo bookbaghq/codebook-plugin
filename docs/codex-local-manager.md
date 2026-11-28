@@ -13,6 +13,8 @@ Run here workers use the signed-in local subscription. CodeBook records actual n
 
 To upgrade a supervisor that has a saved token ceiling, use its existing script to stop it and wait until `status` shows `running: false`. Install the updated plugin, then run its `start` command with the same factory, workflow and checkout. Remove `--local-token-budget` from any old launch command. The supervisor retires the old ceiling and preserves the event cursor, assigned work, fences, usage receipts and pending operator decisions. A previous trial checkpoint is retained under `previous_token_trial`.
 
+When the factory advertises local harness connections, the signed-in Codex supervisor registers its station capability. A Claude Code session running `/factory manage` registers the same capability with its Claude subscription. Use `--manage-ready` on the Codex supervisor to take web-started station assignments. Select the connection in the factory settings. The local manager checks the selection before dispatch, and the server checks the selected connection again when the worker claims the station. Both clients support station work. A standalone manager-chat model request requires a connection that advertises that additional capability.
+
 A first start with no assignments observes CodeBook events with zero model calls. To follow a single existing story in this mode, select its ID with the following command. Any active station lease stays with its current worker.
 
 ```sh

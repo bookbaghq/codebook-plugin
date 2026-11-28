@@ -128,6 +128,7 @@ type WireQuestion =
 type Lease = { fence: number; expires_at?: string; expired?: boolean }
 type RunLocation = {
   where: 'here' | 'cloud'
+  execution_source?: {kind: string; connection_id: number} | null
   person?: { name?: string; is_you?: boolean } | null
   changeable?: boolean
   stations?: { station: string; name: string; runs: string }[]
