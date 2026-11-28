@@ -91,7 +91,7 @@ export async function restoreContinuation($: EngineInterface, generation: number
 }
 
 type ManagerBrief = {
-  factory?: { factory: string }
+  factory?: { factory: string; name?: string }
   workflow?: { workflow: string; name: string }
   you?: { may_run_here?: boolean; run_here_refusal?: string; local_harness?: {version: number; register: string} }
   backlog?: { next_offset?: number | null; stories?: { story: string; reference?: string; workflow: string; ready: boolean; start_with?: string }[] }
@@ -131,17 +131,38 @@ function observeReady(next: CodebookContinuation, watch: CodebookWorkflowWatch, 
   }
 }
 
+/** Why a watch cannot start, naming the one thing the brief lacks (#293); null when nothing is missing. */
+function cannotWatch(brief: ManagerBrief | null, factory: string, workflow: string | undefined): string | null {
+  const said = `CodeBook's answer for "${factory}"`
+  if (!brief || typeof brief !== 'object') return `${said} was empty, so there is no factory to watch.`
+  // The server's own sentence comes first: it says why, and what to do about it.
+  if (brief.you?.run_here_refusal) return brief.you.run_here_refusal
+  if (!brief.factory?.factory) return `CodeBook did not find the factory "${factory}": its answer names no factory. /factory list shows the names and IDs you can use.`
+  const name = brief.factory.name || brief.factory.factory
+  if (!brief.workflow?.workflow) {
+    return `${name} has no workflow${workflow ? ` "${workflow}"` : ''} in CodeBook's answer, so there are no stations to watch here.`
+  }
+  if (!brief.you) return `${said} does not say what you may do in ${name} (it has no "you" part), so Run here was not granted.`
+  if (!brief.you.may_run_here) {
+    return `CodeBook does not let you run ${name}'s work here, and gave no reason: you may read this factory but not start its stories. Ask an owner of its workspace for write access.`
+  }
+  if (!Array.isArray(brief.backlog?.stories)) return `${said} has no backlog list for ${brief.workflow.name || brief.workflow.workflow}, so there is no readiness to watch.`
+  return null
+}
+
 export async function watchWorkflow($: EngineInterface, words: string[]): Promise<string> {
   const option = words.indexOf('--workflow'), factory = words.slice(0, option < 0 ? words.length : option).join(' ')
   if (!factory || words.some(word => word.startsWith('--') && word !== '--workflow') ||
       (option >= 0 && (option !== words.lastIndexOf('--workflow') || !words[option + 1]))) return 'Usage: ' + manageUsage
   const workflow = option < 0 ? undefined : words.slice(option + 1).join(' ')
   const generation = await continuationGeneration($)
-  const got = await call<ManagerBrief>($, 'manager_brief', { factory, ...(workflow && { workflow }) })
+  // The start check needs to know that there is a backlog, not to read a page of it: the watch's polls read the pages.
+  const got = await call<ManagerBrief>($, 'manager_brief', { factory, ...(workflow && { workflow }), backlog_limit: 1 })
   if (!got.ok) return got.message
-  const brief = got.data
-  if (!brief.factory?.factory || !brief.workflow?.workflow || !Array.isArray(brief.backlog?.stories) || !brief.you?.may_run_here)
-    return brief.you?.run_here_refusal || 'CodeBook did not grant Run here access and return readiness for this workflow.'
+  const missing = cannotWatch(got.data, factory, workflow)
+  if (missing !== null) return missing
+  // cannotWatch found a factory and a workflow in it.
+  const brief = got.data as ManagerBrief & Required<Pick<ManagerBrief, 'factory' | 'workflow'>>
   const selected = brief.workflow, id = brief.factory.factory, now = await $.clock.now()
   await update($, state, current => {
     if (current.generation !== generation || current.manager) return current
