@@ -67,7 +67,7 @@ let lastPoll = 0
 let isPolling = false
 
 async function tick($: EngineInterface, proofHosts: unknown): Promise<void> {
-  flushAsk($)
+  await flushAsk($)
   if (isPolling) return
   const a = await read($, active)
   const others = await read($, watched)
@@ -91,7 +91,7 @@ async function tick($: EngineInterface, proofHosts: unknown): Promise<void> {
   } finally {
     isPolling = false
   }
-  flushAsk($)
+  await flushAsk($)
   await flushContinuation($)
 }
 

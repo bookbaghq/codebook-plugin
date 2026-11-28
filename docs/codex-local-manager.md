@@ -1,5 +1,8 @@
 # Codex local factory manager
 
+The **Agent approval requests in chat** setting in **Factory settings → Controls** applies to each factory. CodeBook returns `board_only` for optional capability requests that belong on the board. The local manager continues other eligible work and surfaces the details when asked. Choose **Keep these requests on the board** for that factory. The default is **Ask**. Unknown settings, required person approvals and reserved decisions retain their usual delivery.
+
+
 On macOS or Linux, use Python 3 and the signed-in Codex CLI with a connected CodeBook OAuth server named `codebook`. The installed CLI must support `app-server`, `mcpServer/tool/call` and `thread/turns/list`. Commands run as your local user. The computer must stay awake and connected.
 
 Start in your dedicated checkout. Substitute the factory and workflow IDs returned by CodeBook.

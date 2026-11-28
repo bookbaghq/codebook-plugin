@@ -131,7 +131,14 @@ def exercise():
                 host.legacy = [{**row, "on_you": False}, {**row, "check_id": 88}]
                 manager.tick()
                 assert not ledger["questions"]
-                host.legacy = [row]
+                host.legacy = [{**row, "delivery":"board_only"}]
+                manager.tick()
+                assert not ledger["questions"]
+                manager = restart()
+                manager.tick()
+                ledger = manager.state["milestone_orders"][order]
+                assert not ledger["questions"] and not manager.state["interaction_required"]
+                host.legacy = [{**row, "delivery":"chat"}]
                 manager.tick()
                 manager.tick()
                 assert len(ledger["seen"]) == 1 and not host.effects

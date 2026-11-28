@@ -458,7 +458,10 @@ test('legacy milestone attention must address the current operator and attempt',
   f.legacy = [{...item, on_you:true, check_id:61}]
   await f.clock.advance(35000)
   expect(f.prompts).toEqual([])
-  f.legacy = [{...item, on_you:true}]
+  f.legacy = [{...item, on_you:true, delivery:'board_only'}]
+  await f.clock.advance(65000)
+  expect(f.prompts).toEqual([])
+  f.legacy = [{...item, on_you:true, delivery:'chat'}]
   await f.clock.advance(35000)
   await f.clock.advance(35000)
   expect(f.prompts.length).toBe(1)

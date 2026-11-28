@@ -78,6 +78,8 @@ def decisions(view, attention, factory, order):
         elif not isinstance(route, dict) or route != row.get("route"):
             continue
         action = route.get("action")
+        if action == "review" and row.get("delivery") == "board_only":
+            continue
         target = recovery_id(route.get("recovery"))
         recovery = policy == "manager_recovery" and action == "repair" and target
         if ("recovery" in route and not recovery) or (action == "repair" and not recovery):

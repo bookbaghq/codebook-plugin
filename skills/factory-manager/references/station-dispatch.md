@@ -1,5 +1,8 @@
 # Dispatch ordinary stations
 
+For a missing capability, record the hold and read the delivery on the matching request from CodeBook. If it is `board_only`, keep it on the board and continue other eligible station work. Wait for the capability, the setting or the decision to change. This also applies to a pending recipe or proof preview whose owner is the person. Keep existing personal approvals when delivery is `chat`, absent or unknown.
+
+
 Read the relevant model, capacity, overlap or recipe case when dispatch needs it; the ordinary loop is in the main skill.
 
 **Following several stories.** Poll once, for all of them: `list_my_work { factory }` says which runs wait for you, and
@@ -13,7 +16,9 @@ Use `story_status { story, after }` for the one story you need the detail of. Po
   working #58 at Build, spawned here."
   - **Proof.** A station whose pass needs a proof run says so in its brief (`brief.proof.required`). The worker first checks for relevant verified evidence already at the exact head. When it is absent, the worker requests only the required approved command/selection allowed by the user's test scope; an authorized executor runs and reports it. Neither you nor the worker reports a verified proof. If only a disallowed broad recipe is available, report the missing supported selection without executing it. If CodeBook records a pass as blocked for
     "NO PROOF RUN", the checks did not run at the pull request's head commit: say so and identify the missing executor or check. Do not repeat development when only proof capability is missing; finish the station truthfully blocked and resume after that capability or evidence changes.
-  - **No recipe.** When a check or a proof cannot run because the repository has no recipe, do not stop there. Read
+  - **No recipe.** First check the delivery on any recorded approval for this capability. Leave a `board_only` request pending on the board. For chat delivery or a legacy server, apply the recipe rule below.
+
+    When a check or a proof cannot run because the repository has no recipe, do not stop there. Read
     the repository (its package scripts, CLAUDE.md and Dockerfile) and propose the recipe yourself. Where the factory
     lets you go alone it is saved and the check runs again; otherwise ask the person to save it. Passing a check by
     hand is the last resort. This does not authorize self-verification or overriding a required proof or human sign-off. How: `run_recipe_change { factory, repository?, step, value, reason }`, one call a step

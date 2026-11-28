@@ -19,7 +19,7 @@ const BOARD = {
   ],
 }
 
-type At = 'build' | 'claimed' | 'review' | 'done' | 'asks' | 'escalated' | 'blocked' | 'numericMine' | 'numericManager' | 'numericReadOnly' | 'numericRunner' | 'numericNext' | 'numericUnavailable'
+type At = 'build' | 'claimed' | 'review' | 'done' | 'asks' | 'escalated' | 'blocked' | 'numericMine' | 'numericManager' | 'numericReadOnly' | 'numericRunner' | 'numericNext' | 'numericUnavailable' | 'boardAsk' | 'boardBlocked'
 const ASKED = 'Refund to the card, or as store credit?'
 /** A CodeBook from before §12.10: person stations carry no on_approve. */
 const older = { codebook: false }
@@ -29,6 +29,8 @@ const LEFT = 'pull request #212 (a draft) is still open, and CodeBook will not m
 
 function status(at: At): Record<string, unknown> {
   // An agent asked for a person mid-run (request_person): the run waits on this person with the question's text.
+  if (at === 'boardBlocked') return { ...status('blocked'), waiting: {on:'person', run:811, on_you:true, delivery:'board_only', question:'Optional capability'} }
+  if (at === 'boardAsk') return { ...status('escalated'), question: {text:'Optional approval', on_you:true, delivery:'board_only'} }
   if (at === 'asks') return {
     ...status('build'),
     run: { run: 811, state: 'waiting_for_person', where: 'here' },
@@ -744,7 +746,7 @@ test('a new session follows nothing another session follows: no polling, no wake
 })
 
 test('a resumed session carries on with its own story and wakes itself', async ($, on) => {
-  const { calls, prompts, clock } = engine(on, { now: 'review', session: 'session-a', stored: { 'session-1:session-a': { at: 1_000_000, active: FOLLOWED, watched: [] } } })
+  const { calls, prompts, clock } = engine(on, { now: 'review', session: 'session-a', stored: { 'session-1:session-a': { at: 1_000_000, active: {...FOLLOWED, story:"6KjN", factory:"k3Vb9QmZ"}, watched: [] } } })
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await clock.advance(5000)
   expect(calls.filter(one => one.tool === 'story_status').length).toBeGreaterThan(0)
@@ -1095,4 +1097,33 @@ test('an ownership outage before delivery parks a queued personal question until
   at.now = 'numericRunner'
   await clock.advance(10000)
   expect(prompts.length).toBe(1)
+})
+
+test('a restored board-only capability waits quietly through new events until an explicit review replaces it', async ($, on) => {
+  const session = 'opted-in-factory', story = '6KjN', factory = 'k3Vb9QmZ'
+  const at = { now:'boardBlocked' as At, session, stored: {
+    ['session-1:'+session]: {at:999900, active:{...FOLLOWED, story, factory}, watched:[]},
+    [CONTINUATION_STORE+session]: {at:999900, value:{generation:0, stories:{[story]:{factory, reference:'#57',state:'blocked:811',event:9005}},
+      orders:{}, feeds:{}, pending:{['story:'+story]:'#57 is blocked; inspect independent ready work.'}, nextFactory:0,nextOrder:0,checkedAt:0}},
+  } }
+  const {prompts,clock} = engine(on,at)
+  await $.session.start({cwd:'/',surface:'desktop',isInteractive:true})
+  await clock.advance(65000)
+  at.now = 'boardAsk'
+  await clock.advance(65000)
+  expect(prompts).toEqual([])
+  at.now = 'review'
+  await clock.advance(5000)
+  expect(prompts.length).toBe(1)
+  expect(prompts[0]).toContain('waiting for your approval')
+})
+
+test('an optional board question leaves a separate personal review and unfamiliar delivery alone', () => {
+  const base = status('review') as unknown as Status
+  const optional = {text:'Optional setup', on_you:true, delivery:'board_only'}
+  expect(waitOf({...base, question:optional})?.key).toBe('person|812')
+  expect(waitOf({...base, waiting:null, question:optional})).toBeNull()
+  for (const delivery of ['chat', 'future', undefined]) {
+    expect(waitOf({...base, waiting:null, question:{...optional, delivery}})?.question).toBe('Optional setup')
+  }
 })
