@@ -153,8 +153,12 @@ function world(on: On, w: World) {
             : { ok: true }
   on('mcp.call', (_, e) => {
     mcp.push({ tool: e.tool, args: e.args ?? {} })
-    if (w.witness?.legacy && e.args?.peek && e.args?.native_witness) return {value:{
-      content:[],structuredContent:{error:{code:'INVALID_INPUT',message:'unknown native_witness'}},isError:true}} as never
+    if (w.witness?.legacy && e.tool === 'claim_proof' && e.args?.peek) {
+      const unsupported = Object.keys(e.args).find(key => key !== 'peek')
+      if (unsupported) return { value: {
+        content: [], structuredContent: { error: { code: 'INVALID_INPUT', message: `unknown ${unsupported}` } }, isError: true
+      } } as never
+    }
     const data = answer(e.tool, e.args ?? {})
     return { value: { content: [{ type: 'text', text: JSON.stringify(data) }], structuredContent: data, isError: false } }
   })
