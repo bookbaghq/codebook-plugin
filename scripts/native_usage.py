@@ -8,7 +8,7 @@ def turn_usage(path, thread, turn):
               "cached_tokens": "cached_input_tokens", "total_tokens": "total_tokens"}
     previous = None
     baseline = None
-    active = observed = matched = False
+    active = observed = matched = prior_turn = False
     with Path(path).open(encoding="utf8") as stream:
         for line in stream:
             prefix = line[:320]
@@ -30,6 +30,9 @@ def turn_usage(path, thread, turn):
                 if active:
                     return None
                 active = msg.get("turn_id") == turn
+                if active and prior_turn and previous is None:
+                    return None  # An earlier turn has no validated usage baseline.
+                prior_turn = True
                 if active:
                     baseline = previous or dict.fromkeys(fields, 0)
             elif msg.get("type") == "token_count":

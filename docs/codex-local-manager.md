@@ -9,13 +9,9 @@ python3 scripts/codex-manager.py start --factory FACTORY_ID --workflow wf22 --cw
 python3 scripts/codex-manager.py status --factory FACTORY_ID --workflow wf22
 ```
 
-For a bounded local trial, add `--local-token-budget N` to `start`. The
-supervisor lets one station spend at a time and waits for its verified usage
-receipt before dispatching the next. A running turn can exceed the remaining
-amount. Once measured gross tokens reach the limit, new turns stop. Missing
-measurements also hold new turns. The total and limit survive restarts. The
-counter begins with receipts processed under the limit. It covers this local
-workflow, and the provider measures account-wide subscription usage separately.
+Run here workers use the signed-in local subscription. CodeBook records actual native usage as receipts arrive. The `local_tokens_used` status field counts acknowledged gross tokens. Pending measurements can arrive while other workers are running. The provider's subscription limits, access permissions, factory pause and configured concurrency still apply.
+
+To upgrade a supervisor that has a saved token ceiling, use its existing script to stop it and wait until `status` shows `running: false`. Install the updated plugin, then run its `start` command with the same factory, workflow and checkout. Remove `--local-token-budget` from any old launch command. The supervisor retires the old ceiling and preserves the event cursor, assigned work, fences, usage receipts and pending operator decisions. A previous trial checkpoint is retained under `previous_token_trial`.
 
 A first start with no assignments observes CodeBook events with zero model calls. To follow a single existing story in this mode, select its ID with the following command. Any active station lease stays with its current worker.
 

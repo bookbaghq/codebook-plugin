@@ -269,7 +269,7 @@ def held_observation():
         host = Observer(order, route)
         host.folder, host.policy = folder, "manager_recovery"
         config = dict(running=True, cwd=scratch, factory=FACTORY, workflow=WORKFLOW,
-                      manage_ready=True, stories=[], local_token_budget=100)
+                      manage_ready=True, stories=[])
         API["save"](folder/"control.json", config)
         API["save"](folder/"status.json", {"cursor": 0, "notices": {"mine:"+order+":1": {"confirmation": "confirmed"}}})
         restart = lambda: API["Manager"](folder, config, host)
@@ -302,15 +302,15 @@ def held_observation():
         with patch.object(time, "time", return_value=1100):
             manager.tick()
         ledger = manager.state["milestone_orders"][order]
-        assert set(host.calls) == {"factory_events", "story_status", "work_orders", "needs_you", "proof_result"}
+        assert set(host.calls) == {"factory_events", "story_status", "work_orders", "needs_you", "proof_result", "thread/resume", "thread/turns/list"}
         assert ledger["read_pending"] and ledger["recovery"][proof_key]["state"] == "pending"
         assert ledger["recovery"]["prior-fix"]["state"] == "completed"
         assert not ledger["questions"] and not manager.holds and not manager.state["interaction_required"]
         assert manager.state["last_read"] == 1100 and manager.state["cursor"] == 2
-        assert manager.state["phase"] == "held" and manager.state["observation"] == "watching"
+        assert manager.state["phase"] == "awaiting_receipt" and manager.state["observation"] == "watching"
         host.calls.clear()
         manager.tick()
-        assert host.calls == ["factory_events"]  # Unchanged polling does not rescan the order.
+        assert host.calls == ["factory_events", "thread/turns/list"]  # Only the pending turn needs rechecking.
 
         # An event outage leaves the last good cursor/time intact; existing receipts can still arrive.
         manager = restart()
@@ -328,12 +328,11 @@ def held_observation():
         manager = restart()
         host.calls.clear()
         manager.tick()
-        assert host.calls == ["factory_events", "work_orders", "needs_you"]
+        assert host.calls == ["factory_events", "work_orders", "needs_you", "thread/resume", "thread/turns/list"]
         assert manager.state["cursor"] == 3 and manager.state["local_tokens_used"] == 100
         assert manager.state["active"] == active and manager.state["notices"]["unacknowledged"]["confirmation"] == "awaiting_receipt"
 
-        # Removing the cap leaves the independent pending-wake fence. It permits reads but no new action.
-        manager.state["local_tokens_used"] = 25
+        # Fresh observations continue while the same unrelated claim receipt is pending.
         ledger = manager.state["milestone_orders"][order]
         ledger["recovery"][proof_key]["state"] = "pending"
         host.route = host.attention = {**routes["F6"], "order": order}
@@ -342,8 +341,8 @@ def held_observation():
         manager.tick()
         assert ledger["recovery"][proof_key]["state"] == "completed" and not host.effects
         assert ledger["retries"] == {"uncertain": {"requested": 39, "state": "pending"}}
-        assert manager.state["active"] == active and not host.turns and manager.state["local_tokens_used"] == 25
-        assert set(host.calls) == {"factory_events", "work_orders", "needs_you", "proof_result", "thread/resume", "thread/turns/list"}
+        assert manager.state["active"] == active and not host.turns and manager.state["local_tokens_used"] == 100
+        assert set(host.calls) == {"factory_events", "work_orders", "needs_you", "proof_result", "thread/turns/list"}
 
         assert manager.state["phase"] == "awaiting_receipt"
         # A long-lived, unreadable set must not monopolize a tick or starve the next receipt.
