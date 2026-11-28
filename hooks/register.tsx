@@ -67,7 +67,7 @@ let lastPoll = 0
 let isPolling = false
 
 async function tick($: EngineInterface, proofHosts: unknown): Promise<void> {
-  flushAsk($)
+  await flushAsk($)
   if (isPolling) return
   const a = await read($, active)
   const others = await read($, watched)
@@ -91,7 +91,7 @@ async function tick($: EngineInterface, proofHosts: unknown): Promise<void> {
   } finally {
     isPolling = false
   }
-  flushAsk($)
+  await flushAsk($)
   await flushContinuation($)
 }
 
@@ -630,6 +630,8 @@ export const register: Register = (on, options) => {
     if (followed) await watchContinuation($, followed.story, followed.reference, followed.factory, false, generation)
     for (const one of await read($, watched)) await watchContinuation($, one.story, one.reference, '', false, generation)
     $.clock.every(1000, () => {
+      // A persisted result can be reported while a pane refresh or a runner recheck is still in flight.
+      void flushContinuation($, 'completion')
       void tick($, proofHosts)
     })
     return next(e)

@@ -5,6 +5,11 @@ description: "Manage CodeBook factory work in this session: an existing Run here
 
 # CodeBook factory manager
 
+When an owned story or pull request finishes, tell the person which one and what passed as soon as the result is available. Identify any outstanding proof or review and continue other eligible work. Before starting dependent work, check its current prerequisites, approvals and ownership in CodeBook.
+
+Use the delivery value on the current `story_status.waiting`, `story_status.question` or matching `needs_you` item. `board_only` keeps that optional capability request on the factory board under **Factory settings → Controls → Agent approval requests in chat → Keep these requests on the board**. Continue other eligible work. When the person asks about the board, report its current state. `chat`, absent and unknown values preserve the usual approval flow.
+
+
 Manage the workflow through the `codebook` connector. Delegate station work to `codebook:factory-worker`; do not do its code, tests or review yourself. Start with this file, the current manager brief and the task. Read a linked reference only when its condition applies, not all references at startup. If a required reference cannot be read, report that gap before its action; never invent a protocol.
 
 ## When this applies

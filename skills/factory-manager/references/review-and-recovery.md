@@ -1,5 +1,8 @@
 # Review, questions and recovery
 
+**Agent approval requests in chat** is set per factory under **Factory settings → Controls**. Read the current delivery on the exact wait or matching `needs_you` item before asking, including after a wake or restart. Leave a `board_only` request available on the board and continue eligible work. A preview naming the person as decision owner does not require a second reminder about a saved board-only request. `chat`, absent and unknown delivery keep the existing personal approval flow. Human review, sign-offs and reserved decisions keep their designated owner.
+
+
 Read the relevant case for a person review, waiting question, failed run or final merge state.
 
 - **A person's station waiting for this person** (`waiting.on: "person"`, `on_you: true`): ask in the chat. Show the

@@ -21,6 +21,7 @@ import type { EngineInterface } from 'claude-code'
 import type { CodebookCheckout, CodebookClaim } from '../types'
 import { call } from './connector'
 import { lockedDependencySource } from './lockedDependencies'
+import { capabilityOf, canObserveLockedWitness, lockedSelection, observeLockedWitness } from './native-locked-witness'
 import { FORWARD_PORT, forwarderSource, parseHosts, proxyEnvironment, proxySource, ruleText } from './egress'
 import type { HostRule } from './egress'
 
@@ -37,7 +38,7 @@ export const SECRET_FOLDERS = ['.ssh', '.aws', '.gnupg', '.kube', '.docker', '.c
 export const SECRET_FILES = ['.netrc', '.npmrc', '.pypirc', '.git-credentials']
 
 type CaseReport = { version: 1; directory: string; definition: number; revision: number; hash: string }
-export type ProofStep = { delegated_focused?: boolean; case_report?: CaseReport; run: number; name: string; line: string; timeout_seconds: number; baseline: boolean; for_run?: number; ref?: string; commit?: string }
+export type ProofStep = { native_witness?: unknown; delegated_focused?: boolean; case_report?: CaseReport; run: number; name: string; line: string; timeout_seconds: number; baseline: boolean; for_run?: number; ref?: string; commit?: string }
 export type ProofWork = {
   proof: number | null
   token?: string
@@ -53,7 +54,7 @@ export type ProofWork = {
  * (today's CodeBook queues a model's request_proof with none). `run`, `branch` and `worktree` are what a newer CodeBook
  * may send of the run that asked (its declare_work); the plugin reads them when they are there.
  */
-export type ProofWaiting = { dependency_wait_version?: number; dependency_wait?: {code:string;detail:string;condition_hash:string}; delegated_focused_version?: number; case_report_version?: number; proof: number; repository: string; commands: string[]; commit: string | null; default_branch?: string; run?: number | null; branch?: string | null; worktree?: string | null }
+export type ProofWaiting = { witness_executor?: string; dependency_wait_version?: number; dependency_wait?: {code:string;detail:string;condition_hash:string}; delegated_focused_version?: number; case_report_version?: number; proof: number; repository: string; commands: string[]; commit: string | null; default_branch?: string; run?: number | null; branch?: string | null; worktree?: string | null }
 /** What this session knows of the run that asked for a proof: its worktree and branch (declare_work), the story's key and branch (its brief). */
 export type ProofHint = { run: number | null; worktree?: string; branch?: string; key?: string }
 export type Sandbox = { kind: 'seatbelt' | 'bubblewrap' | 'none'; bin: string | null }
@@ -677,9 +678,19 @@ async function runDelegated($: EngineInterface, target: ProofWaiting, work: Proo
 
 /** What is waiting for this person's computer, without taking any of it. */
 export async function waitingProofs($: EngineInterface): Promise<{ ok: true; waiting: ProofWaiting[] } | { ok: false; message: string }> {
-  const peeked = await call<{ waiting?: ProofWaiting[] }>($, 'claim_proof', { peek: true })
+  const capability = capabilityOf((await findSandbox($)).kind)
+  const args = capability ? {peek:true, native_witness:capability} : {peek:true}
+  let peeked = await call<{ waiting?: ProofWaiting[] }>($, 'claim_proof', args)
+  // Older servers may enforce their original closed schema. A read-only fallback preserves ordinary work.
+  if (!peeked.ok && capability && ['INVALID','INVALID_INPUT','INVALID_PARAMS'].includes(peeked.code)) {
+    peeked = await call<{ waiting?: ProofWaiting[] }>($, 'claim_proof', {peek:true})
+  }
   if (!peeked.ok) return { ok: false, message: peeked.message }
-  return { ok: true, waiting: peeked.data.waiting ?? [] }
+  const waiting = peeked.data.waiting ?? []
+  if (waiting.some(item=>item.witness_executor !== undefined) && (!capability || !await canObserveLockedWitness($,capability))) {
+    return {ok:true,waiting:waiting.filter(item=>item.witness_executor===undefined)}
+  }
+  return { ok: true, waiting }
 }
 
 /** One line per step, for the person and for the model: what CodeBook recorded, in its words. */
@@ -726,6 +737,32 @@ export async function runProof($: EngineInterface, { proof = null, known = [], h
   const placed = await proofFolder($, { repository: target.repository, known, hint: asked, commit: target.commit, proof: target.proof })
   if ('refused' in placed) return { isRun: false, text: placed.refused }
   const dir = placed.dir
+
+  if (target.witness_executor !== undefined) {
+    const capability = capabilityOf((await findSandbox($)).kind)
+    if (!capability || target.witness_executor !== 'locked-dependencies-v1-'+capability.platform ||
+        !FULL_COMMIT.test(target.commit ?? '') || target.commands.length !== 1) {
+      return {isRun:false,text:'This proof is waiting for its selected native witness and sandbox.'}
+    }
+    if (authorized && !await authorized()) return {isRun:false,text:'The recovery route changed before the proof claim.'}
+    const claimed = await call<ProofWork>($,'claim_proof',{proof:target.proof,native_witness:capability})
+    if (!claimed.ok) return {isRun:false,text:claimed.message}
+    const work = claimed.data, step = work.steps?.[0], selection = step?.native_witness
+    if (!step || work.proof !== target.proof || work.proof_scope !== 'focused' || !work.token || !work.report_url ||
+        work.steps?.length !== 1 || work.repository?.full_name !== target.repository || work.expected_commit !== target.commit ||
+        !lockedSelection(selection,capability,target.proof,work.repository.id,target.commit!) ||
+        step.name !== target.commands[0] || step.run !== target.proof || step.baseline !== false || step.line !== undefined ||
+        step.case_report || step.delegated_focused || work.recipe?.network !== 'loopback' || work.recipe?.install ||
+        !Number.isSafeInteger(step.timeout_seconds) || step.timeout_seconds < 10) {
+      return {isRun:false,text:'The claimed fixture selection does not match the waiting native proof.'}
+    }
+    let cases = null
+    try { cases = await observeLockedWitness($,dir,selection,Math.min(step.timeout_seconds,120)) } catch { /* An incomplete witness cannot earn credit. */ }
+    const sent = await report($,work,cases ? {run:step.run,commit:selection.commit,dirty:false,sandbox:selection.sandbox,
+      exit_code:0,native_witness:{selection,cases}} : {run:step.run,error:'The fixed native fixture did not complete both observations.'})
+    return {isRun:true,text:sent.ok && cases && sent.status === 'passed' ? 'The installed native witness recorded both dependency cases at '+selection.commit+'.' :
+      (sent.message ?? 'The fixed native dependency witness has incomplete evidence.')}
+  }
 
   if (delegated && delegatedSandbox) {
     let scratch: string | undefined
@@ -780,6 +817,7 @@ export async function runProof($: EngineInterface, { proof = null, known = [], h
       || work.steps.some(s => !s.baseline && s.name !== 'test'))) {
     return {isRun:false, text:"The proof claim no longer matches the recovery target."}
   }
+  if (work.steps.some(step => step.native_witness !== undefined)) return {isRun:false,text:'The typed witness requires the matching native selection.'}
   if (work.steps.some(step => step.delegated_focused !== undefined && step.delegated_focused !== false)) {
     return runDelegated($, target, work, dir, {kind:'none', bin:null})
   }

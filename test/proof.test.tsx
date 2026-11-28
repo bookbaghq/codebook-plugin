@@ -13,6 +13,7 @@ type World = {
   /** What each recipe line exits with and prints, by the folder it ran in ("head" or "baseline"). */
   results: Record<string, { exit: number; output: string }>
   collector?: { tree?: string; physical?: string; untracked?: string }
+  witness?: { platform?: string; hostReady?: boolean; output?: string; legacy?: boolean }
   indexListing?: string
   delegated?: boolean
   claimedHead?: string
@@ -62,6 +63,10 @@ function world(on: On, w: World) {
     const argv = [...e.argv]
     processes.push(argv)
     const joined = argv.join(' ')
+    if (w.witness && argv[0] === '/usr/bin/python3') {
+      if (argv.at(-1)==='probe') return out(w.witness.hostReady===false ? '' : 'ready') as never
+      return out(w.witness.output ?? '') as never
+    }
     if (w.delegated && argv[0] === '/usr/bin/mktemp') return out('/tmp/codebook-delegated-fixture\n') as never
     if (w.delegated && argv[0] === 'realpath') return out(argv[1]+'\n') as never
     if (w.delegated && argv[0] === 'git' && (argv.includes('--absolute-git-dir') || argv.includes('--git-common-dir'))) return out(DIR+'/.git\n') as never
@@ -137,8 +142,8 @@ function world(on: On, w: World) {
   const answer = (tool: string, args: Record<string, unknown>) =>
     tool === 'claim_proof'
       ? args.peek
-        ? { waiting: w.waiting === false ? [] : [{ proof: 70, ...(w.collector ? {case_report_version:1} : {}), ...(w.delegated ? {delegated_focused_version:1} : {}), repository: 'acme/payments', default_branch: 'main', commands: w.delegated ? steps.map(step => (step as {name:string}).name) : ['test'], commit: w.commit ?? null }] }
-        : { proof: 70, token: TOKEN, report_url: REPORT, report_path: '/kanban/api/proof/report', repository: { id: 5, full_name: 'acme/payments', default_branch: 'main' }, proof_scope: w.delegated ? 'focused' : 'repository_recipe', expected_commit: w.claimedHead ?? (w.collector || w.delegated ? HEAD : null), recipe: { revision: 2, install: 'npm ci', network: 'loopback', ...(w.recipe ?? {}) }, steps }
+        ? { waiting: w.waiting === false ? [] : [{ proof: 70, ...(w.witness&&!w.witness.legacy ? {witness_executor:'locked-dependencies-v1-'+(w.witness.platform??'darwin')} : {}), ...(w.collector ? {case_report_version:1} : {}), ...(w.delegated ? {delegated_focused_version:1} : {}), repository: 'acme/payments', default_branch: 'main', commands: w.delegated ? steps.map(step => (step as {name:string}).name) : ['test'], commit: w.commit ?? null }] }
+        : { proof: 70, token: TOKEN, report_url: REPORT, report_path: '/kanban/api/proof/report', repository: { id: 5, full_name: 'acme/payments', default_branch: 'main' }, proof_scope: w.delegated || (w.witness && !w.witness.legacy) ? 'focused' : 'repository_recipe', expected_commit: w.claimedHead ?? (w.collector || w.delegated || w.witness ? HEAD : null), recipe: { revision: 2, install: 'npm ci', network: 'loopback', ...(w.recipe ?? {}) }, steps }
       : tool === 'request_proof'
         ? { proof: 70, where: 'here', repository: 'acme/payments', commands: [{ name: 'test', status: 'queued' }] }
         : tool === 'claim_work'
@@ -148,6 +153,8 @@ function world(on: On, w: World) {
             : { ok: true }
   on('mcp.call', (_, e) => {
     mcp.push({ tool: e.tool, args: e.args ?? {} })
+    if (w.witness?.legacy && e.args?.peek && e.args?.native_witness) return {value:{
+      content:[],structuredContent:{error:{code:'INVALID_INPUT',message:'unknown native_witness'}},isError:true}} as never
     const data = answer(e.tool, e.args ?? {})
     return { value: { content: [{ type: 'text', text: JSON.stringify(data) }], structuredContent: data, isError: false } }
   })
@@ -581,4 +588,54 @@ test('P1: a commit CodeBook names that no folder has checked out is never run in
   expect(ranIn(none)).toEqual([])
   expect(String(refused.text)).toContain('no checkout or worktree of it on this computer has that commit checked out')
   expect(none.reports.length).toBe(0)
+})
+
+const fixedSelection = {fixture:'locked-dependencies',version:1,producer:'codebook-native-locked-dependencies',producer_version:1,
+  platform:'darwin',sandbox:'seatbelt',proof:70,run:70,repository_id:5,commit:HEAD,definition:12,revision:1,selection:'e'.repeat(64)}
+const fixedStep = {run:70,name:'test',timeout_seconds:120,baseline:false,native_witness:fixedSelection}
+const fixedWorld = ():World=>({commit:HEAD,recipe:{install:'',network:'loopback'},steps:[fixedStep],results:{},
+  witness:{output:JSON.stringify({verified_offline_dependency:'passed',parked_dependency_proof:'passed'})}})
+
+test('typed witness dispatch keeps the real report token outside the fixture process', async ($, on)=>{
+  const testbed = world(on,fixedWorld())
+  await $.tool.call({tool:OWN+'request_proof',story:'story'} as never)
+  expect(testbed.mcp.filter(c=>c.tool==='claim_proof').at(-1)?.args).toEqual({proof:70,native_witness:{version:1,platform:'darwin',sandbox:'seatbelt'}})
+  const actual=testbed.processes.filter(argv=>argv[0]==='/usr/bin/python3' && argv.at(-1)!=='probe')
+  expect(actual.length).toBe(1)
+  expect(actual[0].includes(TOKEN)).toBe(false)
+  expect(testbed.reports[0].auth).toBe('Bearer '+TOKEN)
+  expect(testbed.reports[0].body.native_witness).toEqual({selection:fixedSelection,cases:[
+    {id:'verified_offline_dependency',status:'passed'},{id:'parked_dependency_proof',status:'passed'}]})
+})
+
+test('incomplete observations and changed selections cannot report witness cases', async ($, on)=>{
+  const spec=fixedWorld()
+  spec.witness!.output='{"verified_offline_dependency":"passed"}'
+  const testbed=world(on,spec)
+  const run=()=>$.tool.call({tool:OWN+'request_proof',story:'story'} as never)
+  await run()
+  expect(testbed.reports[0].body.native_witness).toBeUndefined()
+  expect(testbed.reports[0].body.error).toContain('did not complete')
+  spec.steps![0]={...fixedStep,native_witness:{...fixedSelection,commit:BASE}}
+  await run()
+  spec.steps![0]={...fixedStep,line:'node unexpected.mjs'}
+  await run()
+  expect(testbed.processes.filter(argv=>argv[0]==='/usr/bin/python3'&&argv.at(-1)!=='probe').length).toBe(1)
+  expect(testbed.reports.length).toBe(1)
+})
+
+test('an unavailable witness host leaves its selection queued',async ($,on)=>{
+  const spec=fixedWorld();spec.witness!.hostReady=false
+  const testbed=world(on,spec)
+  await $.tool.call({tool:OWN+'request_proof',story:'story'} as never)
+  expect(testbed.mcp.filter(c=>c.tool==='claim_proof'&&!c.args.peek).length).toBe(0)
+  expect(testbed.reports.length).toBe(0)
+})
+
+test('older proof servers use their ordinary read-only queue after a capability refusal',async ($,on)=>{
+  const testbed=world(on,{witness:{legacy:true},results:{'head:npm test':{exit:0,output:'PASS ordinary'}}})
+  await $.tool.call({tool:OWN+'request_proof',story:'story'} as never)
+  expect(testbed.mcp.filter(c=>c.tool==='claim_proof'&&c.args.peek).at(-1)?.args).toEqual({peek:true})
+  expect(testbed.reports.length).toBe(1)
+  expect(testbed.reports[0].body.native_witness).toBeUndefined()
 })

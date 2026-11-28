@@ -123,7 +123,7 @@ type WireEvent = {
 /** A question as CodeBook sends it: its text, or an object carrying the text (and maybe likely answers). */
 type WireQuestion =
   | string
-  | { text?: string; question?: string | number; asked?: string; tools?: string[]; choices?: string[] | null; on_you?: boolean; run?: number | null; for?: string; decided_by?: string }
+  | { delivery?: string; text?: string; question?: string | number; asked?: string; tools?: string[]; choices?: string[] | null; on_you?: boolean; run?: number | null; for?: string; decided_by?: string }
   | null
 type Lease = { fence: number; expires_at?: string; expired?: boolean }
 type RunLocation = {
@@ -148,6 +148,7 @@ export type Status = {
         on: 'person' | 'outside_agent' | 'runner' | 'review'
         run: number
         on_you?: boolean
+        delivery?: string
         tools?: string[]
         claimed?: boolean
         claimed_by_you?: boolean
@@ -317,12 +318,14 @@ function questionOf(q: WireQuestion | undefined, personalWait: boolean): { text:
  * text when it is one. A question (a request_person wait's `waiting.question`, or `question` from ask_person or an
  * escalation) comes before an approval or a review. Null when nothing waits on this person.
  */
-export function waitOf(s: Status): { key: string; prompt: string; question: string | null } | null {
+export function waitOf(s: Status, includeBoardOnly = false): { key: string; prompt: string; question: string | null } | null {
   const w = s.waiting
   const station = s.station?.name ?? null
   const personalWait = w?.on_you === true && (w.on === 'person' || w.on === 'review')
-  const nested = questionOf(w?.question, personalWait)
-  const top = questionOf(s.question, false)
+  const nestedBoard = w?.delivery === 'board_only' || (typeof w?.question === 'object' && w.question?.delivery === 'board_only')
+  const topBoard = typeof s.question === 'object' && s.question?.delivery === 'board_only'
+  const nested = (includeBoardOnly || !nestedBoard) ? questionOf(w?.question, personalWait) : null
+  const top = (includeBoardOnly || !topBoard) ? questionOf(s.question, false) : null
   const fromRun = personalWait && nested?.onYou === true
   const q = fromRun ? nested : top
   if (q?.onYou) {
@@ -335,7 +338,7 @@ export function waitOf(s: Status): { key: string; prompt: string; question: stri
       question: q.text,
     }
   }
-  if (!personalWait || nested) return null
+  if (!personalWait || nested || (!includeBoardOnly && nestedBoard)) return null
   return { key: `${w.on}|${w.run}`, prompt: waitingPrompt(s.story.reference, station, w.on), question: null }
 }
 
@@ -348,7 +351,7 @@ async function confirmedStatus($: EngineInterface, s: Status): Promise<Status | 
   const run = w?.on === 'person' && w.on_you && typeof w.question === 'string' && Array.isArray(w.tools) ? w : null
   if (!decision && !run) return s
   const needsOwner = run?.tools?.includes('answer_question') || decision?.tools?.includes('answer_question')
-  type Item = { kind?: string; for?: string; on_you?: boolean; story?: {story?: string}; question_id?: number; run?: number | null; question?: string }
+  type Item = { delivery?: string; kind?: string; for?: string; on_you?: boolean; story?: {story?: string}; question_id?: number; run?: number | null; question?: string }
   const result = needsOwner ? await call<{items?: Item[]}>($, 'needs_you', {factory: s.factory.factory, view: 'person'}) : null
   if (needsOwner && !result?.ok) {
     if (pendingAsks.has(s.story.story)) pendingAsks.set(s.story.story, null)
@@ -356,12 +359,15 @@ async function confirmedStatus($: EngineInterface, s: Status): Promise<Status | 
   }
   const items = result?.ok ? result.data.items ?? [] : []
   const mine = (id: string | number | undefined, runId: number | null, text: string | undefined) =>
-    items.some(i => i.kind === 'question' && i.for === 'person' && i.on_you === true && i.story?.story === s.story.story &&
+    items.find(i => i.kind === 'question' && i.for === 'person' && i.on_you === true && i.story?.story === s.story.story &&
       i.question_id === id && (i.run ?? null) === runId && i.question === text)
+  const latestDelivery = (item?: Item | null) => item?.delivery === 'chat' || item?.delivery === 'board_only' ? {delivery:item.delivery} : {}
+  const runItem = run && mine(run.run, run.run, run.question as string)
+  const decisionItem = decision && mine(decision.question, null, decision.asked)
   return {
     ...s,
-    ...(run && {waiting: {...run, on_you: Boolean(run.tools?.includes('answer_question')) && mine(run.run, run.run, run.question as string)}}),
-    ...(decision && {question: {...decision, on_you: decision.on_you !== false && Boolean(decision.tools?.includes('answer_question')) && mine(decision.question, null, decision.asked)}}),
+    ...(run && {waiting: {...run, ...latestDelivery(runItem), on_you: !!runItem && Boolean(run.tools?.includes('answer_question'))}}),
+    ...(decision && {question: {...decision, ...latestDelivery(decisionItem), on_you: !!decisionItem && decision.on_you !== false && Boolean(decision.tools?.includes('answer_question'))}}),
   }
 }
 
@@ -369,22 +375,41 @@ async function confirmedStatus($: EngineInterface, s: Status): Promise<Status | 
 // CodeBook calls, where submitting would wait on the turn that hook holds. Never submit from a tool.call hook.
 // null parks an undelivered prompt until its owner can be confirmed again.
 const pendingAsks = new Map<string, string | null>()
+let sendingAsks = false
+let retryAsksAfter = 0
 
 function askOnce(storyId: string, beforeKey: string | null, wait: { key: string; prompt: string } | null): void {
   if (wait === null) pendingAsks.delete(storyId)
-  else if (wait.key !== beforeKey || pendingAsks.has(storyId)) pendingAsks.set(storyId, wait.prompt)
+  else if (wait.key !== beforeKey || pendingAsks.has(storyId)) pendingAsks.set(storyId, wait.key)
 }
 
-/** Sends the queued asks, if any, as one prompt: from the poll timer (every second), never from inside a tool call. */
-export function flushAsk($: EngineInterface): void {
-  if (stopping || pendingAsks.size === 0) return
-  const ready: string[] = []
-  for (const [story, prompt] of pendingAsks) {
-    if (prompt === null) continue
-    ready.push(prompt)
-    pendingAsks.delete(story)
-  }
-  if (ready.length) void $.prompt.submit({ text: ready.join('\n\n') })
+/** A queued question may have been answered or moved to board-only delivery before the next timer tick. */
+export async function flushAsk($: EngineInterface): Promise<void> {
+  if (stopping || sendingAsks || !pendingAsks.size) return
+  sendingAsks = true
+  try {
+    const now = await $.clock.now()
+    if (retryAsksAfter > now) return
+    const ready: string[] = []
+    const generation = await continuationGeneration($)
+    const candidates = [...pendingAsks].filter(([, key]) => key !== null).slice(0, 2)
+    for (const [story, key] of candidates) {
+      const got = await call<Status>($, 'story_status', {story, limit: 1})
+      if (!got.ok) {
+        if (pendingAsks.get(story) === key) { pendingAsks.delete(story); pendingAsks.set(story, key) }
+        retryAsksAfter = now + 4000
+        continue
+      }
+      if (got.data.story.story !== story) { pendingAsks.delete(story); continue }
+      const current = await confirmedStatus($, got.data)
+      if (!await continuationCurrent($, generation)) return
+      if (!current || pendingAsks.get(story) !== key) continue
+      const wait = waitOf(current)
+      pendingAsks.delete(story)
+      if (wait?.key === key) ready.push(wait.prompt)
+    }
+    if (ready.length && !stopping) await $.prompt.submit({ text: ready.join('\n\n') })
+  } finally { sendingAsks = false }
 }
 
 /** The chat line for an event of the followed story (G5b's who/where), or null for one not worth a line. */
@@ -493,7 +518,7 @@ export async function refresh($: EngineInterface, generation?: number): Promise<
     })),
     onApprove: typeof w?.on_approve?.sentence === 'string' ? w.on_approve.sentence : null,
     leftForPerson: s.done?.needs_person === true && typeof s.done.sentence === 'string' ? s.done.sentence : null,
-    question: wait?.question ?? null,
+    question: waitOf(s, true)?.question ?? null,
     waitKey: wait?.key ?? null,
     lastEvent: s.last_event ?? before?.lastEvent ?? null,
     checkedAt: await $.clock.now(),
@@ -509,7 +534,7 @@ export async function refresh($: EngineInterface, generation?: number): Promise<
         if (line) $.ui.log(`CodeBook: ${line}`)
       }
       if (next.leftForPerson && !before.leftForPerson) $.ui.log(`CodeBook: ${s.story.reference} is done, but ${next.leftForPerson}`)
-      if (next.question !== null && next.waitKey !== before.waitKey) {
+      if (next.question !== null && next.waitKey !== null && next.waitKey !== before.waitKey) {
         $.ui.log(`CodeBook: ${s.story.reference} asks you: "${next.question}"`)
       }
     }
@@ -634,6 +659,7 @@ export async function follow($: EngineInterface, a: CodebookActive, generation: 
 export async function unfollow($: EngineInterface): Promise<void> {
   stopping++
   pendingAsks.clear()
+  retryAsksAfter = 0
   try {
     await stopContinuation($)
     await changeOwnership($, await continuationGeneration($), async () => {

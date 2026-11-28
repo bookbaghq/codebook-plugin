@@ -462,6 +462,8 @@ On your computer that program is this plugin.
 | `hooks/` | The Factory pane, `/factory` and the repository guard (a Claude Code hooks module): `register.tsx`, `pane.tsx`, `factory.ts`, `connector.ts`, `guard.ts`, `resolve.ts` (what git and gh decide for a push), `checkout.ts` (a checkout that knows its factory: the lookup, the note for the session and the question before a push), `local.ts` (the checkouts `/factory status` shows), and `art.ts` (the illustrations, small WebP). |
 | `skills/factory-manager/` | The manager skill Run here follows: the code on your computer, stories, "proceed?", stations, what it decides and the six things it asks a person, taking the next story, narration. |
 | `agents/factory-worker.md` | The sub-agent that works one station run here as that station's agent, testing on a local copy of the app it builds itself. |
+| `test/typecheck.mjs` | Runs TypeScript 5.6.3 over `hooks/`, `types/` and `test/` with `tsconfig.json` against the `claude-code` declarations of the Claude Code installed here, and fails on any error. |
+| `tsconfig.json` | The type-check options the `claude-code` declarations give a hooks module. |
 | `test/rule-texts.mjs` | Checks, with plain Node, that the skill and the agent carry CodeBook's rule sentences word for word, and that nothing tells the manager to ask about a split, an order or a retry. |
 | `hooks/proof.ts` | Proof runs: the repository's checks, run here boxed and reported by the plugin itself. |
 | `hooks/egress.ts` | A proof run's list of allowed hosts: reading the list, and the filtering proxy and forwarder that enforce it. |
@@ -473,13 +475,16 @@ On your computer that program is this plugin.
 
 ```bash
 claude plugin validate .
-claude plugin test .
+node scripts/test-factory.mjs --typecheck
 node --test test/rule-texts.mjs
 claude --plugin-dir .
 ```
 
-`claude plugin test` loads code files only, so the checks on what the skill and the agent say (`test/rule-texts.mjs`)
-run with Node.
+The local test command type-checks the plugin before running its native tests. Run the type check on its own with
+`node --test test/typecheck.mjs`, or put specific native test files after `--typecheck` to run those with it.
+The check uses Claude Code declarations from its plugin-authoring skill or a `claude-code.d.ts` selected through
+`CLAUDE_CODE_TYPES`. It reports which declarations it used, including when it falls back to the newest cached version,
+or where it looked if none were found.
 
 `scripts/art.sh <folder of PNGs>` rebuilds `hooks/art.ts` from the illustrations.
 
