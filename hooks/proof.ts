@@ -36,7 +36,9 @@ export const SECRET_FOLDERS = ['.ssh', '.aws', '.gnupg', '.kube', '.docker', '.c
 export const SECRET_FILES = ['.netrc', '.npmrc', '.pypirc', '.git-credentials']
 
 type CaseReport = { version: 1; directory: string; definition: number; revision: number; hash: string }
-export type ProofStep = { delegated_focused?: boolean; case_report?: CaseReport; run: number; name: string; line: string; timeout_seconds: number; baseline: boolean; for_run?: number; ref?: string; commit?: string }
+type BillingProduct = { product: string; repository: string; ref: string; commit: string; origin: string }
+type BillingPlan = { fixture_profile: string; definition: string; path: string; products: BillingProduct[] }
+export type ProofStep = { signed_in_billing?: BillingPlan; delegated_focused?: boolean; case_report?: CaseReport; run: number; name: string; line: string; timeout_seconds: number; baseline: boolean; for_run?: number; ref?: string; commit?: string }
 export type ProofWork = {
   proof: number | null
   token?: string
@@ -52,7 +54,7 @@ export type ProofWork = {
  * (today's CodeBook queues a model's request_proof with none). `run`, `branch` and `worktree` are what a newer CodeBook
  * may send of the run that asked (its declare_work); the plugin reads them when they are there.
  */
-export type ProofWaiting = { delegated_focused_version?: number; case_report_version?: number; proof: number; repository: string; commands: string[]; commit: string | null; default_branch?: string; run?: number | null; branch?: string | null; worktree?: string | null }
+export type ProofWaiting = { signed_in_billing_version?: number; delegated_focused_version?: number; case_report_version?: number; proof: number; repository: string; commands: string[]; commit: string | null; default_branch?: string; run?: number | null; branch?: string | null; worktree?: string | null }
 /** What this session knows of the run that asked for a proof: its worktree and branch (declare_work), the story's key and branch (its brief). */
 export type ProofHint = { run: number | null; worktree?: string; branch?: string; key?: string }
 export type Sandbox = { kind: 'seatbelt' | 'bubblewrap' | 'none'; bin: string | null }
@@ -565,7 +567,10 @@ async function runDelegated($: EngineInterface, target: ProofWaiting, work: Proo
 
 /** What is waiting for this person's computer, without taking any of it. */
 export async function waitingProofs($: EngineInterface): Promise<{ ok: true; waiting: ProofWaiting[] } | { ok: false; message: string }> {
-  const peeked = await call<{ waiting?: ProofWaiting[] }>($, 'claim_proof', { peek: true })
+  let peeked = await call<{ waiting?: ProofWaiting[] }>($, 'claim_proof', { peek: true, signed_in_billing_version: 1 })
+  if (!peeked.ok && /unknown|unexpected|unrecognized/i.test(peeked.message)) {
+    peeked = await call<{ waiting?: ProofWaiting[] }>($, 'claim_proof', { peek: true })
+  }
   if (!peeked.ok) return { ok: false, message: peeked.message }
   return { ok: true, waiting: peeked.data.waiting ?? [] }
 }
@@ -598,6 +603,40 @@ export async function runProof($: EngineInterface, { proof = null, known = [], h
 
   if (expected && (target.repository !== expected.repository || target.commit !== expected.commit || target.commands.length !== 1 || target.commands[0] !== 'test')) {
     return {isRun:false, text:`Proof ${proof} is waiting for a matching own-test, repository and exact commit.`}
+  }
+  if (target.signed_in_billing_version !== undefined) {
+    if (expected || target.signed_in_billing_version !== 1 || target.commands.length !== 1 ||
+        target.commands[0] !== 'signed_in_billing' || !FULL_COMMIT.test(target.commit ?? '')) {
+      return {isRun:false, text:'The signed-in billing proof requires its supported native profile.'}
+    }
+    if (authorized && !await authorized()) return {isRun:false,text:'The proof route changed before the browser claim.'}
+    const claimed = await call<ProofWork>($, 'claim_proof', {proof:target.proof, signed_in_billing_version:1})
+    if (!claimed.ok) return {isRun:false,text:claimed.message}
+    const work = claimed.data
+    const step = work.steps?.[0]
+    const plan = step?.signed_in_billing
+    if (work.proof !== target.proof || work.proof_scope !== 'signed_in_billing_v1' || !work.token || !work.report_url ||
+        work.steps?.length !== 1 || step?.name !== 'signed_in_billing' || !plan || !Array.isArray(plan.products) ||
+        plan.products.length !== 2 || work.repository?.full_name !== target.repository || work.expected_commit !== target.commit ||
+        !plan.products.some(p => p.repository === target.repository && p.commit === target.commit)) {
+      return {isRun:false,text:'The signed-in billing claim no longer matches its approved source.'}
+    }
+    let result: Record<string, unknown> = {fixture_profile:plan.fixture_profile,definition:plan.definition,unavailable:'fixture_unavailable'}
+    if (plan.fixture_profile === 'synthetic_billing_v1') {
+      const directories = await Promise.all(plan.products.map(p => checkoutFor($, p.repository, known)))
+      try {
+        const child = $.process.spawn({argv:['/usr/bin/env','-i','PATH=/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin',
+          'node', `${$.plugin.root}/scripts/signed-billing.mjs`, JSON.stringify({plan,directories})]})
+        let output = ''
+        for await (const chunk of child) {
+          if (chunk.stream === 'stdout') output += chunk.text
+          if (output.length > 16384) throw Error('Oversized receipt')
+        }
+        result = JSON.parse(output)
+      } catch { result.unavailable = 'capture_failed' }
+    }
+    const sent = await report($,work,{...result,run:step.run})
+    return {isRun:true,text:sent.ok ? `Signed-in billing proof ${target.proof}: ${sent.status}.` : 'The billing receipt could not be recorded.'}
   }
   const delegated = target.delegated_focused_version !== undefined
   const delegatedSandbox = delegated ? await findSandbox($) : null
