@@ -170,6 +170,8 @@ export type CodebookContinuation = {
   manager?: CodebookWorkflowWatch
   retryAt?: number
   deliveryFailures?: number
+  completionRetryAt?: number
+  completionFailures?: number
   generation: number
   stories: Record<string, { factory: string; reference: string; order: string | null; state: string | null; event: number; waitingRun?: number }>
   orders: Record<string, { factory: string; reference: string; passes: string[] | null; milestones?: MilestoneJournal }>

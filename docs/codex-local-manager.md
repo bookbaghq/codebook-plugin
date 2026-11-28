@@ -1,5 +1,7 @@
 # Codex local factory manager
 
+When an owned story or pull request finishes, tell the person which one and what passed as soon as the result is available. Identify any outstanding proof or review and continue other eligible work. Before starting dependent work, check its current prerequisites, approvals and ownership in CodeBook.
+
 The **Agent approval requests in chat** setting in **Factory settings → Controls** applies to each factory. CodeBook returns `board_only` for optional capability requests that belong on the board. The local manager continues other eligible work and surfaces the details when asked. Choose **Keep these requests on the board** for that factory. The default is **Ask**. Unknown settings, required person approvals and reserved decisions retain their usual delivery.
 
 
